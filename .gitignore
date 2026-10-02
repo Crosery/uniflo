@@ -1,0 +1,15 @@
+# >>> Comet managed project state >>>
+!/.comet/
+/.comet/*
+!/.comet/config.yaml
+# <<< Comet managed project state <<<
+# >>> comet 本机产物（project-norms）>>>
+/.agents/skills/comet*/
+/.claude/skills/comet*/
+/.claude/rules/comet-*.md
+/.codex/rules/comet-*.md
+/.codex/hooks.json
+# <<< comet 本机产物 <<<
+
+# build output
+/target

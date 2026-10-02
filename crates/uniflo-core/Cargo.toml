@@ -1,0 +1,24 @@
+[package]
+name = "uniflo-core"
+description = "Uniflo engine: adapter contract, incremental readers, status machine, live index and event bus"
+version.workspace = true
+edition = "2024"
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+uniflo-schema.workspace = true
+anyhow.workspace = true
+chrono.workspace = true
+dirs.workspace = true
+libc.workspace = true
+memchr.workspace = true
+notify.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }

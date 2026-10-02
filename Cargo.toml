@@ -1,0 +1,40 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+license = "MIT"
+repository = "https://github.com/Crosery/uniflo"
+rust-version = "1.88"
+
+[workspace.dependencies]
+uniflo-schema = { path = "crates/uniflo-schema" }
+uniflo-core = { path = "crates/uniflo-core" }
+uniflo-search = { path = "crates/uniflo-search" }
+uniflo-adapters = { path = "crates/uniflo-adapters", default-features = false }
+uniflo-gateway = { path = "crates/uniflo-gateway" }
+
+anyhow = "1"
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio", "ws"] }
+chrono = { version = "0.4", default-features = false, features = ["std", "alloc", "clock"] }
+clap = { version = "4", features = ["derive", "env"] }
+dirs = "6"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+libc = "0.2"
+memchr = "2"
+notify = { version = "8", default-features = false, features = ["macos_fsevent"] }
+nucleo-matcher = "0.3"
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "signal"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 4
+strip = true

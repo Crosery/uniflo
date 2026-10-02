@@ -1,0 +1,33 @@
+[package]
+name = "uniflo-adapters"
+description = "Uniflo harness adapters (one module per agent harness, each behind a cargo feature)"
+version.workspace = true
+edition = "2024"
+license.workspace = true
+rust-version.workspace = true
+
+[features]
+default = ["claude", "codex", "pi", "gemini", "antigravity", "opencode", "workbuddy", "hermes", "minimax", "factory", "reasonix", "cursor"]
+claude = []
+codex = []
+pi = []
+gemini = []
+antigravity = []
+opencode = ["dep:rusqlite"]
+workbuddy = []
+hermes = ["dep:rusqlite"]
+minimax = ["dep:rusqlite"]
+factory = []
+reasonix = []
+cursor = []
+
+[dependencies]
+uniflo-core.workspace = true
+uniflo-schema.workspace = true
+anyhow.workspace = true
+rusqlite = { workspace = true, optional = true }
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

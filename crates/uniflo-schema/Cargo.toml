@@ -1,0 +1,11 @@
+[package]
+name = "uniflo-schema"
+description = "Uniflo wire schema: normalized sessions, events and stream envelopes"
+version.workspace = true
+edition = "2024"
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true

@@ -1,0 +1,73 @@
+# 网关 API
+
+> `uniflo daemon` 暴露的 HTTP 接口：REST 拿快照，SSE / NDJSON / WebSocket 拿实时流。数据格式见 `docs/schema.md`。
+
+状态：`current` · 更新：2026-10-02
+
+默认地址 `http://127.0.0.1:7311`。只支持 `GET`（和 CORS 预检 `OPTIONS`）。所有成功响应带 `x-uniflo-seq` 头：响应生成时的最新 `seq`，可作为随后订阅的 `since`。
+
+## REST
+
+| 路径 | 参数 | 返回 |
+|---|---|---|
+| `GET /` | — | 名称、版本、schema 版本、端点列表 |
+| `GET /demo` | 页面参数见 `examples/web/index.html` 头注释 | 内置网页演示（单文件，零依赖） |
+| `GET /v1/health` | — | `{ok, version, schema, seq, sessions, working, uptime_ms}` |
+| `GET /v1/harnesses` | — | `Harness[]`：`{id, name, roots, sessions, working}` |
+| `GET /v1/stats` | — | 索引与读取计数：`sessions`、`sources`、`bad_lines`、`unknown`、`read_errors`、`index_ms`… |
+| `GET /v1/sessions` | `q` 查询（`docs/search.md`）、`limit`（默认 100）、`format=ndjson` | `Session[]`，有 `q` 时按相关度、否则按 `updated_at` 倒序 |
+| `GET /v1/sessions/{key}` | — | `Session`；未知 key 返回 404 |
+| `GET /v1/sessions/{key}/events` | `limit`（默认 200，最大 10000）、`before=<pos>`、`max_text`（默认 32768，0 不截断）、`format=ndjson` | `{session, events, next_before}`；`events` 按时间正序，翻更早一页传 `before=next_before`；`next_before` 为 `null` 当且仅当没有更早的事件 |
+
+`{key}` 需要 URL 编码（`claude%3A4f1c…`）。
+
+## 实时流
+
+三种传输共用同一组参数和同一份 `Envelope` 序列：
+
+| 路径 | 传输 |
+|---|---|
+| `GET /v1/stream` | SSE：`id` = `seq`，`event` = `type`，`data` = Envelope JSON；支持 `Last-Event-ID` |
+| `GET /v1/stream.ndjson` | 分块响应，每行一个 Envelope |
+| `GET /v1/ws` | WebSocket，每帧一个 Envelope 文本 |
+
+| 参数 | 说明 |
+|---|---|
+| `since=<seq>` | 先重放 `seq` 之后仍在重放环里的 Envelope；超出范围时先发 `lagged` |
+| `session=<key,…>` | 只要这些会话 |
+| `harness=<id,…>` | 只要这些 harness |
+| `types=session,event,removed` | 只要这些 Envelope 类型（`hello`、`lagged` 总会发送） |
+| `kinds=tool_call,assistant_message,…` | 只要这些事件 kind |
+| `max_text=<n>` | 事件文本截断长度，默认 32768，0 不截断 |
+
+推荐的客户端同步流程：
+
+1. `GET /v1/sessions?limit=…` 渲染列表，记下 `x-uniflo-seq` 为 `S`。
+2. 订阅 `/v1/stream?since=S`；`session` 按 key 替换，`event` 按 `(session, id)` upsert，`removed` 删除。
+3. 打开某个会话时 `GET …/events` 拿最近一页，再用 `session=<key>` 过滤的流或总流增量更新。
+4. 收到 `lagged`，或守护进程重启（`hello.seq` 小于已知 seq）时，回到第 1 步。
+
+## 安全
+
+| 规则 | 行为 |
+|---|---|
+| Host 校验 | 只接受 `localhost` / `127.0.0.1` / `::1` / `*.localhost`，以及 `--allow-host` 列出的值；否则 403（防 DNS rebinding） |
+| Origin 校验 | 带 `Origin` 的请求只放行回环来源和 `--cors-origin` 列出的来源（`*` 放行全部）；否则 403 |
+| Token | 配了 `--token` / `UNIFLO_TOKEN` 时，必须带 `Authorization: Bearer <token>` 或 `?token=<token>`（浏览器 EventSource/WebSocket 用后者）；否则 401 |
+| 只读 | 网关没有任何写接口，不会修改 harness 数据 |
+
+`--allow-host` 必须与 token 一起使用；对局域网暴露前确认用户授权。
+
+## 例子
+
+```sh
+curl -s localhost:7311/v1/sessions?q='s:work'
+curl -s "localhost:7311/v1/sessions/$(printf %s 'claude:4f1c' | jq -sRr @uri)/events?limit=50"
+curl -N localhost:7311/v1/stream.ndjson?kinds=tool_call,tool_result
+```
+
+```js
+const es = new EventSource("http://127.0.0.1:7311/v1/stream?since=" + seq);
+es.addEventListener("event", (m) => upsert(JSON.parse(m.data).event));
+es.addEventListener("session", (m) => replace(JSON.parse(m.data).session));
+```

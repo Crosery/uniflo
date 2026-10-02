@@ -1,0 +1,11 @@
+[package]
+name = "uniflo-search"
+description = "Uniflo session search: fd-style filters + fzf-style fuzzy ranking"
+version.workspace = true
+edition = "2024"
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+uniflo-schema.workspace = true
+nucleo-matcher.workspace = true
