@@ -14,12 +14,15 @@ step "clippy (deny warnings)"
 cargo clippy --workspace --all-targets -- -D warnings
 
 step "each adapter feature builds alone"
-features=$(sed -n 's/^default = \[\(.*\)\]/\1/p' crates/uniflo-adapters/Cargo.toml | tr -d '" ' | tr ',' ' ')
+features=$(sed -n '/^default = \[/,/\]/p' crates/uniflo-adapters/Cargo.toml | tr -d '[]" \t\n' | sed 's/^default=//' | tr ',' ' ')
 RUSTFLAGS="-D warnings" cargo check -q -p uniflo-adapters --all-targets --no-default-features
 for f in $features; do
   RUSTFLAGS="-D warnings" cargo check -q -p uniflo-adapters --all-targets --no-default-features --features "$f"
   printf '  %s ok\n' "$f"
 done
+
+step "branch invariants"
+node scripts/check-branch-invariants.mjs
 
 step "tests"
 cargo test --workspace -q

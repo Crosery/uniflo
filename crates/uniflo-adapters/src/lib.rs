@@ -9,6 +9,8 @@
 pub mod antigravity;
 #[cfg(feature = "claude")]
 pub mod claude;
+#[cfg(feature = "cline")]
+pub mod cline;
 #[cfg(feature = "codex")]
 pub mod codex;
 #[allow(dead_code, reason = "shared helpers; a single-adapter feature set uses only some")]
@@ -27,6 +29,8 @@ pub mod minimax;
 pub mod opencode;
 #[cfg(feature = "pi")]
 pub mod pi;
+#[cfg(feature = "prime")]
+pub mod prime;
 #[cfg(feature = "reasonix")]
 pub mod reasonix;
 #[cfg(any(feature = "opencode", feature = "hermes", feature = "minimax"))]
@@ -48,6 +52,10 @@ pub fn all() -> Vec<Arc<dyn Adapter>> {
     v.extend(codex::adapters());
     #[cfg(feature = "pi")]
     v.extend(pi::adapters());
+    #[cfg(feature = "prime")]
+    v.extend(prime::adapters());
+    #[cfg(feature = "cline")]
+    v.extend(cline::adapters());
     #[cfg(feature = "gemini")]
     v.extend(gemini::adapters());
     #[cfg(feature = "antigravity")]

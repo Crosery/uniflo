@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use uniflo_core::adapter::Batch;
 use uniflo_core::util::{file_mtime_ms, home, now_ms, str_of, string_of};
-use uniflo_core::{Adapter, Cursor, HarnessInfo, HistoryQuery, MetaPatch, ReadOutput, Record};
+use uniflo_core::{Adapter, Cursor, HarnessInfo, HistoryQuery, LiveSession, MetaPatch, ReadOutput, Record};
 use uniflo_schema::{Body, Event, Usage, session_key};
 
 /// Sessions updated this recently get their latest parts replayed in a summary (for status).
@@ -463,6 +463,65 @@ impl Adapter for OpenCode {
             Ok(st) => (st.wal_size, st.wal_mtime) != wal_sig(src),
             Err(_) => true,
         }
+    }
+
+    fn live(&self) -> Option<Vec<LiveSession>> {
+        if !self.db.is_file() {
+            return None;
+        }
+        let pred: fn(&str) -> bool = match self.info.id {
+            "kilo" => is_kilo,
+            "mimocode" => is_mimocode,
+            "zcode" => is_zcode,
+            _ => is_opencode,
+        };
+        let procs = uniflo_core::procs::list(pred, None);
+        if procs.is_empty() {
+            return Some(Vec::new());
+        }
+        let c = open_ro(&self.db).ok()?;
+        let mut out = Vec::new();
+        for p in procs {
+            let Some(cwd) = p.cwd.as_ref().and_then(|c| c.to_str()) else { continue };
+            let mut stmt =
+                c.prepare("SELECT id FROM session WHERE directory = ?1 ORDER BY time_updated DESC LIMIT 1").ok()?;
+            let sid: Option<String> = stmt.query_row([&cwd], |r| Ok(text(r, 0))).ok().flatten();
+            if let Some(id) = sid {
+                out.push(LiveSession { id, pid: p.pid, status: None });
+            }
+        }
+        Some(out)
+    }
+}
+
+fn is_kilo(args: &str) -> bool {
+    is_proc("kilo", args)
+}
+
+fn is_opencode(args: &str) -> bool {
+    is_proc("opencode", args)
+}
+
+fn is_mimocode(args: &str) -> bool {
+    is_proc("mimocode", args)
+}
+
+fn is_zcode(args: &str) -> bool {
+    is_proc("zcode", args)
+}
+
+fn is_proc(id: &str, args: &str) -> bool {
+    let mut it = args.split_whitespace();
+    let Some(first) = it.next() else { return false };
+    let base = first.rsplit('/').next().unwrap_or(first);
+    let target = if matches!(base, "bun" | "node" | "deno" | "tsx") { it.next().unwrap_or("") } else { first };
+    let target_base = target.rsplit('/').next().unwrap_or(target);
+    match id {
+        "kilo" => target_base == "kilo" || target_base == "kilocode",
+        "opencode" => target_base == "opencode",
+        "mimocode" => target_base == "mimocode",
+        "zcode" => target_base == "zcode",
+        _ => false,
     }
 }
 

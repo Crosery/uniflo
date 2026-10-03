@@ -16,7 +16,7 @@ Uniflo：本机常驻守护进程，持续读取所有 agent harness（Claude Co
 | 改搜索语法 | `docs/search.md` |
 | 改网页演示 | `examples/web/index.html`、`scripts/demo-e2e.mjs`、`docs/conventions/DEVELOPMENT.md#测试` |
 | 提交代码 | `docs/conventions/COMMITS.md` |
-| 分支、MR/PR、合并 | `docs/conventions/GIT.md` |
+| 分支、MR/PR、合并 | `docs/conventions/BRANCHING.md`、`docs/conventions/GIT.md` |
 | 写或改文档、ADR、worklog | `docs/conventions/DOCUMENTATION.md` |
 | 行为变更、缺陷、测试、交付证据 | `docs/conventions/TESTING.md` |
 | 较大需求（跨模块、要澄清、要分阶段验收） | 用 `/comet` 走 Native 流程；规范文档已接入它的项目知识检索 |

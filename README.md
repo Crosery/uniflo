@@ -19,7 +19,7 @@ Uniflo 只做这一层：
 
 ## 已支持的 harness
 
-Claude Code、Qoder、Qwen Work、Codex、Pi、oh-my-pi、Crosery Agent、Command Code、Gemini CLI、Antigravity、OpenCode、Kilo Code、ZCode、MiMo Code、WorkBuddy、MiniMax Code、Hermes、Factory Droid、Reasonix、Cursor Agent —— 共 20 个，存储位置与回合信号见 [`docs/adapters.md`](docs/adapters.md)。
+Claude Code、Qoder、Qwen Work、Codex、Pi、oh-my-pi、Crosery Agent、Command Code、Prime Agent、Cline、Roo Code、Kodu、Gemini CLI、Antigravity、OpenCode、Kilo Code、ZCode、MiMo Code、WorkBuddy、MiniMax Code、Hermes、Factory Droid、Reasonix、Cursor Agent —— 共 24 个，存储位置与回合信号见 [`docs/adapters.md`](docs/adapters.md)。
 
 ## 快速开始
 

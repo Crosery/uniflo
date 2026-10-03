@@ -16,12 +16,16 @@
 | `omp` | oh-my-pi | `~/.omp/agent/sessions/…` | 同 Pi | 同 Pi | `ps` + `lsof` |
 | `crosery` | Crosery Agent | `~/.crosery/agent-sessions` | 同 Pi | 同 Pi | — |
 | `commandcode` | Command Code | `~/.commandcode/projects` | 同 Pi（Anthropic 块） | 纯文本回复 | — |
+| `prime` | Prime Agent | `~/.prime/agent/sessions/<uuid>.jsonl` | 同 Pi（扁平根） | `stopReason` | `ps` + `lsof` |
+| `cline` | Cline | `~/Library/Application Support/{Code,Cursor,...}/User/globalStorage/saoudrizwan.claude-dev/tasks/<id>/ui_messages.json` | 完整 JSON 数组 | `completion_result` / `ask_followup` | — |
+| `roo` | Roo Code | `.../globalStorage/rooveterinaryinc.roo-cline/tasks/<id>/ui_messages.json` | 同 Cline | 同 Cline | — |
+| `kodu` | Kodu | `.../globalStorage/kodu-ai.kodu/tasks/<id>/ui_messages.json` | 同 Cline | 同 Cline | — |
 | `gemini` | Gemini CLI | `~/.gemini/tmp/<project>/chats/session-*.jsonl`（旧版 `.json`） | JSONL，消息原地重写 | 无工具调用的回复 | — |
 | `antigravity` | Antigravity | `~/.gemini/antigravity{,-cli}/brain/<id>/…/transcript.jsonl` | 步骤 JSONL | 无工具调用的规划步骤 `DONE` | — |
-| `opencode` | OpenCode | `~/.local/share/opencode/opencode.db` | SQLite | 助手消息完成且 `finish != tool-calls` | — |
-| `kilo` | Kilo Code | `~/.local/share/kilo/kilo.db` | 同 OpenCode | 同 OpenCode | — |
-| `zcode` | ZCode | `~/.zcode/cli/db/db.sqlite` | 同 OpenCode | 同 OpenCode | — |
-| `mimocode` | MiMo Code | `~/.local/share/mimocode/mimocode.db` | 同 OpenCode | 同 OpenCode | — |
+| `opencode` | OpenCode | `~/.local/share/opencode/opencode.db` | SQLite | 助手消息完成且 `finish != tool-calls` | `ps` + cwd 查询 |
+| `kilo` | Kilo Code | `~/.local/share/kilo/kilo.db` | 同 OpenCode | 同 OpenCode | `ps` + cwd 查询 |
+| `zcode` | ZCode | `~/.zcode/cli/db/db.sqlite` | 同 OpenCode | 同 OpenCode | `ps` + cwd 查询 |
+| `mimocode` | MiMo Code | `~/.local/share/mimocode/mimocode.db` | 同 OpenCode | 同 OpenCode | `ps` + cwd 查询 |
 | `workbuddy` | WorkBuddy | `~/.workbuddy/projects/<slug>/<id>.jsonl` | JSONL | 助手消息完成 | `~/.workbuddy/sessions/<pid>.json` |
 | `minimax` | MiniMax Code | `~/.minimax/v2/sqlite/runtime-state.sqlite` | SQLite | `turn_ingress` completed/failed/aborted | — |
 | `hermes` | Hermes | `~/.hermes/state.db` | SQLite | 终止型 `finish_reason` | — |
