@@ -21,12 +21,30 @@ Uniflo 只做这一层：
 
 Claude Code、Qoder、Qwen Work、Codex、Pi、oh-my-pi、Crosery Agent、Command Code、Prime Agent、Cline、Roo Code、Kodu、Gemini CLI、Antigravity、OpenCode、Kilo Code、ZCode、MiMo Code、WorkBuddy、MiniMax Code、Hermes、Factory Droid、Reasonix、Cursor Agent —— 共 24 个，存储位置与回合信号见 [`docs/adapters.md`](docs/adapters.md)。
 
-## 快速开始
+## 安装与快速开始
+
+### 安装
 
 ```sh
-cargo build --release
-./target/release/uniflo daemon            # 索引 + 网关，默认 http://127.0.0.1:7311
-open http://127.0.0.1:7311/demo           # 内置网页演示
+# 方式 1：通过 crates.io 安装
+cargo install uniflo
+
+# 方式 2：直接通过 GitHub 安装最新预发布版
+cargo install --git https://github.com/Crosery/uniflo.git uniflo
+
+# 方式 3：从源码安装
+git clone https://github.com/Crosery/uniflo.git && cd uniflo
+cargo install --path crates/uniflo-cli
+```
+
+### 启动服务
+
+```sh
+uniflo daemon                             # 前台启动网关，默认 http://127.0.0.1:7311
+open http://127.0.0.1:7311/demo           # 打开内置网页演示
+
+# macOS 可一键安装 launchd 后台常驻服务（登录自启、静默运行）
+scripts/install-service.sh
 ```
 
 CLI（有守护进程时连它，否则 `--local` 进程内索引）：

@@ -4,6 +4,8 @@ description = "Uniflo engine: adapter contract, incremental readers, status mach
 version.workspace = true
 edition = "2024"
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 rust-version.workspace = true
 
 [dependencies]

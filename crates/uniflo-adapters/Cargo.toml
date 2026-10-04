@@ -4,6 +4,8 @@ description = "Uniflo harness adapters (one module per agent harness, each behin
 version.workspace = true
 edition = "2024"
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 rust-version.workspace = true
 
 [features]

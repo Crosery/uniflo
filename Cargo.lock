@@ -1335,20 +1335,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c6f5d3c3b1bf09027a88a6bc961fc00497d651009560b5463668dc81b0fa87a8"
 
 [[package]]
-name = "uniflo-adapters"
-version = "0.1.1"
-dependencies = [
- "anyhow",
- "rusqlite",
- "serde",
- "serde_json",
- "tempfile",
- "uniflo-core",
- "uniflo-schema",
-]
-
-[[package]]
-name = "uniflo-cli"
+name = "uniflo"
 version = "0.1.1"
 dependencies = [
  "anyhow",
@@ -1365,6 +1352,19 @@ dependencies = [
  "uniflo-gateway",
  "uniflo-schema",
  "uniflo-search",
+]
+
+[[package]]
+name = "uniflo-adapters"
+version = "0.1.1"
+dependencies = [
+ "anyhow",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "uniflo-core",
+ "uniflo-schema",
 ]
 
 [[package]]

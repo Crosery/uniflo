@@ -6,14 +6,15 @@ members = ["crates/*"]
 version = "0.1.1"
 license = "MIT"
 repository = "https://github.com/Crosery/uniflo"
+homepage = "https://github.com/Crosery/uniflo"
 rust-version = "1.88"
 
 [workspace.dependencies]
-uniflo-schema = { path = "crates/uniflo-schema" }
-uniflo-core = { path = "crates/uniflo-core" }
-uniflo-search = { path = "crates/uniflo-search" }
-uniflo-adapters = { path = "crates/uniflo-adapters", default-features = false }
-uniflo-gateway = { path = "crates/uniflo-gateway" }
+uniflo-schema = { path = "crates/uniflo-schema", version = "0.1.1" }
+uniflo-core = { path = "crates/uniflo-core", version = "0.1.1" }
+uniflo-search = { path = "crates/uniflo-search", version = "0.1.1" }
+uniflo-adapters = { path = "crates/uniflo-adapters", version = "0.1.1", default-features = false }
+uniflo-gateway = { path = "crates/uniflo-gateway", version = "0.1.1" }
 
 anyhow = "1"
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio", "ws"] }
