@@ -69,6 +69,7 @@ impl ProcCache {
 
 /// All processes whose command line satisfies `keep`, with cwd (and open files matching
 /// `files`) resolved.
+#[cfg(unix)]
 pub fn list(keep: fn(&str) -> bool, files: Option<fn(&Path) -> bool>) -> Vec<Proc> {
     let Ok(out) = Command::new("ps").args(["-Aww", "-o", "pid=,lstart=,command="]).env("LC_ALL", "C").output() else {
         return Vec::new();
@@ -88,7 +89,33 @@ pub fn list(keep: fn(&str) -> bool, files: Option<fn(&Path) -> bool>) -> Vec<Pro
     procs
 }
 
+#[cfg(windows)]
+pub fn list(keep: fn(&str) -> bool, _files: Option<fn(&Path) -> bool>) -> Vec<Proc> {
+    let Ok(out) = Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "Get-CimInstance Win32_Process | ForEach-Object { \"$($_.ProcessId) $($_.CommandLine)\" }",
+        ])
+        .output()
+    else {
+        return Vec::new();
+    };
+    let now = crate::util::now_ms();
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| {
+            let l = l.trim();
+            let (pid_str, args) = l.split_once(' ')?;
+            let pid: u32 = pid_str.parse().ok()?;
+            keep(args).then(|| Proc { pid, start_ms: now, args: args.to_owned(), cwd: None, files: Vec::new() })
+        })
+        .collect()
+}
+
 /// `  123 Fri Oct  2 12:02:01 2026     /usr/bin/foo --bar`
+#[allow(dead_code)]
 fn parse_ps_line(line: &str) -> Option<Proc> {
     let mut it = line.split_whitespace();
     let pid: u32 = it.next()?.parse().ok()?;
@@ -103,8 +130,10 @@ fn parse_ps_line(line: &str) -> Option<Proc> {
     Some(Proc { pid, start_ms, args, cwd: None, files: Vec::new() })
 }
 
+#[allow(dead_code)]
 type Inspected = HashMap<u32, (Option<PathBuf>, Vec<PathBuf>)>;
 
+#[cfg(unix)]
 fn inspect(pids: &[u32], files: Option<fn(&Path) -> bool>) -> Inspected {
     #[cfg(target_os = "linux")]
     {
@@ -139,7 +168,7 @@ fn inspect(pids: &[u32], files: Option<fn(&Path) -> bool>) -> Inspected {
 }
 
 /// `lsof -Ffn` field output: `p<pid>`, then per descriptor `f<fd>` and `n<name>`.
-#[cfg_attr(target_os = "linux", allow(dead_code))]
+#[allow(dead_code)]
 fn parse_lsof(out: &str, files: Option<fn(&Path) -> bool>) -> Inspected {
     let mut map: Inspected = HashMap::new();
     let (mut pid, mut fd) = (None::<u32>, String::new());
@@ -177,6 +206,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn finds_this_test_process_with_cwd() {
         fn me(args: &str) -> bool {
             args.contains("uniflo_core") || args.contains("procs::")
@@ -188,6 +218,17 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)]
+    fn finds_this_test_process_on_windows() {
+        fn all(_: &str) -> bool {
+            true
+        }
+        let found = list(all, None);
+        assert!(found.iter().any(|p| p.pid == std::process::id()), "current test process listed");
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn open_files_of_this_process() {
         fn me(args: &str) -> bool {
             args.contains("uniflo_core") || args.contains("procs::")

@@ -1,37 +1,51 @@
 # Harness 适配
 
-> 已支持的 harness、各自的存储与回合信号，以及新增一个 harness 的步骤。
+> 已支持的 harness、各自的存储与回合信号，跨平台路径映射（macOS、Linux、Windows），以及新增一个 harness 的步骤。
 
-状态：`current` · 更新：2026-10-02
+状态：`current` · 更新：2026-10-05
 
 ## 已支持
 
-| id | 名称 | 存储（`~` = 家目录） | 格式 | 回合结束信号 | 进程映射 |
+| id | 名称 | 存储（`~` = 家目录 / `%USERPROFILE%`） | 格式 | 回合结束信号 | 进程映射 |
 |---|---|---|---|---|---|
 | `claude` | Claude Code | `~/.claude/projects/<slug>/<id>.jsonl`，子代理 `<id>/subagents/**/agent-*.jsonl` | JSONL | `stop_reason` end_turn/stop_sequence、`turn_duration`、中断 | `~/.claude/sessions/<pid>.json` |
 | `qoder` | Qoder | `~/.qoder{,-cn}/projects` | 同 Claude | 同 Claude | — |
 | `qwen` | Qwen Work | `~/.qwenworkcn/projects` | 同 Claude | 同 Claude | — |
 | `codex` | Codex | `~/.codex/{sessions,archived_sessions}/**/rollout-*.jsonl` | JSONL | `task_complete` / `turn_aborted` | —（app-server 一进程多会话） |
-| `pi` | Pi | `~/.pi/agent/sessions/<slug>/<ts>_<id>.jsonl` | JSONL | `stopReason` | `ps` + `lsof` |
-| `omp` | oh-my-pi | `~/.omp/agent/sessions/…` | 同 Pi | 同 Pi | `ps` + `lsof` |
+| `pi` | Pi | `~/.pi/agent/sessions/<slug>/<ts>_<id>.jsonl` | JSONL | `stopReason` | `ps` + `lsof`（Win: PowerShell） |
+| `omp` | oh-my-pi | `~/.omp/agent/sessions/…` | 同 Pi | 同 Pi | `ps` + `lsof`（Win: PowerShell） |
 | `crosery` | Crosery Agent | `~/.crosery/agent-sessions` | 同 Pi | 同 Pi | — |
 | `commandcode` | Command Code | `~/.commandcode/projects` | 同 Pi（Anthropic 块） | 纯文本回复 | — |
 | `prime` | Prime Agent | `~/.prime/agent/sessions/<uuid>.jsonl`（根会话），子代理 `~/.prime/agent/session-artifacts/<uuid>/**/<sub-uuid>.jsonl` | JSONL（扁平根 + 递归工件） | `stopReason` | `~/.prime/agent/daemon-workers/<id>/*.json` + `ps` |
-| `cline` | Cline | `~/Library/Application Support/{Code,Cursor,...}/User/globalStorage/saoudrizwan.claude-dev/tasks/<id>/{ui_messages,api_conversation_history}.json` | 完整 JSON 数组 | `completion_result` / `ask_followup` / `end_turn` | — |
-| `roo` | Roo Code | `.../globalStorage/{rooveterinaryinc.roo-cline,roovscode.roo-cline,kilocode.kilo-code}/tasks/<id>/...` | 同 Cline | 同 Cline | — |
-| `kodu` | Kodu | `.../globalStorage/kodu-ai.kodu/tasks/<id>/ui_messages.json` | 同 Cline | 同 Cline | — |
+| `cline` | Cline | `~/Library/Application Support/...`（Linux: `~/.config/...`，Windows: `%APPDATA%\...\User\globalStorage\saoudrizwan.claude-dev\tasks\<id>`） | 完整 JSON 数组 | `completion_result` / `ask_followup` / `end_turn` | — |
+| `roo` | Roo Code | 同 Cline 路径结构，覆盖 `rooveterinaryinc.roo-cline`, `roovscode.roo-cline`, `kilocode.kilo-code` | 同 Cline | 同 Cline | — |
+| `kodu` | Kodu | 同 Cline 路径结构，`kodu-ai.kodu` | 同 Cline | 同 Cline | — |
 | `gemini` | Gemini CLI | `~/.gemini/tmp/<project>/chats/session-*.jsonl`（旧版 `.json`） | JSONL，消息原地重写 | 无工具调用的回复 | — |
 | `antigravity` | Antigravity | `~/.gemini/antigravity{,-cli}/brain/<id>/…/transcript.jsonl` | 步骤 JSONL | 无工具调用的规划步骤 `DONE` | — |
-| `opencode` | OpenCode | `~/.local/share/opencode/opencode.db` | SQLite | 助手消息完成且 `finish != tool-calls` | `ps` + cwd 查询 |
-| `kilo` | Kilo Code | `~/.local/share/kilo/kilo.db` | 同 OpenCode | 同 OpenCode | `ps` + cwd 查询 |
-| `zcode` | ZCode | `~/.zcode/cli/db/db.sqlite` | 同 OpenCode | 同 OpenCode | `ps` + cwd 查询 |
-| `mimocode` | MiMo Code | `~/.local/share/mimocode/mimocode.db` | 同 OpenCode | 同 OpenCode | `ps` + cwd 查询 |
+| `opencode` | OpenCode | `~/.local/share/opencode/opencode.db`（Windows: `%LOCALAPPDATA%\opencode\opencode.db`） | SQLite | 助手消息完成且 `finish != tool-calls` | `ps` + cwd 查询（Win: PowerShell） |
+| `kilo` | Kilo Code | `~/.local/share/kilo/kilo.db`（Windows: `%LOCALAPPDATA%\kilo\kilo.db`） | 同 OpenCode | 同 OpenCode | `ps` + cwd 查询（Win: PowerShell） |
+| `zcode` | ZCode | `~/.zcode/cli/db/db.sqlite` | 同 OpenCode | 同 OpenCode | `ps` + cwd 查询（Win: PowerShell） |
+| `mimocode` | MiMo Code | `~/.local/share/mimocode/mimocode.db`（Windows: `%LOCALAPPDATA%\mimocode\mimocode.db`） | 同 OpenCode | 同 OpenCode | `ps` + cwd 查询（Win: PowerShell） |
 | `workbuddy` | WorkBuddy | `~/.workbuddy/projects/<slug>/<id>.jsonl` | JSONL | 助手消息完成 | `~/.workbuddy/sessions/<pid>.json` |
 | `minimax` | MiniMax Code | `~/.minimax/v2/sqlite/runtime-state.sqlite` | SQLite | `turn_ingress` completed/failed/aborted | — |
 | `hermes` | Hermes | `~/.hermes/state.db` | SQLite | 终止型 `finish_reason` | — |
 | `factory` | Factory Droid | `~/.factory/sessions/<slug>/<id>.jsonl` | JSONL | 纯文本回复 | — |
 | `reasonix` | Reasonix | `~/.reasonix/projects/<slug>/sessions/*.events.jsonl` | 追加 / 替换日志 | 纯文本回复 | — |
 | `cursor` | Cursor Agent | `~/.cursor/projects/**/agent-transcripts/<id>/<id>.jsonl` | JSONL（无 id、无时间） | 纯文本回复 | — |
+
+## 跨平台路径解析规约
+
+1. **家目录与用户配置**：统一通过 `uniflo_core::util::home()` 获取。在 macOS/Linux 上解析为 `$HOME`，在 Windows 上解析为 `%USERPROFILE%`（如 `C:\Users\Username`）。
+2. **应用全局漫游存储（VS Code / Cursor / Windsurf 等扩展）**：
+   - macOS: `~/Library/Application Support/<app>/User/globalStorage`
+   - Linux: `~/.config/<app>/User/globalStorage`
+   - Windows: `%APPDATA%\<app>\User\globalStorage`（如 `C:\Users\Username\AppData\Roaming\<app>\User\globalStorage`）
+3. **本地应用数据与 SQLite 数据库（Kilo / OpenCode / MiMoCode）**：
+   - macOS / Linux: `~/.local/share/<app>`
+   - Windows: `%LOCALAPPDATA%\<app>`（如 `C:\Users\Username\AppData\Local\<app>`）
+4. **进程与活体探测**：
+   - Unix (macOS / Linux): `libc::kill(pid, 0)` 信号探测，配合 `ps` 与 `/proc` 或 `lsof`。
+   - Windows: Win32 原生 API `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)` + `GetExitCodeProcess`（状态码 259 `STILL_ACTIVE`），配合 PowerShell `Get-CimInstance Win32_Process`。
 
 每个模块文件头有格式细节与怪癖（`crates/uniflo-adapters/src/<模块>.rs`）。没有回合结束标记的 harness 依赖超时规则（`docs/architecture.md#状态机`）。
 

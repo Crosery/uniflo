@@ -76,19 +76,12 @@ fn clock(ms: i64) -> String {
     if ms <= 0 {
         return "--:--:--".into();
     }
-    chrono_like(ms)
-}
-
-/// Local HH:MM:SS via libc (no tz database dependency).
-fn chrono_like(ms: i64) -> String {
-    let t = (ms / 1000) as libc::time_t;
-    // SAFETY: localtime_r only writes into the zeroed struct we own.
-    let tm = unsafe {
-        let mut tm: libc::tm = std::mem::zeroed();
-        libc::localtime_r(&t, &mut tm);
-        tm
-    };
-    format!("{:02}:{:02}:{:02}", tm.tm_hour, tm.tm_min, tm.tm_sec)
+    if let Some(dt) = chrono::DateTime::from_timestamp_millis(ms) {
+        let local: chrono::DateTime<chrono::Local> = dt.into();
+        local.format("%H:%M:%S").to_string()
+    } else {
+        "--:--:--".into()
+    }
 }
 
 pub fn event_line(st: &Style, e: &Event, width: usize) -> String {

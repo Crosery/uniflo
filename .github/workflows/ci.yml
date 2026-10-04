@@ -2,7 +2,7 @@ name: ci
 
 on:
   push:
-    branches: [main, stage]
+    branches: [main, stage, "task/**"]
   pull_request:
 
 jobs:
@@ -10,8 +10,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
         with:
@@ -20,4 +23,4 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - run: scripts/verify.sh
+      - run: bash scripts/verify.sh

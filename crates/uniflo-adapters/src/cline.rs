@@ -9,7 +9,9 @@
 use crate::common::under_any;
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
-use uniflo_core::util::{home, str_of, string_of};
+#[cfg(not(target_os = "windows"))]
+use uniflo_core::util::home;
+use uniflo_core::util::{str_of, string_of};
 use uniflo_core::{Cx, HarnessInfo, JsonlAdapter, LineDecoder, SourceId};
 use uniflo_schema::{Body, Usage};
 
@@ -25,18 +27,27 @@ pub fn adapters() -> Vec<std::sync::Arc<dyn uniflo_core::Adapter>> {
 
 fn vscode_storage_roots(ext: &str) -> Vec<PathBuf> {
     let mut roots = Vec::new();
-    let h = home();
     let apps = ["Code", "Cursor", "Windsurf", "VSCodium", "Code - Insiders", "Positron", "Trae"];
     #[cfg(target_os = "macos")]
     {
+        let h = home();
         for app in &apps {
             roots.push(
                 h.join("Library/Application Support").join(app).join("User/globalStorage").join(ext).join("tasks"),
             );
         }
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
     {
+        if let Some(appdata) = std::env::var_os("APPDATA").map(PathBuf::from) {
+            for app in &apps {
+                roots.push(appdata.join(app).join("User/globalStorage").join(ext).join("tasks"));
+            }
+        }
+    }
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+    {
+        let h = home();
         for app in &apps {
             roots.push(h.join(".config").join(app).join("User/globalStorage").join(ext).join("tasks"));
         }

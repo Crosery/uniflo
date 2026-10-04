@@ -116,14 +116,32 @@ pub fn preview(s: &str, max: usize) -> String {
     out
 }
 
-/// Whether a process id is alive (signal 0 probe).
+/// Whether a process id is alive.
 pub fn pid_alive(pid: u32) -> bool {
     if pid == 0 || pid > i32::MAX as u32 {
         return false;
     }
-    // SAFETY: kill with signal 0 performs only the permission/existence check.
-    let r = unsafe { libc::kill(pid as libc::pid_t, 0) };
-    r == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    #[cfg(unix)]
+    {
+        // SAFETY: kill with signal 0 performs only the permission/existence check.
+        let r = unsafe { libc::kill(pid as libc::pid_t, 0) };
+        r == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    }
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::{
+            GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+        let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if handle.is_null() {
+            return false;
+        }
+        let mut code = 0u32;
+        let ok = unsafe { GetExitCodeProcess(handle, &mut code) };
+        unsafe { CloseHandle(handle) };
+        ok != 0 && code == 259 // 259 is STILL_ACTIVE
+    }
 }
 
 #[cfg(test)]

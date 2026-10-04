@@ -3,18 +3,18 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.1.1"
+version = "0.1.2"
 license = "MIT"
 repository = "https://github.com/Crosery/uniflo"
 homepage = "https://github.com/Crosery/uniflo"
 rust-version = "1.88"
 
 [workspace.dependencies]
-uniflo-schema = { path = "crates/uniflo-schema", version = "0.1.1" }
-uniflo-core = { path = "crates/uniflo-core", version = "0.1.1" }
-uniflo-search = { path = "crates/uniflo-search", version = "0.1.1" }
-uniflo-adapters = { path = "crates/uniflo-adapters", version = "0.1.1", default-features = false }
-uniflo-gateway = { path = "crates/uniflo-gateway", version = "0.1.1" }
+uniflo-schema = { path = "crates/uniflo-schema", version = "0.1.2" }
+uniflo-core = { path = "crates/uniflo-core", version = "0.1.2" }
+uniflo-search = { path = "crates/uniflo-search", version = "0.1.2" }
+uniflo-adapters = { path = "crates/uniflo-adapters", version = "0.1.2", default-features = false }
+uniflo-gateway = { path = "crates/uniflo-gateway", version = "0.1.2" }
 
 anyhow = "1"
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio", "ws"] }
@@ -24,7 +24,7 @@ dirs = "6"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 libc = "0.2"
 memchr = "2"
-notify = { version = "8", default-features = false, features = ["macos_fsevent"] }
+notify = "8"
 nucleo-matcher = "0.3"
 rusqlite = { version = "0.37", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
@@ -34,6 +34,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"
 tokio-stream = { version = "0.1", features = ["sync"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading"] }
 
 [profile.release]
 lto = "thin"

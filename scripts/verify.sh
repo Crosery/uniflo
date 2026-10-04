@@ -27,9 +27,12 @@ node scripts/check-branch-invariants.mjs
 step "tests"
 cargo test --workspace -q
 
+step "daemon release build + smoke test"
+cargo build --release -q
+node scripts/daemon-smoke.mjs
+
 if [[ "${1:-}" == "--e2e" ]]; then
   step "web demo e2e (headless Chrome)"
-  cargo build --release -q
   bun scripts/demo-e2e.mjs
 fi
 
