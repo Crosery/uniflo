@@ -115,8 +115,32 @@ pub fn event_line(st: &Style, e: &Event, width: usize) -> String {
 fn input_summary(v: &serde_json::Value) -> String {
     match v {
         serde_json::Value::Object(o) => {
-            for k in ["command", "cmd", "file_path", "path", "pattern", "query", "url", "description", "prompt"] {
+            for k in [
+                "command",
+                "cmd",
+                "file_path",
+                "filePath",
+                "path",
+                "pattern",
+                "query",
+                "search_term",
+                "searchTerm",
+                "q",
+                "url",
+                "description",
+                "prompt",
+            ] {
                 if let Some(s) = o.get(k).and_then(|x| x.as_str()) {
+                    return s.to_owned();
+                }
+            }
+            if let Some(action) = o.get("action").and_then(serde_json::Value::as_object) {
+                if let Some(s) = action.get("query").and_then(|x| x.as_str()) {
+                    return s.to_owned();
+                }
+                if let Some(arr) = action.get("queries").and_then(serde_json::Value::as_array)
+                    && let Some(s) = arr.first().and_then(|x| x.as_str())
+                {
                     return s.to_owned();
                 }
             }

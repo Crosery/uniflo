@@ -149,11 +149,52 @@ fn response_item(p: &Value, t: i64, cx: &mut Cx<'_, ()>) {
             name: "shell".into(),
             input: p.get("action").cloned().unwrap_or_default(),
         },
-        "web_search_call" | "image_generation_call" | "tool_search_call" => Body::ToolCall {
-            call_id: call_id(),
-            name: str_of(p, "type").unwrap_or("").trim_end_matches("_call").to_owned(),
-            input: p.get("action").or_else(|| p.get("arguments")).cloned().unwrap_or_default(),
-        },
+        "web_search_call" => {
+            let cid = call_id();
+            let input = p.get("action").or_else(|| p.get("arguments")).cloned().unwrap_or_default();
+            emit(cx, id.clone(), t, Body::ToolCall { call_id: cid.clone(), name: "web_search".into(), input });
+            let status = str_of(p, "status");
+            if status == Some("completed") || status.is_none() {
+                let output = if let Some(queries) = p.pointer("/action/queries").and_then(Value::as_array) {
+                    let qs: Vec<_> = queries.iter().filter_map(Value::as_str).collect();
+                    if qs.is_empty() {
+                        string_of(p, "query").unwrap_or_else(|| "Search completed".into())
+                    } else {
+                        format!(
+                            "Search queries executed:\n{}",
+                            qs.iter().map(|q| format!("• {q}")).collect::<Vec<_>>().join("\n")
+                        )
+                    }
+                } else if let Some(q) = string_of(p, "query")
+                    .or_else(|| p.pointer("/action/query").and_then(Value::as_str).map(str::to_owned))
+                {
+                    format!("Search query: {q}")
+                } else {
+                    "Search completed".to_owned()
+                };
+                let res_id = id.map(|i| format!("{i}:res")).unwrap_or_else(|| format!("{cid}:res"));
+                cx.emit(
+                    res_id,
+                    t,
+                    Body::ToolResult { call_id: cid, name: Some("web_search".into()), output, is_error: false },
+                );
+            }
+            return;
+        }
+        "image_generation_call" | "tool_search_call" => {
+            let cid = call_id();
+            let name = str_of(p, "type").unwrap_or("").trim_end_matches("_call").to_owned();
+            let input = p.get("action").or_else(|| p.get("arguments")).cloned().unwrap_or_default();
+            emit(cx, id.clone(), t, Body::ToolCall { call_id: cid.clone(), name: name.clone(), input });
+            if str_of(p, "status") == Some("completed") {
+                let output = string_of(p, "revised_prompt")
+                    .or_else(|| p.pointer("/arguments/query").and_then(Value::as_str).map(str::to_owned))
+                    .unwrap_or_else(|| format!("{name} completed"));
+                let res_id = id.map(|i| format!("{i}:res")).unwrap_or_else(|| format!("{cid}:res"));
+                cx.emit(res_id, t, Body::ToolResult { call_id: cid, name: Some(name), output, is_error: false });
+            }
+            return;
+        }
         "function_call_output" | "custom_tool_call_output" | "tool_search_output" => {
             let (output, is_error) = tool_output(p.get("output").unwrap_or(&Value::Null));
             Body::ToolResult { call_id: call_id(), name: None, output, is_error }

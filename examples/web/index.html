@@ -677,14 +677,23 @@ function toolInfo(name, input) {
     : /web|fetch|http|url|browse/.test(n) ? "globe"
     : /task|agent|delegate|spawn/.test(n) ? "agent" : "tool";
   const o = input && typeof input === "object" && !Array.isArray(input) ? input : {};
-  let arg = o.command ?? o.cmd ?? o.file_path ?? o.filePath ?? o.path ?? o.pattern ?? o.query ?? o.url ?? o.description ?? o.prompt
+  const action = o.action && typeof o.action === "object" ? o.action : {};
+  let arg = o.command ?? o.cmd ?? o.file_path ?? o.filePath ?? o.path ?? o.pattern
+    ?? o.query ?? action.query ?? action.queries?.[0]
+    ?? o.search_term ?? o.searchTerm ?? o.q ?? o.url ?? o.description ?? o.prompt
     ?? Object.values(o).find((v) => typeof v === "string") ?? (typeof input === "string" ? input : "");
   if (Array.isArray(arg)) arg = arg.join(" ");
   return { ic, arg: String(arg).split("\n")[0] };
 }
 function toolState(call, res) {
   if (res) return res.is_error ? "error" : "ok";
-  if (call.partial || (current?.status === "work" && Date.now() - call.ts < 600_000)) return "running";
+  if (call.partial) return "running";
+  if (current?.status === "work" && Date.now() - call.ts < 600_000) {
+    const isPast = Array.from(T?.evs?.values() || []).some(
+      (e) => e.ts > call.ts && (e.kind === "assistant_message" || e.kind === "turn_end" || (e.kind === "tool_result" && e.call_id !== call.call_id))
+    );
+    if (!isPast) return "running";
+  }
   return "none";
 }
 function stateIcon(st) {

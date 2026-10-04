@@ -703,4 +703,13 @@ mod tests {
         assert_eq!(d.ad.source_for(&dir.join("snapshot/x")), None);
         assert_eq!(d.ad.discover(), vec![d.path.clone()]);
     }
+
+    #[test]
+    fn kilo_adapter_properties_and_process_matching() {
+        assert!(is_kilo("kilo"));
+        assert!(is_kilo("/usr/local/bin/kilo"));
+        assert!(is_kilo("node /usr/local/bin/kilo"));
+        assert!(is_kilo("bun /Users/user/.bun/bin/kilocode"));
+        assert!(!is_kilo("vim /tmp/kilo"));
+    }
 }

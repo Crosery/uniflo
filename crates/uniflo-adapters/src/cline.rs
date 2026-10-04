@@ -26,9 +26,10 @@ pub fn adapters() -> Vec<std::sync::Arc<dyn uniflo_core::Adapter>> {
 fn vscode_storage_roots(ext: &str) -> Vec<PathBuf> {
     let mut roots = Vec::new();
     let h = home();
+    let apps = ["Code", "Cursor", "Windsurf", "VSCodium", "Code - Insiders", "Positron", "Trae"];
     #[cfg(target_os = "macos")]
     {
-        for app in &["Code", "Cursor", "Windsurf", "VSCodium", "Code - Insiders"] {
+        for app in &apps {
             roots.push(
                 h.join("Library/Application Support").join(app).join("User/globalStorage").join(ext).join("tasks"),
             );
@@ -36,7 +37,7 @@ fn vscode_storage_roots(ext: &str) -> Vec<PathBuf> {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        for app in &["Code", "Cursor", "Windsurf", "VSCodium", "Code - Insiders"] {
+        for app in &apps {
             roots.push(h.join(".config").join(app).join("User/globalStorage").join(ext).join("tasks"));
         }
     }
@@ -51,10 +52,10 @@ pub fn cline() -> JsonlAdapter<ClineFamily> {
 }
 
 pub fn roo() -> JsonlAdapter<ClineFamily> {
-    JsonlAdapter::new(ClineFamily {
-        info: HarnessInfo { id: "roo", name: "Roo Code" },
-        roots: vscode_storage_roots("rooveterinaryinc.roo-cline"),
-    })
+    let mut roots = vscode_storage_roots("rooveterinaryinc.roo-cline");
+    roots.extend(vscode_storage_roots("roovscode.roo-cline"));
+    roots.extend(vscode_storage_roots("kilocode.kilo-code"));
+    JsonlAdapter::new(ClineFamily { info: HarnessInfo { id: "roo", name: "Roo Code" }, roots })
 }
 
 pub fn kodu() -> JsonlAdapter<ClineFamily> {
@@ -84,7 +85,14 @@ impl LineDecoder for ClineFamily {
     }
 
     fn is_source(&self, p: &Path) -> bool {
-        p.file_name().is_some_and(|n| n == "ui_messages.json") && under_any(p, &self.roots)
+        let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if name == "ui_messages.json" {
+            return under_any(p, &self.roots);
+        }
+        if name == "api_conversation_history.json" {
+            return under_any(p, &self.roots) && !p.with_file_name("ui_messages.json").exists();
+        }
+        false
     }
 
     fn identify(&self, p: &Path) -> Option<SourceId> {
@@ -94,6 +102,10 @@ impl LineDecoder for ClineFamily {
 
     fn decode(&self, v: &Value, cx: &mut Cx<'_, ()>) {
         let Some(items) = v.as_array() else { return };
+        if cx.src.file_name().is_some_and(|n| n == "api_conversation_history.json") {
+            decode_api_history(items, cx);
+            return;
+        }
         let mut last_call_id = String::new();
         let mut last_cmd_id = String::new();
         for (idx, item) in items.iter().enumerate() {
@@ -211,6 +223,84 @@ impl LineDecoder for ClineFamily {
     }
 }
 
+fn decode_api_history(items: &[Value], cx: &mut Cx<'_, ()>) {
+    let mut ts = cx.meta().started_at.unwrap_or(0);
+    for (idx, item) in items.iter().enumerate() {
+        let role = str_of(item, "role").unwrap_or("");
+        let content = item.get("content").unwrap_or(&Value::Null);
+        match role {
+            "user" => {
+                if let Value::Array(blocks) = content {
+                    for (b_idx, b) in blocks.iter().enumerate() {
+                        if str_of(b, "type") == Some("tool_result") {
+                            let call_id = str_of(b, "tool_use_id").unwrap_or("").to_owned();
+                            let output = match b.get("content") {
+                                Some(Value::String(s)) => s.clone(),
+                                Some(v) => v.to_string(),
+                                None => String::new(),
+                            };
+                            let is_error = b.get("is_error").and_then(Value::as_bool).unwrap_or(false);
+                            cx.emit(
+                                format!("u{idx}_{b_idx}"),
+                                ts,
+                                Body::ToolResult { call_id, name: None, output, is_error },
+                            );
+                        } else if let Some(text) = str_of(b, "text") {
+                            if cx.meta().title.is_none() && !text.trim().is_empty() {
+                                let first_line = text.lines().next().unwrap_or(text).trim();
+                                cx.meta().title = Some((2, first_line.to_owned()));
+                            }
+                            cx.emit(
+                                format!("u{idx}_{b_idx}"),
+                                ts,
+                                Body::UserMessage { text: text.to_owned(), synthetic: false },
+                            );
+                        }
+                    }
+                } else if let Some(text) = content.as_str() {
+                    if cx.meta().title.is_none() && !text.trim().is_empty() {
+                        let first_line = text.lines().next().unwrap_or(text).trim();
+                        cx.meta().title = Some((2, first_line.to_owned()));
+                    }
+                    cx.emit(format!("u{idx}"), ts, Body::UserMessage { text: text.to_owned(), synthetic: false });
+                }
+            }
+            "assistant" => {
+                let mut calls = 0;
+                let mut texts = 0;
+                if let Value::Array(blocks) = content {
+                    for (b_idx, b) in blocks.iter().enumerate() {
+                        match str_of(b, "type").unwrap_or("") {
+                            "text" => {
+                                texts += 1;
+                                let text = str_of(b, "text").unwrap_or("").to_owned();
+                                cx.emit(format!("a{idx}_{b_idx}"), ts, Body::AssistantMessage { text, model: None });
+                            }
+                            "thinking" => {
+                                let text = str_of(b, "thinking").unwrap_or("").to_owned();
+                                cx.emit(format!("a{idx}_{b_idx}"), ts, Body::Reasoning { text });
+                            }
+                            "tool_use" => {
+                                calls += 1;
+                                let call_id = str_of(b, "id").unwrap_or("").to_owned();
+                                let name = str_of(b, "name").unwrap_or("").to_owned();
+                                let input = b.get("input").cloned().unwrap_or_else(|| json!({}));
+                                cx.emit(format!("a{idx}_{b_idx}"), ts, Body::ToolCall { call_id, name, input });
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                if idx == items.len() - 1 && calls == 0 && texts > 0 {
+                    cx.emit(format!("end{idx}"), ts, Body::TurnEnd { reason: Some("end_turn".into()) });
+                }
+            }
+            _ => {}
+        }
+        ts += 1000;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -294,6 +384,54 @@ mod tests {
                 "usage",
                 "turn_end"
             ]
+        );
+        assert_eq!(r.status(), Status::Idle);
+    }
+
+    #[test]
+    fn cline_api_history_fallback_roundtrip() {
+        let fx = Fixture::new();
+        let adapter = JsonlAdapter::new(ClineFamily {
+            info: HarnessInfo { id: "cline", name: "Cline" },
+            roots: vec![fx.root().to_path_buf()],
+        });
+
+        let json_body = serde_json::to_string(&json!([
+            {
+                "role": "user",
+                "content": "Create a new hello world file"
+            },
+            {
+                "role": "assistant",
+                "content": [
+                    { "type": "thinking", "thinking": "Planning file creation..." },
+                    { "type": "tool_use", "id": "call_99", "name": "write_to_file", "input": { "path": "hello.txt" } }
+                ]
+            },
+            {
+                "role": "user",
+                "content": [
+                    { "type": "tool_result", "tool_use_id": "call_99", "content": "File created" }
+                ]
+            },
+            {
+                "role": "assistant",
+                "content": [
+                    { "type": "text", "text": "Successfully created hello.txt" }
+                ]
+            }
+        ]))
+        .unwrap();
+
+        // Write only api_conversation_history.json without ui_messages.json
+        let path = fx.write("task_456/api_conversation_history.json", &json_body);
+        let r = fx.index(&adapter, &path);
+
+        assert_eq!(r.id, "task_456");
+        assert_eq!(r.meta.title.as_deref(), Some("Create a new hello world file"));
+        assert_eq!(
+            kinds(&r.events),
+            vec!["user_message", "reasoning", "tool_call", "tool_result", "assistant_message", "turn_end"]
         );
         assert_eq!(r.status(), Status::Idle);
     }

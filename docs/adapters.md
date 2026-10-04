@@ -16,9 +16,9 @@
 | `omp` | oh-my-pi | `~/.omp/agent/sessions/…` | 同 Pi | 同 Pi | `ps` + `lsof` |
 | `crosery` | Crosery Agent | `~/.crosery/agent-sessions` | 同 Pi | 同 Pi | — |
 | `commandcode` | Command Code | `~/.commandcode/projects` | 同 Pi（Anthropic 块） | 纯文本回复 | — |
-| `prime` | Prime Agent | `~/.prime/agent/sessions/<uuid>.jsonl` | 同 Pi（扁平根） | `stopReason` | `ps` + `lsof` |
-| `cline` | Cline | `~/Library/Application Support/{Code,Cursor,...}/User/globalStorage/saoudrizwan.claude-dev/tasks/<id>/ui_messages.json` | 完整 JSON 数组 | `completion_result` / `ask_followup` | — |
-| `roo` | Roo Code | `.../globalStorage/rooveterinaryinc.roo-cline/tasks/<id>/ui_messages.json` | 同 Cline | 同 Cline | — |
+| `prime` | Prime Agent | `~/.prime/agent/sessions/<uuid>.jsonl`（根会话），子代理 `~/.prime/agent/session-artifacts/<uuid>/**/<sub-uuid>.jsonl` | JSONL（扁平根 + 递归工件） | `stopReason` | `~/.prime/agent/daemon-workers/<id>/*.json` + `ps` |
+| `cline` | Cline | `~/Library/Application Support/{Code,Cursor,...}/User/globalStorage/saoudrizwan.claude-dev/tasks/<id>/{ui_messages,api_conversation_history}.json` | 完整 JSON 数组 | `completion_result` / `ask_followup` / `end_turn` | — |
+| `roo` | Roo Code | `.../globalStorage/{rooveterinaryinc.roo-cline,roovscode.roo-cline,kilocode.kilo-code}/tasks/<id>/...` | 同 Cline | 同 Cline | — |
 | `kodu` | Kodu | `.../globalStorage/kodu-ai.kodu/tasks/<id>/ui_messages.json` | 同 Cline | 同 Cline | — |
 | `gemini` | Gemini CLI | `~/.gemini/tmp/<project>/chats/session-*.jsonl`（旧版 `.json`） | JSONL，消息原地重写 | 无工具调用的回复 | — |
 | `antigravity` | Antigravity | `~/.gemini/antigravity{,-cli}/brain/<id>/…/transcript.jsonl` | 步骤 JSONL | 无工具调用的规划步骤 `DONE` | — |

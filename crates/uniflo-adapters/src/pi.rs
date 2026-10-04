@@ -71,25 +71,12 @@ fn is_pi(args: &str) -> bool {
         && !args.contains("__omp_")
 }
 
-fn is_prime(args: &str) -> bool {
-    entry(args, |a| a == "prime-agent" || a.ends_with("/prime-agent"))
-}
-
 pub fn pi() -> JsonlAdapter<PiFamily> {
     family("pi", "Pi", &[".pi/agent/sessions"], Some(ProcCache::new(PROC_TTL, is_pi).with_files(is_jsonl)))
 }
 
 pub fn omp() -> JsonlAdapter<PiFamily> {
     family("omp", "oh-my-pi", &[".omp/agent/sessions"], Some(ProcCache::new(PROC_TTL, is_omp).with_files(is_jsonl)))
-}
-
-pub fn prime() -> JsonlAdapter<PiFamily> {
-    family(
-        "prime",
-        "Prime Agent",
-        &[".prime/agent/sessions"],
-        Some(ProcCache::new(PROC_TTL, is_prime).with_files(is_jsonl)),
-    )
 }
 
 pub fn crosery() -> JsonlAdapter<PiFamily> {
@@ -598,72 +585,6 @@ mod tests {
         got.sort();
         let want = [(1, "a"), (2, "b"), (3, "resumed"), (6, "held")];
         assert_eq!(got, want.map(|(p, s)| (p, s.to_owned())));
-    }
-
-    #[test]
-    fn prime_flat_directory_and_attributed_usage() {
-        let fx = Fixture::new();
-        let a = JsonlAdapter::new(PiFamily::new(
-            HarnessInfo { id: "prime", name: "Prime Agent" },
-            vec![fx.root().to_path_buf()],
-            None,
-        ));
-        let mut s = l(json!({
-            "type": "session",
-            "version": 3,
-            "id": "01a0a01e-2af6-724a-9645-de9f6f3f73ab",
-            "timestamp": "2026-09-14T13:32:06.774Z",
-            "cwd": "/prime/work"
-        }));
-        s += &l(json!({
-            "type": "session_state",
-            "id": "s1",
-            "state": { "status": "active" }
-        }));
-        s += &l(json!({
-            "type": "model_change",
-            "id": "m1",
-            "modelId": "z-ai/glm-5.3"
-        }));
-        s += &l(json!({
-            "type": "message",
-            "id": "u1",
-            "message": { "role": "user", "content": [{ "type": "text", "text": "hello prime" }] }
-        }));
-        s += &l(json!({
-            "type": "message",
-            "id": "a1",
-            "message": {
-                "role": "assistant",
-                "content": [{ "type": "text", "text": "hello human" }],
-                "stopReason": "stop"
-            }
-        }));
-        s += &l(json!({
-            "type": "child_usage_attributed",
-            "id": "u_att",
-            "childUsage": { "input": 500, "output": 120, "cacheRead": 200, "cacheWrite": 50 }
-        }));
-        s += &l(json!({
-            "type": "git_state",
-            "id": "g1",
-            "git": { "branch": "main" }
-        }));
-        s += &l(json!({
-            "type": "agent_status",
-            "id": "stat1",
-            "status": { "summary": "Done task" }
-        }));
-
-        // Flat file in root (not in subdirectory)
-        let p = fx.write("01a0a01e-2af6-724a-9645-de9f6f3f73ab.jsonl", &s);
-        let r = fx.index(&a, &p);
-        assert_eq!(r.id, "01a0a01e-2af6-724a-9645-de9f6f3f73ab");
-        assert_eq!(r.meta.cwd.as_deref(), Some("/prime/work"));
-        assert_eq!(r.meta.model.as_deref(), Some("z-ai/glm-5.3"));
-        assert_eq!(kinds(&r.events), vec!["user_message", "assistant_message", "turn_end", "usage", "system"]);
-        assert_eq!(r.status(), Status::Idle);
-        assert!(r.unknown.is_empty(), "{:?}", r.unknown);
     }
 
     #[test]
