@@ -51,3 +51,19 @@ node scripts/check-branch-invariants.mjs
 2. 开发需求：从 `stage` 检出 `task/<slug>` 或直接在 `stage` 分支工作。
 3. 验证通过：运行 `scripts/verify.sh`（包含 `check-branch-invariants.mjs`）。
 4. 预发布验收后，需要发稳定版时，才将 `stage` 合入 `main` 并打正式 tag。
+
+## 自动化发版与 CI/CD 机制 (`.github/workflows/release.yml`)
+
+项目已接入 GitHub Actions 自动化发包与发布流水线，基于推送的 Git Tag 名称自动路由发布通道：
+
+- **正式稳定版发布**：
+  - **触发条件**：打纯数字 SemVer tag（如 `git tag v0.1.2` 并推送）。
+  - **行为**：CI 自动运行全部测试门禁，通过后自动将全套 6 个 crate 发布为正式稳定版至 crates.io，并在 GitHub 创建正式 Release。
+  - **用户安装**：全局用户执行 `cargo install uniflo` 默认安装最新的正式稳定版。
+
+- **预发布 / Beta 版发布**：
+  - **触发条件**：打带预发布后缀的 tag（如 `git tag v0.1.2-rc.1` 或 `v0.1.2-beta.1` 并推送）。
+  - **行为**：CI 自动识别为预发布通道，将带后缀的预发布版本发布到 crates.io，并在 GitHub 标记创建 Pre-release。
+  - **用户安装**：全球用户若需体验最新的预发布 beta 版，执行 `cargo install uniflo --version 0.1.2-beta.1` 即可体验。
+
+*注：GitHub 仓库中需要在 `Settings -> Secrets and variables -> Actions` 中配置 `CARGO_REGISTRY_TOKEN` 密钥。*
