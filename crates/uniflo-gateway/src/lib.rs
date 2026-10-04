@@ -106,7 +106,7 @@ async fn index() -> impl IntoResponse {
 }
 
 async fn demo() -> Html<&'static str> {
-    Html(include_str!("../../../examples/web/index.html"))
+    Html(include_str!("index.html"))
 }
 
 async fn health(State(s): State<AppState>) -> impl IntoResponse {
