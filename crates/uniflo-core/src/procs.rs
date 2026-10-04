@@ -2,6 +2,7 @@
 //! one batched `lsof` for working directories and open files. Results are memoized
 //! briefly because the engine polls liveness every second.
 
+#[cfg(unix)]
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
