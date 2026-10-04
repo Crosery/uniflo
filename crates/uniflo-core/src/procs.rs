@@ -206,6 +206,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn finds_this_test_process_with_cwd() {
         fn me(args: &str) -> bool {
             args.contains("uniflo_core") || args.contains("procs::")
@@ -217,6 +218,17 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)]
+    fn finds_this_test_process_on_windows() {
+        fn all(_: &str) -> bool {
+            true
+        }
+        let found = list(all, None);
+        assert!(found.iter().any(|p| p.pid == std::process::id()), "current test process listed");
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn open_files_of_this_process() {
         fn me(args: &str) -> bool {
             args.contains("uniflo_core") || args.contains("procs::")
