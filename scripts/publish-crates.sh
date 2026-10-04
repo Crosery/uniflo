@@ -23,10 +23,19 @@ CRATES=(
 
 for crate in "${CRATES[@]}"; do
   printf "\n==> Publishing %s...\n" "$crate"
-  cargo publish -p "$crate" ${DRY_RUN:+"$DRY_RUN"}
-  if [[ -z "$DRY_RUN" ]]; then
-    printf "Waiting 15s for %s to index on crates.io before downstream...\n" "$crate"
-    sleep 15
+  if out=$(cargo publish -p "$crate" ${DRY_RUN:+"$DRY_RUN"} 2>&1); then
+    printf "%s\n" "$out"
+    if [[ -z "$DRY_RUN" ]]; then
+      printf "Waiting 15s for %s to index on crates.io before downstream...\n" "$crate"
+      sleep 15
+    fi
+  else
+    if [[ "$out" == *"already uploaded"* ]] || [[ "$out" == *"already exists"* ]]; then
+      printf "%s is already published at current version, skipping.\n" "$crate"
+    else
+      printf "%s\n" "$out" >&2
+      exit 1
+    fi
   fi
 done
 
