@@ -1336,7 +1336,7 @@ checksum = "c6f5d3c3b1bf09027a88a6bc961fc00497d651009560b5463668dc81b0fa87a8"
 
 [[package]]
 name = "uniflo-adapters"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "rusqlite",
@@ -1349,7 +1349,7 @@ dependencies = [
 
 [[package]]
 name = "uniflo-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -1369,7 +1369,7 @@ dependencies = [
 
 [[package]]
 name = "uniflo-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1387,7 +1387,7 @@ dependencies = [
 
 [[package]]
 name = "uniflo-gateway"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -1406,7 +1406,7 @@ dependencies = [
 
 [[package]]
 name = "uniflo-schema"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -1414,7 +1414,7 @@ dependencies = [
 
 [[package]]
 name = "uniflo-search"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "nucleo-matcher",
  "uniflo-schema",
