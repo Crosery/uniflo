@@ -26,14 +26,25 @@ const HOT_MS: i64 = 7 * 86_400_000;
 const SUMMARY_PARTS: i64 = 40;
 const OPEN_CAP: usize = 512;
 
+fn data_home() -> PathBuf {
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(local) = std::env::var_os("LOCALAPPDATA").map(PathBuf::from) {
+            return local;
+        }
+    }
+    home().join(".local/share")
+}
+
 pub fn adapters() -> Vec<Arc<dyn Adapter>> {
     let h = home();
+    let d = data_home();
     let mk = |id, name, db: PathBuf| Arc::new(OpenCode { info: HarnessInfo { id, name }, db }) as Arc<dyn Adapter>;
     vec![
-        mk("opencode", "OpenCode", h.join(".local/share/opencode/opencode.db")),
-        mk("kilo", "Kilo Code", h.join(".local/share/kilo/kilo.db")),
+        mk("opencode", "OpenCode", d.join("opencode/opencode.db")),
+        mk("kilo", "Kilo Code", d.join("kilo/kilo.db")),
         mk("zcode", "ZCode", h.join(".zcode/cli/db/db.sqlite")),
-        mk("mimocode", "MiMo Code", h.join(".local/share/mimocode/mimocode.db")),
+        mk("mimocode", "MiMo Code", d.join("mimocode/mimocode.db")),
     ]
 }
 

@@ -69,6 +69,7 @@ impl ProcCache {
 
 /// All processes whose command line satisfies `keep`, with cwd (and open files matching
 /// `files`) resolved.
+#[cfg(unix)]
 pub fn list(keep: fn(&str) -> bool, files: Option<fn(&Path) -> bool>) -> Vec<Proc> {
     let Ok(out) = Command::new("ps").args(["-Aww", "-o", "pid=,lstart=,command="]).env("LC_ALL", "C").output() else {
         return Vec::new();
@@ -86,6 +87,31 @@ pub fn list(keep: fn(&str) -> bool, files: Option<fn(&Path) -> bool>) -> Vec<Pro
         }
     }
     procs
+}
+
+#[cfg(windows)]
+pub fn list(keep: fn(&str) -> bool, _files: Option<fn(&Path) -> bool>) -> Vec<Proc> {
+    let Ok(out) = Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "Get-CimInstance Win32_Process | ForEach-Object { \"$($_.ProcessId) $($_.CommandLine)\" }",
+        ])
+        .output()
+    else {
+        return Vec::new();
+    };
+    let now = crate::util::now_ms();
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| {
+            let l = l.trim();
+            let (pid_str, args) = l.split_once(' ')?;
+            let pid: u32 = pid_str.parse().ok()?;
+            keep(args).then(|| Proc { pid, start_ms: now, args: args.to_owned(), cwd: None, files: Vec::new() })
+        })
+        .collect()
 }
 
 /// `  123 Fri Oct  2 12:02:01 2026     /usr/bin/foo --bar`

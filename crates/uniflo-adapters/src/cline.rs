@@ -35,7 +35,15 @@ fn vscode_storage_roots(ext: &str) -> Vec<PathBuf> {
             );
         }
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(appdata) = std::env::var_os("APPDATA").map(PathBuf::from) {
+            for app in &apps {
+                roots.push(appdata.join(app).join("User/globalStorage").join(ext).join("tasks"));
+            }
+        }
+    }
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
     {
         for app in &apps {
             roots.push(h.join(".config").join(app).join("User/globalStorage").join(ext).join("tasks"));
