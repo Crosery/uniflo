@@ -115,6 +115,7 @@ pub fn list(keep: fn(&str) -> bool, _files: Option<fn(&Path) -> bool>) -> Vec<Pr
 }
 
 /// `  123 Fri Oct  2 12:02:01 2026     /usr/bin/foo --bar`
+#[cfg(unix)]
 fn parse_ps_line(line: &str) -> Option<Proc> {
     let mut it = line.split_whitespace();
     let pid: u32 = it.next()?.parse().ok()?;
@@ -129,8 +130,10 @@ fn parse_ps_line(line: &str) -> Option<Proc> {
     Some(Proc { pid, start_ms, args, cwd: None, files: Vec::new() })
 }
 
+#[cfg(unix)]
 type Inspected = HashMap<u32, (Option<PathBuf>, Vec<PathBuf>)>;
 
+#[cfg(unix)]
 fn inspect(pids: &[u32], files: Option<fn(&Path) -> bool>) -> Inspected {
     #[cfg(target_os = "linux")]
     {
@@ -165,6 +168,7 @@ fn inspect(pids: &[u32], files: Option<fn(&Path) -> bool>) -> Inspected {
 }
 
 /// `lsof -Ffn` field output: `p<pid>`, then per descriptor `f<fd>` and `n<name>`.
+#[cfg(unix)]
 #[cfg_attr(target_os = "linux", allow(dead_code))]
 fn parse_lsof(out: &str, files: Option<fn(&Path) -> bool>) -> Inspected {
     let mut map: Inspected = HashMap::new();
