@@ -11,7 +11,7 @@ rust-version.workspace = true
 [features]
 default = [
     "claude", "codex", "pi", "prime", "cline", "gemini", "antigravity",
-    "opencode", "kilo", "workbuddy", "hermes", "minimax", "factory", "reasonix", "cursor"
+    "opencode", "kilo", "workbuddy", "hermes", "minimax", "factory", "reasonix", "cursor", "dsh"
 ]
 claude = []
 codex = []
@@ -28,6 +28,7 @@ minimax = ["dep:rusqlite"]
 factory = []
 reasonix = []
 cursor = []
+dsh = ["dep:ruzstd"]
 
 [dependencies]
 uniflo-core.workspace = true
@@ -36,6 +37,7 @@ anyhow.workspace = true
 rusqlite = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
+ruzstd = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile.workspace = true

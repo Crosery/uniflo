@@ -17,6 +17,8 @@ pub mod codex;
 mod common;
 #[cfg(feature = "cursor")]
 pub mod cursor;
+#[cfg(feature = "dsh")]
+pub mod dsh;
 #[cfg(feature = "factory")]
 pub mod factory;
 #[cfg(feature = "gemini")]
@@ -74,5 +76,7 @@ pub fn all() -> Vec<Arc<dyn Adapter>> {
     v.extend(reasonix::adapters());
     #[cfg(feature = "cursor")]
     v.extend(cursor::adapters());
+    #[cfg(feature = "dsh")]
+    v.extend(dsh::adapters());
     v
 }

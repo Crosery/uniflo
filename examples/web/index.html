@@ -396,7 +396,7 @@ const I = {
 };
 const icon = (n, cls = "i") => `<svg class="${cls}" viewBox="0 0 24 24">${I[n]}</svg>`;
 const HUES = { claude: 40, qoder: 190, qwen: 265, codex: 160, pi: 300, omp: 285, crosery: 330, commandcode: 15, gemini: 225,
-  antigravity: 205, opencode: 60, kilo: 100, zcode: 175, mimocode: 25, workbuddy: 140, minimax: 350, hermes: 245, factory: 75, reasonix: 120, cursor: 0 };
+  antigravity: 205, opencode: 60, kilo: 100, zcode: 175, mimocode: 25, workbuddy: 140, minimax: 350, hermes: 245, factory: 75, reasonix: 120, cursor: 0, dsh: 215 };
 const hue = (id) => HUES[id] ?? [...id].reduce((a, c) => (a * 31 + c.charCodeAt(0)) % 360, 7);
 const htag = (id) => `<span class="ht" style="--h:${hue(id)}">${esc(id)}</span>`;
 

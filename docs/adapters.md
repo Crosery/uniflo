@@ -2,7 +2,7 @@
 
 > 已支持的 harness、各自的存储与回合信号，跨平台路径映射（macOS、Linux、Windows），以及新增一个 harness 的步骤。
 
-状态：`current` · 更新：2026-10-05
+状态：`current` · 更新：2026-10-06
 
 ## 已支持
 
@@ -32,6 +32,7 @@
 | `factory` | Factory Droid | `~/.factory/sessions/<slug>/<id>.jsonl` | JSONL | 纯文本回复 | — |
 | `reasonix` | Reasonix | `~/.reasonix/projects/<slug>/sessions/*.events.jsonl` | 追加 / 替换日志 | 纯文本回复 | — |
 | `cursor` | Cursor Agent | `~/.cursor/projects/**/agent-transcripts/<id>/<id>.jsonl` | JSONL（无 id、无时间） | 纯文本回复 | — |
+| `dsh` | DeepSeek Harness | `~/.dsh/sessions/<cwd-slug>/<id>/session[.v4].jsonl.zstd` | zstd 帧批量 JSONL（帧 = 一次 flush 的若干整行；行永不跨帧） | `turn/end` reason completed/aborted/interrupted/error | `session.lock` 被 harness 进程持有 → `lsof`（Win 无 lsof，退化为事件规则） |
 
 ## 跨平台路径解析规约
 
