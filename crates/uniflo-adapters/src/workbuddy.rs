@@ -130,32 +130,64 @@ impl LineDecoder for WorkBuddy {
     }
 }
 
+/// Harness-injected user-role text that carries no human query.
+const INJECTED_PREFIXES: &[&str] =
+    &["<system-reminder", "<task-notification>", "<image_local_path>", "Caveat:", "Please continue with the"];
+
+/// WorkBuddy sends the human's prompt inside one `input_text` part, wrapped in a
+/// several-KiB `<system-reminder data-role="user-context">` blob:
+/// `…</system-reminder>\n<user_query>你好</user_query>`. Splitting keeps the typed text
+/// as the real message and reports the surrounding context as synthetic.
+fn split_user_query(s: &str) -> Option<(String, String)> {
+    let open = s.find("<user_query>")?;
+    let body = &s[open + "<user_query>".len()..];
+    let close = body.rfind("</user_query>")?;
+    let mut ctx = s[..open].to_owned();
+    ctx.push_str(&body[close + "</user_query>".len()..]);
+    Some((body[..close].trim().to_owned(), ctx))
+}
+
 fn user(v: &Value, id: String, t: i64, cx: &mut Cx<'_, ()>) {
-    let mut text = String::new();
-    match v.get("content") {
-        Some(Value::String(s)) => text = s.clone(),
-        Some(Value::Array(parts)) => {
-            for p in parts {
-                let piece = match str_of(p, "type").unwrap_or("") {
-                    "input_text" | "text" => str_of(p, "text").unwrap_or("").to_owned(),
-                    other => format!("[{other}]"),
-                };
-                if piece.is_empty() {
-                    continue;
-                }
-                if !text.is_empty() {
-                    text.push('\n');
-                }
-                text.push_str(&piece);
+    let parts: Vec<Value> = match v.get("content") {
+        Some(Value::String(s)) => vec![Value::String(s.clone())],
+        Some(Value::Array(a)) => a.clone(),
+        _ => return,
+    };
+    let mut typed = Vec::new();
+    let mut ctx = Vec::new();
+    for p in &parts {
+        // String content (older records) has no part type: it is the text itself.
+        let raw = match str_of(p, "type").unwrap_or("") {
+            "" => p.as_str().unwrap_or("").to_owned(),
+            "input_text" | "text" => str_of(p, "text").unwrap_or("").to_owned(),
+            "image_blob_ref" => {
+                typed.push(format!("[图片 {}]", str_of(p, "mime").unwrap_or("image")));
+                continue;
             }
+            other => {
+                ctx.push(format!("[{other}]"));
+                continue;
+            }
+        };
+        match split_user_query(&raw) {
+            Some((q, c)) => {
+                typed.push(q);
+                ctx.push(c);
+            }
+            None if INJECTED_PREFIXES.iter().any(|m| raw.trim_start().starts_with(m)) => ctx.push(raw),
+            None => typed.push(raw),
         }
-        _ => {}
     }
-    if text.is_empty() {
-        return;
+    let keep = |v: Vec<String>| v.into_iter().filter(|s| !s.trim().is_empty()).collect::<Vec<_>>().join("\n");
+    let meta = v.pointer("/providerData/isMeta").and_then(Value::as_bool) == Some(true);
+    let ctx = keep(ctx);
+    if !ctx.is_empty() && !meta {
+        cx.emit(format!("{id}:ctx"), t, Body::UserMessage { text: ctx, synthetic: true });
     }
-    let synthetic = v.pointer("/providerData/isMeta").and_then(Value::as_bool) == Some(true);
-    cx.emit(id, t, Body::UserMessage { text, synthetic });
+    let text = keep(typed);
+    if !text.is_empty() {
+        cx.emit(id, t, Body::UserMessage { text, synthetic: meta });
+    }
 }
 
 fn assistant(v: &Value, id: String, t: i64, cx: &mut Cx<'_, ()>) {
@@ -245,7 +277,7 @@ mod tests {
         assert_eq!(r.status(), Status::Idle);
         assert!(r.unknown.is_empty(), "{:?}", r.unknown);
         assert!(
-            matches!(&r.events[0].body, Body::UserMessage { text, synthetic: false } if text == "do it\n[image_blob_ref]")
+            matches!(&r.events[0].body, Body::UserMessage { text, synthetic: false } if text == "do it\n[图片 image]")
         );
         assert!(
             matches!(&r.events[2].body, Body::ToolCall { call_id, name, input } if call_id == "c1" && name == "Bash" && input["command"] == "ls")
@@ -296,6 +328,37 @@ mod tests {
         let r = fx.index(&a, &p);
         assert!(matches!(&r.events[0].body, Body::UserMessage { synthetic: true, .. }));
         assert_eq!(r.unknown, vec!["type=brand-new".to_string()]);
+    }
+
+    #[test]
+    fn user_query_is_split_from_injected_context() {
+        let fx = Fixture::new();
+        let a = wb(&fx);
+        // Real shape (macOS and Windows): one input_text part carrying the whole blob.
+        let s = rec(
+            "u1",
+            json!({"type":"message","role":"user","content":[{"type":"input_text",
+                "text":"<system-reminder data-role=\"user-context\">\n<user_info>\nOS Version: win32\n</user_info>\n</system-reminder>\n<user_query>你好</user_query>"}]}),
+        );
+        let p = fx.write("projects/-w/s5.jsonl", &s);
+        let r = fx.index(&a, &p);
+        assert_eq!(kinds(&r.events), ["user_message", "user_message"]);
+        // Injected context first (collapsible), then the human's actual text.
+        assert!(
+            matches!(&r.events[0].body, Body::UserMessage { text, synthetic: true } if text.contains("OS Version") && !text.contains("你好"))
+        );
+        assert!(matches!(&r.events[1].body, Body::UserMessage { text, synthetic: false } if text == "你好"));
+        // Preview must come from the typed text, not the blob.
+        assert_eq!(r.preview.as_deref(), Some("你好"));
+        // Pure injected records (no query at all) stay synthetic with no typed twin.
+        let s2 = rec(
+            "u2",
+            json!({"type":"message","role":"user","content":[{"type":"input_text","text":"<task-notification>\n<task-id>x</task-id>\n</task-notification>"}]}),
+        );
+        let p2 = fx.write("projects/-w/s6.jsonl", &s2);
+        let r2 = fx.index(&a, &p2);
+        assert_eq!(kinds(&r2.events), ["user_message"]);
+        assert!(matches!(&r2.events[0].body, Body::UserMessage { synthetic: true, .. }));
     }
 
     #[test]
