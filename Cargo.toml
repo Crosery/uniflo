@@ -3,18 +3,18 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.1.3"
+version = "0.1.4-rc.1"
 license = "MIT"
 repository = "https://github.com/Crosery/uniflo"
 homepage = "https://github.com/Crosery/uniflo"
 rust-version = "1.88"
 
 [workspace.dependencies]
-uniflo-schema = { path = "crates/uniflo-schema", version = "0.1.3" }
-uniflo-core = { path = "crates/uniflo-core", version = "0.1.3" }
-uniflo-search = { path = "crates/uniflo-search", version = "0.1.3" }
-uniflo-adapters = { path = "crates/uniflo-adapters", version = "0.1.3", default-features = false }
-uniflo-gateway = { path = "crates/uniflo-gateway", version = "0.1.3" }
+uniflo-schema = { path = "crates/uniflo-schema", version = "0.1.4-rc.1" }
+uniflo-core = { path = "crates/uniflo-core", version = "0.1.4-rc.1" }
+uniflo-search = { path = "crates/uniflo-search", version = "0.1.4-rc.1" }
+uniflo-adapters = { path = "crates/uniflo-adapters", version = "0.1.4-rc.1", default-features = false }
+uniflo-gateway = { path = "crates/uniflo-gateway", version = "0.1.4-rc.1" }
 
 anyhow = "1"
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio", "ws"] }
