@@ -26,25 +26,27 @@ const HOT_MS: i64 = 7 * 86_400_000;
 const SUMMARY_PARTS: i64 = 40;
 const OPEN_CAP: usize = 512;
 
-fn data_home() -> PathBuf {
+/// OpenCode-family data dirs. The CLI keeps XDG layout (`~/.local/share`) even on
+/// Windows, but a LOCALAPPDATA install is possible too: prefer whichever actually
+/// holds the database, fall back to the XDG path for discovery/watching.
+fn data_db(sub: &str, name: &str) -> PathBuf {
+    let mut cands = vec![home().join(".local/share").join(sub).join(name)];
     #[cfg(target_os = "windows")]
-    {
-        if let Some(local) = std::env::var_os("LOCALAPPDATA").map(PathBuf::from) {
-            return local;
-        }
+    if let Some(local) = std::env::var_os("LOCALAPPDATA").map(PathBuf::from) {
+        cands.push(local.join(sub).join(name));
     }
-    home().join(".local/share")
+    cands.sort_by_key(|p| !p.is_file());
+    cands.remove(0)
 }
 
 pub fn adapters() -> Vec<Arc<dyn Adapter>> {
     let h = home();
-    let d = data_home();
     let mk = |id, name, db: PathBuf| Arc::new(OpenCode { info: HarnessInfo { id, name }, db }) as Arc<dyn Adapter>;
     vec![
-        mk("opencode", "OpenCode", d.join("opencode/opencode.db")),
-        mk("kilo", "Kilo Code", d.join("kilo/kilo.db")),
+        mk("opencode", "OpenCode", data_db("opencode", "opencode.db")),
+        mk("kilo", "Kilo Code", data_db("kilo", "kilo.db")),
         mk("zcode", "ZCode", h.join(".zcode/cli/db/db.sqlite")),
-        mk("mimocode", "MiMo Code", d.join("mimocode/mimocode.db")),
+        mk("mimocode", "MiMo Code", data_db("mimocode", "mimocode.db")),
     ]
 }
 
@@ -524,9 +526,14 @@ fn is_zcode(args: &str) -> bool {
 fn is_proc(id: &str, args: &str) -> bool {
     let mut it = args.split_whitespace();
     let Some(first) = it.next() else { return false };
-    let base = first.rsplit('/').next().unwrap_or(first);
-    let target = if matches!(base, "bun" | "node" | "deno" | "tsx") { it.next().unwrap_or("") } else { first };
-    let target_base = target.rsplit('/').next().unwrap_or(target);
+    // Windows argv quotes paths that contain separators/spaces; paths use backslashes.
+    fn base(s: &str) -> String {
+        s.trim_matches('"').rsplit(['/', '\\']).next().unwrap_or(s).trim_end_matches(".exe").to_ascii_lowercase()
+    }
+    let first_base = base(first);
+    let target =
+        if matches!(first_base.as_str(), "bun" | "node" | "deno" | "tsx") { it.next().unwrap_or("") } else { first };
+    let target_base = base(target);
     match id {
         "kilo" => target_base == "kilo" || target_base == "kilocode",
         "opencode" => target_base == "opencode",
@@ -543,6 +550,18 @@ mod tests {
     use rusqlite::params;
     use serde_json::json;
     use uniflo_schema::Status;
+
+    #[test]
+    fn is_proc_matches_posix_and_windows_argv() {
+        assert!(is_proc("opencode", "opencode serve"));
+        assert!(is_proc("opencode", "/usr/local/bin/opencode run"));
+        assert!(is_proc("kilo", "node /opt/kilo/bin/kilo"));
+        // Windows: quoted backslash paths from Win32_Process.CommandLine.
+        assert!(is_proc("opencode", "\"C:\\Users\\me\\bin\\opencode.exe\" serve"));
+        assert!(is_proc("kilo", "C:\\tools\\kilocode.exe --ui"));
+        assert!(!is_proc("opencode", "notepad.exe"));
+        assert!(!is_proc("opencode", "node open_sesame.js"));
+    }
 
     struct Db {
         _dir: tempfile::TempDir,

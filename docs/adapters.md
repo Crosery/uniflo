@@ -42,10 +42,10 @@
    - Windows: `%APPDATA%\<app>\User\globalStorage`（如 `C:\Users\Username\AppData\Roaming\<app>\User\globalStorage`）
 3. **本地应用数据与 SQLite 数据库（Kilo / OpenCode / MiMoCode）**：
    - macOS / Linux: `~/.local/share/<app>`
-   - Windows: `%LOCALAPPDATA%\<app>`（如 `C:\Users\Username\AppData\Local\<app>`）
+   - Windows: OpenCode 系 CLI 在 Windows 上仍沿用 XDG 布局 `~\.local\share\<app>`（实测），因此两个候选都探测、优先实际存在数据库的路径：`~\.local\share\<app>` 与 `%LOCALAPPDATA%\<app>`。
 4. **进程与活体探测**：
    - Unix (macOS / Linux): `libc::kill(pid, 0)` 信号探测，配合 `ps` 与 `/proc` 或 `lsof`。
-   - Windows: Win32 原生 API `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)` + `GetExitCodeProcess`（状态码 259 `STILL_ACTIVE`），配合 PowerShell `Get-CimInstance Win32_Process`。
+   - Windows: Win32 原生 API `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)` + `GetExitCodeProcess`（状态码 259 `STILL_ACTIVE`），配合 PowerShell `Get-CimInstance Win32_Process`；工作目录经 `NtQueryInformationProcess` + `ReadProcessMemory` 读 PEB（x64，失败返回 `None`）；没有 `lsof` 等价物，打开文件映射退化为 argv 启发式。
 
 每个模块文件头有格式细节与怪癖（`crates/uniflo-adapters/src/<模块>.rs`）。没有回合结束标记的 harness 依赖超时规则（`docs/architecture.md#状态机`）。
 

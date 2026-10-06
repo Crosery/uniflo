@@ -103,7 +103,7 @@ pub fn list(keep: fn(&str) -> bool, _files: Option<fn(&Path) -> bool>) -> Vec<Pr
         return Vec::new();
     };
     let now = crate::util::now_ms();
-    String::from_utf8_lossy(&out.stdout)
+    let mut procs: Vec<Proc> = String::from_utf8_lossy(&out.stdout)
         .lines()
         .filter_map(|l| {
             let l = l.trim();
@@ -111,7 +111,103 @@ pub fn list(keep: fn(&str) -> bool, _files: Option<fn(&Path) -> bool>) -> Vec<Pr
             let pid: u32 = pid_str.parse().ok()?;
             keep(args).then(|| Proc { pid, start_ms: now, args: args.to_owned(), cwd: None, files: Vec::new() })
         })
-        .collect()
+        .collect();
+    // `lsof` has no Windows equivalent worth shelling out to; the CWD comes from the PEB.
+    // Open-file mapping (minimax's precise pid pick, pi step 2) degrades to argv heuristics.
+    for p in &mut procs {
+        p.cwd = process_cwd(p.pid);
+    }
+    procs
+}
+
+/// Working directory of a foreign process, read through `NtQueryInformationProcess` +
+/// `ReadProcessMemory`. x64 only (fixed PEB offsets); any failure yields `None`, which
+/// callers treat as "this process contributes no cwd evidence".
+#[cfg(all(windows, target_pointer_width = "64"))]
+fn process_cwd(pid: u32) -> Option<PathBuf> {
+    use windows_sys::Wdk::System::Threading::{NtQueryInformationProcess, ProcessBasicInformation};
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, STATUS_SUCCESS};
+    use windows_sys::Win32::System::Diagnostics::Debug::ReadProcessMemory;
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, PROCESS_BASIC_INFORMATION, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ,
+    };
+
+    // Offsets inside the x64 PEB / RTL_USER_PROCESS_PARAMETERS (windows-sys stubs hide them):
+    // PEB.ProcessParameters at +0x20; CurrentDirectory.Path at +0x38,
+    // a UNICODE_STRING { len u16, max u16, pad, buf ptr }.
+    const PEB_PARAMS: usize = 0x20;
+    const PARAMS_CWD_PATH: usize = 0x38;
+
+    // Safe wrappers: the only unsafety is ReadProcessMemory writing into a caller slice.
+    fn read(h: HANDLE, addr: usize, buf: &mut [u8]) -> bool {
+        let mut done = 0usize;
+        // SAFETY: kernel writes at most buf.len() bytes into buf's storage.
+        unsafe {
+            ReadProcessMemory(h, addr as *mut core::ffi::c_void, buf.as_mut_ptr().cast(), buf.len(), &mut done) != 0
+                && done == buf.len()
+        }
+    }
+    fn read_usize(h: HANDLE, addr: usize) -> Option<usize> {
+        let mut b = [0u8; 8];
+        read(h, addr, &mut b).then(|| usize::from_le_bytes(b))
+    }
+
+    if pid == 0 {
+        return None;
+    }
+    let h = unsafe { OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, 0, pid) };
+    if h.is_null() {
+        return None;
+    }
+    let cwd = (|| -> Option<PathBuf> {
+        // SAFETY: all-integer/pointer struct; zero is a valid init value.
+        let mut pbi: PROCESS_BASIC_INFORMATION = unsafe { std::mem::zeroed() };
+        let mut ret = 0u32;
+        // SAFETY: querying with a correctly sized struct pointer.
+        let status = unsafe {
+            NtQueryInformationProcess(
+                h,
+                ProcessBasicInformation,
+                &mut pbi as *mut _ as *mut core::ffi::c_void,
+                std::mem::size_of::<PROCESS_BASIC_INFORMATION>() as u32,
+                &mut ret,
+            )
+        };
+        if status != STATUS_SUCCESS || pbi.PebBaseAddress.is_null() {
+            return None;
+        }
+        let params = read_usize(h, pbi.PebBaseAddress as usize + PEB_PARAMS)?;
+        let mut us = [0u8; 16];
+        if !read(h, params + PARAMS_CWD_PATH, &mut us) {
+            return None;
+        }
+        let len = u16::from_le_bytes([us[0], us[1]]) as usize;
+        let buf = usize::from_le_bytes(us[8..].try_into().ok()?);
+        if len == 0 || len > 32_768 || buf == 0 {
+            return None;
+        }
+        let mut w = vec![0u16; len.div_ceil(2)];
+        // SAFETY: ReadProcessMemory clamps to the requested byte count; the slice covers it.
+        if !read(h, buf, unsafe { std::slice::from_raw_parts_mut(w.as_mut_ptr().cast(), len) }) {
+            return None;
+        }
+        let s = String::from_utf16_lossy(&w);
+        let mut s = s.strip_prefix(r"\\?\").unwrap_or(&s);
+        // NT paths carry a trailing separator; drop it so DB `directory` equality matches,
+        // but keep drive roots ("C:\") intact.
+        while s.len() > 3 && (s.ends_with('/') || s.ends_with('\\')) {
+            s = &s[..s.len() - 1];
+        }
+        Some(PathBuf::from(s))
+    })();
+    // SAFETY: handle owned by this function, closed exactly once on every path.
+    unsafe { CloseHandle(h) };
+    cwd
+}
+
+#[cfg(all(windows, not(target_pointer_width = "64")))]
+fn process_cwd(_pid: u32) -> Option<PathBuf> {
+    None
 }
 
 /// `  123 Fri Oct  2 12:02:01 2026     /usr/bin/foo --bar`
@@ -224,7 +320,9 @@ mod tests {
             true
         }
         let found = list(all, None);
-        assert!(found.iter().any(|p| p.pid == std::process::id()), "current test process listed");
+        let mine = found.iter().find(|p| p.pid == std::process::id()).expect("current test process listed");
+        // PEB read: harness session mapping depends on this being Some.
+        assert_eq!(mine.cwd.as_deref(), std::env::current_dir().ok().as_deref());
     }
 
     #[test]
