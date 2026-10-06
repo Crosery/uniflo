@@ -167,6 +167,9 @@ async fn rest_endpoints_shapes_and_paging() {
     let h = get(s.addr, "/v1/health", &[]).await;
     assert_eq!(h.status, 200);
     assert_eq!(h.json()["ok"], true);
+    // No background check scheduled in tests: update fields present but inactive.
+    assert_eq!(h.json()["update_available"], false);
+    assert_eq!(h.json()["latest_version"], serde_json::Value::Null);
 
     let hs = get(s.addr, "/v1/harnesses", &[]).await.json();
     assert_eq!(hs[0]["id"], "claude");

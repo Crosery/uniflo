@@ -51,6 +51,17 @@ enum Cmd {
         /// Ignore and do not write the on-disk index cache.
         #[arg(long)]
         no_cache: bool,
+        /// Skip the periodic crates.io update check (checks are opt-out; one HTTPS GET per interval).
+        #[arg(long)]
+        no_update_check: bool,
+    },
+    /// Check crates.io for a newer release, or install it (`cargo install uniflo --force`).
+    Update {
+        /// Only report; do not install.
+        #[arg(long)]
+        check: bool,
+        #[arg(long)]
+        json: bool,
     },
     /// One-shot in-process index; prints coverage per harness.
     Scan {
@@ -115,7 +126,7 @@ enum Cmd {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Daemon { ref bind, ref cors_origins, ref allow_hosts, stale_after, no_cache } => {
+        Cmd::Daemon { ref bind, ref cors_origins, ref allow_hosts, stale_after, no_cache, no_update_check } => {
             let guard = GuardOptions {
                 token: cli.token.clone(),
                 cors_origins: cors_origins.clone(),
@@ -124,9 +135,10 @@ fn main() -> Result<()> {
             if !allow_hosts.is_empty() && guard.token.is_none() {
                 bail!("--allow-host exposes transcripts beyond loopback; set --token as well");
             }
-            daemon(bind, guard, stale_after, no_cache)
+            daemon(bind, guard, stale_after, no_cache, !no_update_check)
         }
         Cmd::Scan { json, no_cache } => scan(json, no_cache),
+        Cmd::Update { check, json } => update(check, json),
         ref cmd => Source::open(&cli)?.run(cmd),
     }
 }
@@ -139,14 +151,17 @@ fn engine_opts(no_cache: bool, stale_after: u64) -> EngineOptions {
     }
 }
 
-fn daemon(bind: &str, guard: GuardOptions, stale_after: u64, no_cache: bool) -> Result<()> {
+fn daemon(bind: &str, guard: GuardOptions, stale_after: u64, no_cache: bool, update_check: bool) -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "uniflo=info,warn".into()),
         )
         .with_writer(std::io::stderr)
         .init();
-    let engine = Engine::new(uniflo_adapters::all(), engine_opts(no_cache, stale_after));
+    let mut opts = engine_opts(no_cache, stale_after);
+    // Background crates.io check: hourly; the first one fires right after startup.
+    opts.update_check = update_check.then(|| Duration::from_secs(3600));
+    let engine = Engine::new(uniflo_adapters::all(), opts);
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     rt.block_on(async move {
         let listener = tokio::net::TcpListener::bind(bind).await.with_context(|| format!("bind {bind}"))?;
@@ -210,6 +225,79 @@ fn scan(json: bool, no_cache: bool) -> Result<()> {
     }
     if let Some(e) = stats.last_error {
         println!("\nlast read error: {e}");
+    }
+    Ok(())
+}
+
+/// Check crates.io, and unless `--check`, install the new version with cargo and restart the daemon.
+fn update(check: bool, json: bool) -> Result<()> {
+    let info = uniflo_core::update::check();
+    if json {
+        println!("{}", serde_json::to_string_pretty(&info)?);
+        if info.available {
+            std::process::exit(10);
+        }
+        return Ok(());
+    }
+    match (&info.latest, &info.error) {
+        (_, Some(err)) => println!("uniflo {}: 无法检查更新 — {err}", info.current),
+        (Some(latest), _) if info.available => println!("uniflo {} → 新版本 {} 可用", info.current, latest),
+        (Some(latest), _) => println!("uniflo {} 已是最新（crates.io 最新 {}）", info.current, latest),
+        (None, None) => println!("uniflo {}: crates.io 没有已发布版本", info.current),
+    }
+    if !info.available || check {
+        return Ok(());
+    }
+    println!("运行 `cargo install uniflo --force` …（需要 PATH 里有 cargo）");
+    let status = std::process::Command::new("cargo")
+        .args(["install", "uniflo", "--force"])
+        .status()
+        .context("cargo 不可用；手动运行 `cargo install uniflo --force`")?;
+    if !status.success() {
+        bail!("cargo install 失败（exit {:?}）", status.code());
+    }
+    println!("已安装 uniflo {}。", info.latest.as_deref().unwrap_or("?"));
+    // Replace the running daemon so the new binary actually serves requests.
+    #[cfg(target_os = "macos")]
+    {
+        let loaded = std::process::Command::new("launchctl")
+            .args(["list"])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).contains("com.crosery.uniflo"))
+            .unwrap_or(false);
+        if loaded {
+            let uid = std::process::Command::new("id")
+                .arg("-u")
+                .output()
+                .ok()
+                .and_then(|o| String::from_utf8(o.stdout).ok())
+                .map(|s| s.trim().to_owned());
+            let ok = uid.is_some_and(|uid| {
+                std::process::Command::new("launchctl")
+                    .args(["kickstart", "-k", &format!("gui/{uid}/com.crosery.uniflo")])
+                    .status()
+                    .map(|s| s.success())
+                    .unwrap_or(false)
+            });
+            println!(
+                "{}",
+                if ok {
+                    "launchd 服务已重启（KeepAlive），新守护进程在跑。"
+                } else {
+                    "launchd 服务在跑但自动重启失败：`launchctl kickstart -k gui/$(id -u)/com.crosery.uniflo`"
+                }
+            );
+        } else {
+            println!("守护进程若正在运行，重启后生效：`uniflo daemon`（旧进程仍是旧版本）。");
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        println!(
+            "守护进程若正在运行，请先停掉再启动新版（Windows 上运行中的二进制无法被覆盖，建议 update 前停 daemon）。"
+        );
     }
     Ok(())
 }
@@ -357,7 +445,7 @@ impl Source {
                 }
                 Ok(())
             }
-            Cmd::Daemon { .. } | Cmd::Scan { .. } => unreachable!(),
+            Cmd::Daemon { .. } | Cmd::Scan { .. } | Cmd::Update { .. } => unreachable!(),
         }
     }
 }

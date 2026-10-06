@@ -119,6 +119,8 @@ async fn health(State(s): State<AppState>) -> impl IntoResponse {
         "sessions": st.sessions,
         "working": st.working,
         "uptime_ms": st.uptime_ms,
+        "update_available": st.update.as_ref().is_some_and(|u| u.available),
+        "latest_version": st.update.as_ref().and_then(|u| u.latest.clone()),
     }))
 }
 

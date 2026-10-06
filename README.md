@@ -47,6 +47,18 @@ open http://127.0.0.1:7311/demo           # 打开内置网页演示
 scripts/install-service.sh
 ```
 
+### 升级
+
+守护进程默认每小时向 crates.io 稀疏索引发一次 HTTPS GET（系统 `curl`），发现新版本会记在 `/v1/health` 与 `/v1/stats` 里：
+
+```sh
+uniflo update --check                     # 只查询有没有新版本（退出码 10 = 有新版）
+uniflo update                             # cargo install uniflo --force 安装，macOS 上尝试 kickstart 重启 launchd 服务
+uniflo daemon --no-update-check           # 关闭后台检查
+```
+
+Windows 上运行中的 exe 无法被覆盖：先停掉 daemon 再执行 `uniflo update`。
+
 CLI（有守护进程时连它，否则 `--local` 进程内索引）：
 
 ```sh

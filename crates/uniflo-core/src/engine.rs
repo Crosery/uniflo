@@ -33,6 +33,8 @@ pub struct EngineOptions {
     pub live_poll: Duration,
     pub rescan: Duration,
     pub threads: usize,
+    /// Periodic crates.io update check (daemon opt-in); `None` disables it.
+    pub update_check: Option<Duration>,
 }
 
 impl Default for EngineOptions {
@@ -46,6 +48,7 @@ impl Default for EngineOptions {
             live_poll: Duration::from_secs(1),
             rescan: Duration::from_secs(30),
             threads: std::thread::available_parallelism().map_or(4, |n| n.get()),
+            update_check: None,
         }
     }
 }
@@ -193,6 +196,8 @@ pub struct Stats {
     pub last_error: Option<String>,
     /// `harness:discriminator` → count of records no decoder rule covered.
     pub unknown: BTreeMap<String, u64>,
+    /// Last crates.io update check (daemon background task); `None` until it lands.
+    pub update: Option<crate::update::UpdateInfo>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -217,6 +222,9 @@ enum Msg {
     /// Result of a live probe, applied on the loop so writes stay single-threaded.
     Probed(usize, Vec<LiveSession>),
     Rescan,
+    UpdateTick,
+    /// Result of the crates.io fetch (blocking curl), applied on the loop.
+    UpdateApplied(crate::update::UpdateInfo),
 }
 
 pub struct Engine {
@@ -231,6 +239,8 @@ pub struct Engine {
     dirty: AtomicBool,
     /// One in-flight live probe per adapter (probes may shell out to `ps`/`lsof`).
     probing: Vec<AtomicBool>,
+    /// One in-flight crates.io fetch.
+    updating: AtomicBool,
     started: i64,
 }
 
@@ -251,6 +261,7 @@ impl Engine {
             replay: Mutex::new(VecDeque::new()),
             stats: Mutex::new(Stats::default()),
             dirty: AtomicBool::new(false),
+            updating: AtomicBool::new(false),
             started: now_ms(),
         })
     }
@@ -644,6 +655,11 @@ impl Engine {
         let _ = tx.send(Msg::Rescan);
 
         spawn_ticker(tx.clone(), self.opts.rescan, || Msg::Rescan);
+        if let Some(every) = self.opts.update_check {
+            // Check once at start, then periodically; the fetch itself runs blocking.
+            let _ = tx.send(Msg::UpdateTick);
+            spawn_ticker(tx.clone(), every, || Msg::UpdateTick);
+        }
         let me = self.clone();
         let probed = tokio::task::spawn_blocking(move || {
             (0..me.adapters.len())
@@ -668,11 +684,14 @@ impl Engine {
                     let mut live: HashSet<usize> = HashSet::new();
                     let mut probed: Vec<(usize, Vec<LiveSession>)> = Vec::new();
                     let mut rescan = false;
+                    let mut update = false;
                     let mut push = |m: Msg| match m {
                         Msg::Changed(p) => { if seen.insert(p.clone()) { changed.push(p) } }
                         Msg::Live(i) => { live.insert(i); }
                         Msg::Probed(i, list) => probed.push((i, list)),
                         Msg::Rescan => rescan = true,
+                        Msg::UpdateTick => update = true,
+                        Msg::UpdateApplied(info) => self.set_update(info),
                     };
                     push(msg);
                     while let Ok(m) = rx.try_recv() { push(m) }
@@ -687,6 +706,7 @@ impl Engine {
                         self.publish(p);
                     }
                     for i in live { self.spawn_probe(i, tx.clone()); }
+                    if update { self.spawn_update_check(tx.clone()); }
                 }
                 _ = hot.tick() => {
                     for p in self.hot_sources() { self.clone().process(p).await; }
@@ -841,6 +861,33 @@ impl Engine {
                 let _ = tx.send(Msg::Probed(adapter, list));
             }
         });
+    }
+    /// Fetch the crates.io index off the loop; the result comes back as [`Msg::UpdateApplied`].
+    fn spawn_update_check(self: &Arc<Self>, tx: mpsc::UnboundedSender<Msg>) {
+        if self.updating.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let me = self.clone();
+        tokio::spawn(async move {
+            let res = tokio::task::spawn_blocking(crate::update::check).await;
+            me.updating.store(false, Ordering::Release);
+            if let Ok(info) = res {
+                let _ = tx.send(Msg::UpdateApplied(info));
+            }
+        });
+    }
+
+    fn set_update(&self, info: crate::update::UpdateInfo) {
+        if info.available {
+            tracing::info!(
+                "uniflo {} 可用（当前 {}），运行 `uniflo update` 升级",
+                info.latest.as_deref().unwrap_or("?"),
+                info.current
+            );
+        } else if let Some(err) = &info.error {
+            tracing::debug!("update check failed: {err}");
+        }
+        self.stats.lock().unwrap().update = Some(info);
     }
 
     /// Feed a source change directly (tests, external triggers).
