@@ -27,7 +27,7 @@
 | `zcode` | ZCode | `~/.zcode/cli/db/db.sqlite` | 同 OpenCode | 同 OpenCode | `ps` + cwd 查询（Win: PowerShell） |
 | `mimocode` | MiMo Code | `~/.local/share/mimocode/mimocode.db`（Windows: `%LOCALAPPDATA%\mimocode\mimocode.db`） | 同 OpenCode | 同 OpenCode | `ps` + cwd 查询（Win: PowerShell） |
 | `workbuddy` | WorkBuddy | `~/.workbuddy/projects/<slug>/<id>.jsonl` | JSONL | 助手消息完成 | `~/.workbuddy/sessions/<pid>.json` |
-| `minimax` | MiniMax Code | `~/.minimax/v2/sqlite/runtime-state.sqlite` | SQLite | `turn_ingress` completed/failed/aborted | — |
+| `minimax` | MiniMax Code | `~/.minimax/v2/sqlite/runtime-state.sqlite` | SQLite（WAL，助手行原地重写） | `turn_ingress` completed/failed/aborted | `turn_ingress` accepted + `ps`/`lsof`（Win: PowerShell） |
 | `hermes` | Hermes | `~/.hermes/state.db` | SQLite | 终止型 `finish_reason` | — |
 | `factory` | Factory Droid | `~/.factory/sessions/<slug>/<id>.jsonl` | JSONL | 纯文本回复 | — |
 | `reasonix` | Reasonix | `~/.reasonix/projects/<slug>/sessions/*.events.jsonl` | 追加 / 替换日志 | 纯文本回复 | — |
