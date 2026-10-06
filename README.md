@@ -49,11 +49,12 @@ scripts/install-service.sh
 
 ### 升级
 
-守护进程默认每小时向 crates.io 稀疏索引发一次 HTTPS GET（系统 `curl`），发现新版本会记在 `/v1/health` 与 `/v1/stats` 里：
+守护进程默认每小时向 crates.io 稀疏索引发一次 HTTPS GET（系统 `curl`）。**更新只指向正式版**；预发布版（`-rc`/`-beta`）仅被探测并提示，装不装由你决定：
 
 ```sh
-uniflo update --check                     # 只查询有没有新版本（退出码 10 = 有新版）
-uniflo update                             # cargo install uniflo --force 安装，macOS 上尝试 kickstart 重启 launchd 服务
+uniflo update --check                     # 只查询有没有新正式版（退出码 10 = 有新版）
+uniflo update                             # cargo install uniflo --force --version <最新正式版>，macOS 上尝试 kickstart 重启 launchd 服务
+uniflo update --pre                       # 显式选择：安装探测到的最新预发布版（不保证稳定）
 uniflo daemon --no-update-check           # 关闭后台检查
 ```
 

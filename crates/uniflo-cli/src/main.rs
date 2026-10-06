@@ -55,11 +55,15 @@ enum Cmd {
         #[arg(long)]
         no_update_check: bool,
     },
-    /// Check crates.io for a newer release, or install it (`cargo install uniflo --force`).
+    /// Check crates.io for a newer stable release, or install it (`cargo install uniflo --force`).
     Update {
         /// Only report; do not install.
         #[arg(long)]
         check: bool,
+        /// Install the newest prerelease instead of the stable release (explicit opt-in;
+        /// prereleases do not guarantee stability).
+        #[arg(long = "pre")]
+        prerelease: bool,
         #[arg(long)]
         json: bool,
     },
@@ -138,7 +142,7 @@ fn main() -> Result<()> {
             daemon(bind, guard, stale_after, no_cache, !no_update_check)
         }
         Cmd::Scan { json, no_cache } => scan(json, no_cache),
-        Cmd::Update { check, json } => update(check, json),
+        Cmd::Update { check, prerelease, json } => update(check, prerelease, json),
         ref cmd => Source::open(&cli)?.run(cmd),
     }
 }
@@ -229,8 +233,10 @@ fn scan(json: bool, no_cache: bool) -> Result<()> {
     Ok(())
 }
 
-/// Check crates.io, and unless `--check`, install the new version with cargo and restart the daemon.
-fn update(check: bool, json: bool) -> Result<()> {
+/// Check crates.io, and unless `--check`, install the new version with cargo and restart the
+/// daemon. The default target is the newest **stable** release; a prerelease is only ever
+/// announced, and installed solely via the explicit `--pre` opt-in.
+fn update(check: bool, prerelease: bool, json: bool) -> Result<()> {
     let info = uniflo_core::update::check();
     if json {
         println!("{}", serde_json::to_string_pretty(&info)?);
@@ -239,24 +245,44 @@ fn update(check: bool, json: bool) -> Result<()> {
         }
         return Ok(());
     }
-    match (&info.latest, &info.error) {
-        (_, Some(err)) => println!("uniflo {}: 无法检查更新 — {err}", info.current),
-        (Some(latest), _) if info.available => println!("uniflo {} → 新版本 {} 可用", info.current, latest),
-        (Some(latest), _) => println!("uniflo {} 已是最新（crates.io 最新 {}）", info.current, latest),
-        (None, None) => println!("uniflo {}: crates.io 没有已发布版本", info.current),
-    }
-    if !info.available || check {
+    if let Some(err) = &info.error {
+        println!("uniflo {}: 无法检查更新 — {err}", info.current);
         return Ok(());
     }
-    println!("运行 `cargo install uniflo --force` …（需要 PATH 里有 cargo）");
+    // Decide what (if anything) to install.
+    let target: Option<(&str, bool)> = if prerelease {
+        info.latest_prerelease.as_deref().map(|v| (v, true))
+    } else {
+        info.available.then(|| (info.latest.as_deref().unwrap_or("?"), false))
+    };
+    if prerelease && target.is_none() {
+        println!("uniflo {}：crates.io 上没有比你更新的预发布版。", info.current);
+        return Ok(());
+    }
+    match (&info.latest, target) {
+        (_, Some((v, true))) => println!("uniflo {} → 预发布版 {}（不保证稳定，已按 --pre 显式选择）", info.current, v),
+        (_, Some((v, _))) => println!("uniflo {} → 新版本 {} 可用（正式版）", info.current, v),
+        (Some(latest), None) if info.current.contains('-') => {
+            println!("uniflo {} 为预发布版；最新正式版 {}。", info.current, latest)
+        }
+        (Some(latest), None) => println!("uniflo {} 已是最新（crates.io 最新正式版 {}）", info.current, latest),
+        (None, None) => println!("uniflo {}: crates.io 没有已发布版本", info.current),
+    }
+    if !prerelease && let Some(pre) = &info.latest_prerelease {
+        println!("检测到预发布 {pre}（不保证稳定）；如需试用：`uniflo update --pre`。");
+    }
+    let Some((version, is_pre)) = target else { return Ok(()) };
+    if check {
+        return Ok(());
+    }
     let status = std::process::Command::new("cargo")
-        .args(["install", "uniflo", "--force"])
+        .args(["install", "uniflo", "--force", "--version", version])
         .status()
-        .context("cargo 不可用；手动运行 `cargo install uniflo --force`")?;
+        .with_context(|| format!("cargo 不可用；手动运行 `cargo install uniflo --force --version {version}`"))?;
     if !status.success() {
         bail!("cargo install 失败（exit {:?}）", status.code());
     }
-    println!("已安装 uniflo {}。", info.latest.as_deref().unwrap_or("?"));
+    println!("已安装 uniflo {}{}。", version, if is_pre { "（预发布版）" } else { "" });
     // Replace the running daemon so the new binary actually serves requests.
     #[cfg(target_os = "macos")]
     {

@@ -12,9 +12,9 @@
 |---|---|---|
 | `GET /` | — | 名称、版本、schema 版本、端点列表 |
 | `GET /demo` | 页面参数见 `examples/web/index.html` 头注释 | 内置网页演示（单文件，零依赖） |
-| `GET /v1/health` | — | `{ok, version, schema, seq, sessions, working, uptime_ms, update_available, latest_version}` |
+| `GET /v1/health` | — | `{ok, version, schema, seq, sessions, working, uptime_ms, update_available, latest_version, latest_prerelease}` |
 | `GET /v1/harnesses` | — | `Harness[]`：`{id, name, roots, sessions, working}` |
-| `GET /v1/stats` | — | 索引与读取计数：`sessions`、`sources`、`bad_lines`、`unknown`、`read_errors`、`index_ms`…；`update` 为守护进程最近一次 crates.io 检查结果 `{current, latest, available, checked_at, error}`，未开启后台检查时为 `null` |
+| `GET /v1/stats` | — | 索引与读取计数：`sessions`、`sources`、`bad_lines`、`unknown`、`read_errors`、`index_ms`…；`update` 为守护进程最近一次 crates.io 检查结果 `{current, latest, available, latest_prerelease, checked_at, error}`（`latest`/`available` 只看正式版，`latest_prerelease` 仅为探测到的更新预发布版、供用户自行决定是否安装），未开启后台检查时为 `null` |
 | `GET /v1/sessions` | `q` 查询（`docs/search.md`）、`limit`（默认 100）、`format=ndjson` | `Session[]`，有 `q` 时按相关度、否则按 `updated_at` 倒序 |
 | `GET /v1/sessions/{key}` | — | `Session`；未知 key 返回 404 |
 | `GET /v1/sessions/{key}/events` | `limit`（默认 200，最大 10000）、`before=<pos>`、`max_text`（默认 32768，0 不截断）、`format=ndjson` | `{session, events, next_before}`；`events` 按时间正序，翻更早一页传 `before=next_before`；`next_before` 为 `null` 当且仅当没有更早的事件 |

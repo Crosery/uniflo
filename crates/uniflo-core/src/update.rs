@@ -41,9 +41,19 @@ pub fn is_newer(latest: &str, current: &str) -> bool {
     }
 }
 
-/// Pick the highest non-yanked `vers` from sparse-index NDJSON.
-pub fn parse_latest(body: &str) -> Option<String> {
-    let mut best: Option<String> = None;
+/// Highest non-yanked versions on crates.io, split by channel.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Releases {
+    /// Newest stable release (`X.Y.Z`, no prerelease suffix).
+    pub stable: Option<String>,
+    /// Newest prerelease (`X.Y.Z-rc.N`); informational only — never an automatic
+    /// upgrade target, prereleases don't guarantee stability.
+    pub prerelease: Option<String>,
+}
+
+/// Pick the highest non-yanked stable and prerelease `vers` from sparse-index NDJSON.
+pub fn parse_releases(body: &str) -> Releases {
+    let mut out = Releases::default();
     for line in body.lines() {
         let Ok(obj) = serde_json::from_str::<serde_json::Value>(line) else { continue };
         if obj.get("yanked").and_then(|y| y.as_bool()).unwrap_or(false) {
@@ -53,26 +63,32 @@ pub fn parse_latest(body: &str) -> Option<String> {
         if version_key(vers).is_none() {
             continue;
         }
-        if best.as_deref().is_none_or(|b| is_newer(vers, b)) {
-            best = Some(vers.to_owned());
+        let slot = if vers.contains('-') { &mut out.prerelease } else { &mut out.stable };
+        if slot.as_deref().is_none_or(|b| is_newer(vers, b)) {
+            *slot = Some(vers.to_owned());
         }
     }
-    best
+    out
 }
 /// Outcome of one update check, surfaced in [`crate::engine::Stats`] and `/v1/stats`.
 #[derive(Debug, Clone, Serialize)]
 pub struct UpdateInfo {
     pub current: String,
-    /// Highest non-yanked version on crates.io; `None` when the fetch failed.
+    /// Highest non-yanked **stable** version on crates.io; `None` when the fetch failed.
+    /// Prereleases never land here — the default upgrade path is stable-only.
     pub latest: Option<String>,
+    /// True only when a stable `latest` is newer than `current`.
     pub available: bool,
+    /// Newest non-yanked prerelease strictly newer than both `current` and `latest`,
+    /// detected for information only; installing it must be an explicit user choice.
+    pub latest_prerelease: Option<String>,
     pub checked_at: i64,
     pub error: Option<String>,
 }
 
 /// Fetch the sparse index with the system curl. Err carries a human-readable reason
 /// (missing curl, network failure, timeout) — never a panic path for the daemon.
-pub fn fetch_latest() -> Result<String, String> {
+pub fn fetch_releases() -> Result<Releases, String> {
     #[cfg(windows)]
     let bin = "curl.exe";
     #[cfg(not(windows))]
@@ -87,21 +103,42 @@ pub fn fetch_latest() -> Result<String, String> {
         return Err(format!("crates.io index fetch failed (exit {:?})", out.status.code()));
     }
     let body = String::from_utf8_lossy(&out.stdout).into_owned();
-    parse_latest(&body).ok_or_else(|| "no published versions found".to_owned())
+    let rel = parse_releases(&body);
+    if rel.stable.is_none() && rel.prerelease.is_none() {
+        return Err("no published versions found".to_owned());
+    }
+    Ok(rel)
+}
+
+/// Judge a release pair against the running version: `available` is driven by the
+/// stable channel only; a prerelease is announced when it is ahead of both the
+/// current version and the recommended stable, and never before it.
+pub fn evaluate(current: &str, rel: &Releases) -> UpdateInfo {
+    let available = rel.stable.as_deref().is_some_and(|s| is_newer(s, current));
+    let newer_than_stable =
+        rel.stable.as_deref().is_none_or(|s| rel.prerelease.as_deref().is_some_and(|p| is_newer(p, s)));
+    let newer_than_current = rel.prerelease.as_deref().is_some_and(|p| is_newer(p, current));
+    let latest_prerelease = if newer_than_stable && newer_than_current { rel.prerelease.clone() } else { None };
+    UpdateInfo {
+        current: current.to_owned(),
+        latest: rel.stable.clone(),
+        available,
+        latest_prerelease,
+        checked_at: crate::util::now_ms(),
+        error: None,
+    }
 }
 
 /// One blocking update check; never fails, errors land in `UpdateInfo::error`.
 pub fn check() -> UpdateInfo {
     let current = current_version().to_owned();
-    match fetch_latest() {
-        Ok(latest) => {
-            let available = is_newer(&latest, &current);
-            UpdateInfo { current, latest: Some(latest), available, checked_at: crate::util::now_ms(), error: None }
-        }
+    match fetch_releases() {
+        Ok(rel) => evaluate(&current, &rel),
         Err(error) => UpdateInfo {
             current,
             latest: None,
             available: false,
+            latest_prerelease: None,
             checked_at: crate::util::now_ms(),
             error: Some(error),
         },
@@ -129,15 +166,59 @@ mod tests {
     }
 
     #[test]
-    fn sparse_index_skips_yanked_and_picks_highest() {
+    fn sparse_index_skips_yanked_and_splits_channels() {
         let body = concat!(
             "{\"name\":\"uniflo\",\"vers\":\"0.1.0\",\"yanked\":false}\n",
             "{\"name\":\"uniflo\",\"vers\":\"0.1.2\",\"yanked\":false}\n",
             "not json\n",
             "{\"name\":\"uniflo\",\"vers\":\"0.1.3\",\"yanked\":false}\n",
-            "{\"name\":\"uniflo\",\"vers\":\"9.9.9\",\"yanked\":true}\n"
+            "{\"name\":\"uniflo\",\"vers\":\"0.1.4-rc.1\",\"yanked\":false}\n",
+            "{\"name\":\"uniflo\",\"vers\":\"0.1.4-rc.2\",\"yanked\":false}\n",
+            "{\"name\":\"uniflo\",\"vers\":\"9.9.9\",\"yanked\":true}\n",
+            "{\"name\":\"uniflo\",\"vers\":\"9.9.9-rc.1\",\"yanked\":true}\n"
         );
-        assert_eq!(parse_latest(body).as_deref(), Some("0.1.3"));
-        assert_eq!(parse_latest(""), None);
+        let rel = parse_releases(body);
+        assert_eq!(rel.stable.as_deref(), Some("0.1.3"));
+        assert_eq!(rel.prerelease.as_deref(), Some("0.1.4-rc.2"));
+        let empty = parse_releases("");
+        assert_eq!(empty, Releases::default());
+    }
+
+    #[test]
+    fn prerelease_is_never_an_automatic_update() {
+        // Stable 0.1.4 + newer rc 0.1.5-rc.1, running stable 0.1.3:
+        // actionable target is the stable; rc is announced as opt-in info.
+        let rel = Releases { stable: Some("0.1.4".into()), prerelease: Some("0.1.5-rc.1".into()) };
+        let info = evaluate("0.1.3", &rel);
+        assert!(info.available);
+        assert_eq!(info.latest.as_deref(), Some("0.1.4"));
+        assert_eq!(info.latest_prerelease.as_deref(), Some("0.1.5-rc.1"));
+
+        // Running the latest stable with only an rc ahead: NOT available, rc reported.
+        let rel = Releases { stable: Some("0.1.4".into()), prerelease: Some("0.1.5-rc.1".into()) };
+        let info = evaluate("0.1.4", &rel);
+        assert!(!info.available);
+        assert_eq!(info.latest.as_deref(), Some("0.1.4"));
+        assert_eq!(info.latest_prerelease.as_deref(), Some("0.1.5-rc.1"));
+
+        // Running a prerelease (rc.1) while stable 0.1.3 is the newest stable and the
+        // only prerelease ahead is rc.2: stable is NOT newer, so not available; rc.2 shown.
+        let rel = Releases { stable: Some("0.1.3".into()), prerelease: Some("0.1.4-rc.2".into()) };
+        let info = evaluate("0.1.4-rc.1", &rel);
+        assert!(!info.available);
+        assert_eq!(info.latest.as_deref(), Some("0.1.3"));
+        assert_eq!(info.latest_prerelease.as_deref(), Some("0.1.4-rc.2"));
+
+        // An rc behind the current stable is noise, never announced.
+        let rel = Releases { stable: Some("0.1.4".into()), prerelease: Some("0.1.4-rc.1".into()) };
+        let info = evaluate("0.1.4", &rel);
+        assert!(!info.available);
+        assert_eq!(info.latest_prerelease, None);
+
+        // Stable-only channel still works; no prerelease to report.
+        let rel = Releases { stable: Some("0.2.0".into()), prerelease: None };
+        let info = evaluate("0.1.4", &rel);
+        assert!(info.available);
+        assert_eq!(info.latest_prerelease, None);
     }
 }

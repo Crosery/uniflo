@@ -887,6 +887,9 @@ impl Engine {
         } else if let Some(err) = &info.error {
             tracing::debug!("update check failed: {err}");
         }
+        if let Some(pre) = &info.latest_prerelease {
+            tracing::info!("检测到预发布 {pre}（不保证稳定），如需试用：`uniflo update --pre`");
+        }
         self.stats.lock().unwrap().update = Some(info);
     }
 

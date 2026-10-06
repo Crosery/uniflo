@@ -11,8 +11,9 @@ v0.1.3 要能发现并安装新版本。约束：依赖树里没有任何 HTTP �
 ## 决策
 
 - 检查：`crates/uniflo-core/src/update.rs` 用 `std::process::Command` 调系统 `curl -fsS --max-time 15`，GET `https://index.crates.io/un/if/uniflo`（NDJSON，逐行解析 `vers`，跳过 yanked），比较用自写的三位号 + 预发布 rank。与 `core::procs` 调 `ps`/`lsof` 同一先例。
-- 时机：`uniflo daemon` 默认每小时一次 + 启动后一次（`EngineOptions::update_check`，`--no-update-check` 关闭）；结果写进 `Stats::update`，经 `/v1/stats` 与 `/v1/health`（`update_available`/`latest_version`，可选字段，非 wire schema）暴露。
-- 安装：`uniflo update` 执行 `cargo install uniflo --force`；macOS 上若 launchd 服务已加载则 `launchctl kickstart -k` 重启守护进程，其他平台打印重启指引。
+- 通道分离（v0.1.4 起）：解析结果拆成「最新正式版」与「最新预发布版」两条。`available` 与 `/v1/health` 的 `latest_version` 只由正式版驱动；预发布版只作为探测信息经 `latest_prerelease` 暴露（正式版或当前版本更新时不播报），守护进程与 CLI 均以「不保证稳定，需显式选择」的措辞提示。原因：v0.1.4-rc.1 发布后，旧检查把 rc 当作可自动安装的最新版本，违背「正式版稳定、预发布由用户决定」的发布规范。
+- 时机：`uniflo daemon` 默认每小时一次 + 启动后一次（`EngineOptions::update_check`，`--no-update-check` 关闭）；结果写进 `Stats::update`，经 `/v1/stats` 与 `/v1/health`（`update_available`/`latest_version`/`latest_prerelease`，可选字段，非 wire schema）暴露。
+- 安装：`uniflo update` 执行 `cargo install uniflo --force --version <最新正式版>`；试用预发布必须显式 `uniflo update --pre`（安装探测到的最新预发布版）。macOS 上若 launchd 服务已加载则 `launchctl kickstart -k` 重启守护进程，其他平台打印重启指引。
 - 失败语义：任何网络/curl 缺失/解析失败都落进 `UpdateInfo::error`，`available=false`，不影响索引主链路。
 
 ## 否决项
