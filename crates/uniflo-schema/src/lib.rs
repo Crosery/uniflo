@@ -197,6 +197,10 @@ pub struct Harness {
     pub roots: Vec<String>,
     pub sessions: usize,
     pub working: usize,
+    /// Gateway path of the monochrome brand icon (`/v1/harnesses/{id}/icon.svg`); absent when
+    /// the harness has none (clients draw a letter block).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
 }
 
 /// One line of a live stream. `seq` is global and strictly increasing per daemon run;

@@ -355,6 +355,7 @@ impl Engine {
                     roots: a.roots().iter().map(|p| p.display().to_string()).collect(),
                     sessions,
                     working,
+                    icon: None,
                 }
             })
             .collect()

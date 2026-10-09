@@ -163,5 +163,6 @@ agent（Claude Code、Codex…）──stdio JSON-RPC──► uniflo mcp（unif
 - 新 harness：实现 `LineDecoder`（一文件一会话的 JSONL）或 `Adapter`（其他），见 `docs/adapters.md`。
 - 新传输：基于 `uniflo_gateway::stream::envelopes()`，与 SSE/NDJSON/WS 共用过滤与截断。
 - 新写接口：用 `POST` / `DELETE` 等写方法挂到 `router_with`，网关守卫自动对它调用 `uniflo_gateway::write::check`；在 `docs/api.md#写接口` 登记。
+- harness 图标：`uniflo-gateway::icons` 从内嵌的演示页里切出 `#harness-icons` 精灵图的 `<symbol>`，提供 `/v1/harnesses/{id}/icon.svg` 并填 `Harness.icon`；图标只有演示页这一份，换图标改页面即可。
 - 网页客户端：`examples/web/index.html` 是参考实现（快照 + `since` 续流、按 id upsert、工具结果并入调用卡片）；`crates/uniflo-gateway/src/index.html` 是内容相同的 cargo 包内副本，由网关编译进 `/demo`，修改时必须同步。
 - 嵌入式使用：直接依赖 `uniflo-core` + `uniflo-adapters`，`Engine::new(all(), opts)` → `index()` → `run()`，无需网关；不跑 `run()` 时用 `index_usage()` 一次性建好用量账本，再调 `usage_report()` / `session_usage()` / `models()`。`/v1/usage` 的参数解析与会话过滤在 `uniflo_gateway::usage::UsageParams`，CLI 本地模式复用它。要全文检索再加 `uniflo-search`，`Fts::start(engine, FtsOptions::default())` → `search()`。

@@ -2,7 +2,7 @@
 
 > 所有 harness 归一后的唯一对外格式：`Session`、`Event`、`Envelope`，以及接口响应类型。真源 `crates/uniflo-schema/src/`。
 
-状态：`current` · 更新：2026-10-09
+状态：`current` · 更新：2026-10-10
 
 ## 兼容规则
 
@@ -124,6 +124,19 @@
 | `MemoryContent` | `/v1/memory/file` | `MemoryFile` 的全部字段，加 `content`（UTF-8，非法字节替换，最多 256 KB）、`truncated?`（文件比 `content` 大时为 true，否则不输出） |
 | `ContextReport` | `uniflo context --json`、MCP `uniflo_context` | `project`（git 根，不在仓库里时为目录本身）、`since`、`sessions[]`（最近活动倒序） |
 | `ContextSession` | 一个会话 | `key`、`harness`、`title?`、`cwd?`、`updated_at`、`preview?`（首条用户输入，最多 80 字符含省略号）、`cost_usd`（API 等价费用，未知时 `null`） |
+
+## Harness
+
+`GET /v1/harnesses` 的一项：一个已支持的 harness 及其实时计数。
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `id` | string | 会话 key 里的 harness 部分 |
+| `name` | string | 显示名 |
+| `roots` | string[] | 本机存在的数据根目录 |
+| `sessions` | number | 当前索引里的会话数 |
+| `working` | number | 其中状态为 `work` 的会话数 |
+| `icon` | string? | 单色品牌图标的网关路径 `/v1/harnesses/{id}/icon.svg`；没有品牌图标时不输出，客户端显示字母块（`docs/api.md`） |
 
 ## Envelope
 
