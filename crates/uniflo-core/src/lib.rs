@@ -11,16 +11,21 @@
 //! - [`window`]: event windows centred on one event (search hit → transcript)
 //! - [`cleanup`]: user-confirmed session cleanup (plan → archive → trash); [`archive`] keeps
 //!   the compact transcripts of cleaned-up sessions
+//! - [`resume`], [`memory`], [`context`]: resume commands, agent memory / instruction files and
+//!   the recent-session hand-off for agents
 
 pub mod adapter;
 pub mod archive;
 pub mod cache;
 pub mod cleanup;
+pub mod context;
 pub mod engine;
 pub mod jsonl;
+pub mod memory;
 pub mod paths;
 pub mod pricing;
 pub mod procs;
+pub mod resume;
 pub mod status;
 pub mod update;
 pub mod usage;

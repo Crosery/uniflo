@@ -22,7 +22,7 @@ Engine（单写者循环）                  ← uniflo-core
    ▼
 Gateway（axum）                       ← uniflo-gateway
    REST 快照 · SSE / NDJSON / WebSocket 实时流 · /v1/search（只读 FTS 索引）
-   写接口（write::require_write）：/v1/cleanup/* → uniflo-core::cleanup
+   写接口（守卫对非 GET/HEAD/OPTIONS 调 write::check）：/v1/cleanup/*、DELETE /v1/archive/{key} → uniflo-core::cleanup；open-terminal → uniflo-core::resume
    ▼
 桌面端 / 网页端 / CLI（uniflo ls / tail / watch）
 ```
@@ -96,6 +96,23 @@ POST …/execute ─► Cleanup::execute（同一时间只跑一个），每个�
 - **回收站**：`Trash` trait；`SystemTrash`（`trash` crate，macOS 走 `NSFileManager`）、`DirTrash`（测试、`UNIFLO_TRASH_DIR`）、`NoTrash`（设了 `UNIFLO_HOME` 而没设 `UNIFLO_TRASH_DIR`）。
 - 依赖：`uniflo-core` 新增 `sha2`、`trash`，zstd 复用已有的 `ruzstd`；网关只持有 `Option<Arc<Cleanup>>`，为 `None` 时清理接口返回 503。
 
+## agent 接入
+
+用法与边界见 `docs/agents.md`、`docs/decisions/ADR-0007-setup-写-harness-配置.md`，这里只写代码分布与数据路径。
+
+```text
+agent（Claude Code、Codex…）──stdio JSON-RPC──► uniflo mcp（uniflo-cli::mcp）
+   │  每个工具 = 一个 GET
+   ├─ 守护进程在：HTTP 到 UNIFLO_URL（与 CLI 同一个 client）
+   └─ 不在：进程内 Engine::index() + uniflo_gateway::router()，agent::get_in_process 用 tower oneshot 直接调路由
+   ▼
+网关路由（REST 同一段代码）→ structuredContent
+```
+
+- `uniflo-core`：`resume`（各 harness 的恢复命令、会话 id 校验、POSIX / PowerShell 转义、终端启动脚本的 argv）、`memory`（记忆与指令文件的列举与无状态读权限判断）、`context`（项目最近会话的筛选与 Markdown）。都是纯函数，不碰网络。
+- `uniflo-gateway::agent`：`/v1/sessions/{key}/resume`、`/v1/sessions/{key}/open-terminal`（写接口，`osascript` 经可注入的 `Launcher` 运行，测试不开窗口）、`/v1/memory`、`/v1/memory/file`，以及 `get_in_process`。为此网关依赖 `tower`（`util` 特性，已在 axum 的依赖树里）。
+- `uniflo-cli`：`mcp`（协议层与工具）、`agent`（`resume` / `context` / `skill` 命令，`skill/SKILL.md` 编进二进制）、`setup/`（`harness.rs` 检测表、`edit.rs` JSON / TOML / hook 编辑与原子写、`mod.rs` 流程与 `setup.json` 记录）。setup 是安装器逻辑，只属于二进制，不进库 crate。
+
 ## 自有目录
 
 `uniflo-core::paths` 给出 Uniflo 自己的目录（不是 harness 的）：
@@ -103,7 +120,7 @@ POST …/execute ─► Cleanup::execute（同一时间只跑一个），每个�
 | 函数 | macOS 默认 | 覆盖 |
 |---|---|---|
 | `data_dir()` | `~/Library/Application Support/uniflo`（`pricing/`、会话清理的 `archive/` 在这里） | `UNIFLO_DATA_DIR` |
-| `config_dir()` | `~/Library/Application Support/uniflo` | `UNIFLO_CONFIG_DIR` |
+| `config_dir()` | `~/Library/Application Support/uniflo`（`setup.json` 在这里） | `UNIFLO_CONFIG_DIR` |
 | `cache_dir()` | `~/Library/Caches/uniflo` | `UNIFLO_CACHE_DIR` |
 
 设了 `UNIFLO_HOME` 时，三者按相对真实家目录的同一路径改挂到它下面，测试不会碰到真实目录。
@@ -145,6 +162,6 @@ POST …/execute ─► Cleanup::execute（同一时间只跑一个），每个�
 
 - 新 harness：实现 `LineDecoder`（一文件一会话的 JSONL）或 `Adapter`（其他），见 `docs/adapters.md`。
 - 新传输：基于 `uniflo_gateway::stream::envelopes()`，与 SSE/NDJSON/WS 共用过滤与截断。
-- 新写接口：挂在 `router_with` 的写路由上，经 `uniflo_gateway::write::require_write`，并登记到 `docs/api.md#写接口`。
+- 新写接口：用 `POST` / `DELETE` 等写方法挂到 `router_with`，网关守卫自动对它调用 `uniflo_gateway::write::check`；在 `docs/api.md#写接口` 登记。
 - 网页客户端：`examples/web/index.html` 是参考实现（快照 + `since` 续流、按 id upsert、工具结果并入调用卡片）；`crates/uniflo-gateway/src/index.html` 是内容相同的 cargo 包内副本，由网关编译进 `/demo`，修改时必须同步。
 - 嵌入式使用：直接依赖 `uniflo-core` + `uniflo-adapters`，`Engine::new(all(), opts)` → `index()` → `run()`，无需网关；不跑 `run()` 时用 `index_usage()` 一次性建好用量账本，再调 `usage_report()` / `session_usage()` / `models()`。`/v1/usage` 的参数解析与会话过滤在 `uniflo_gateway::usage::UsageParams`，CLI 本地模式复用它。要全文检索再加 `uniflo-search`，`Fts::start(engine, FtsOptions::default())` → `search()`。

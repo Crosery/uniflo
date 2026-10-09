@@ -1,6 +1,6 @@
 //! Session cleanup and archive endpoints over [`uniflo_core::cleanup::Cleanup`]:
 //! `POST /v1/cleanup/plan`, `POST /v1/cleanup/plans/{id}/execute`, `DELETE /v1/archive/{key}`
-//! (all behind [`crate::write::require_write`]) and `GET /v1/archive`.
+//! (write routes, see [`crate::write`]) and `GET /v1/archive`.
 
 use crate::{ApiError, AppState, with_seq};
 use axum::Json;

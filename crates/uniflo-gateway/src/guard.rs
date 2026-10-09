@@ -1,5 +1,5 @@
 //! Request guard: loopback Host (DNS-rebinding defense), Origin allow-list, optional token.
-//! Write endpoints add [`crate::write::require_write`] on top.
+//! Every write request (any method but GET / HEAD / OPTIONS) must also pass [`crate::write::check`].
 
 use axum::extract::{Request, State};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
@@ -57,6 +57,10 @@ fn constant_eq(a: &str, b: &str) -> bool {
     a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
+fn is_write(m: &Method) -> bool {
+    !matches!(*m, Method::GET | Method::HEAD | Method::OPTIONS)
+}
+
 pub(crate) fn deny(code: StatusCode, msg: &str) -> Response {
     (code, axum::Json(serde_json::json!({ "error": msg }))).into_response()
 }
@@ -97,6 +101,11 @@ pub async fn guard(State(g): State<Arc<GuardOptions>>, req: Request, next: Next)
         // Writes are refused, not challenged: one status for every failed write condition.
         let code = if req.method().is_safe() { StatusCode::UNAUTHORIZED } else { StatusCode::FORBIDDEN };
         return deny(code, "missing or wrong token");
+    }
+    if is_write(req.method())
+        && let Err(why) = crate::write::check(&g, &req)
+    {
+        return deny(StatusCode::FORBIDDEN, why);
     }
     let mut resp = next.run(req).await;
     if let Some(o) = &origin {

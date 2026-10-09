@@ -16,13 +16,17 @@
 //! | `GET /v1/models?q=` · `GET /v1/pricing` | models seen with prices · catalog sync status |
 //! | `POST /v1/cleanup/plan` · `POST /v1/cleanup/plans/{id}/execute` | session cleanup (write) |
 //! | `GET /v1/archive` · `DELETE /v1/archive/{key}` (write) | archived sessions |
+//! | `GET /v1/sessions/{key}/resume` | command that continues the session in its harness |
+//! | `POST /v1/sessions/{key}/open-terminal?terminal=` | macOS: run that command in a new terminal window (write route) |
+//! | `GET /v1/memory?cwd=` · `GET /v1/memory/file?path=` | agent memory / instruction files · one of them |
 //! | `GET /demo` | bundled single-page demo client (`examples/web/index.html`) |
 //!
 //! Snapshots carry `x-uniflo-seq`; subscribe with `since=<that>` for a gap-free view.
 //! Security: loopback Host only (DNS-rebinding guard), browser Origins limited to
-//! loopback + `--cors-origin`, optional bearer token (`Authorization` or `?token=`). Write
-//! endpoints also pass [`write::require_write`].
+//! loopback + `--cors-origin`, optional bearer token (`Authorization` or `?token=`). Every write
+//! request (any method but GET / HEAD / OPTIONS) also passes [`write::check`].
 
+pub mod agent;
 pub mod cleanup;
 mod guard;
 mod search;
@@ -79,11 +83,6 @@ pub fn router_with_fts(engine: Arc<Engine>, guard: GuardOptions, fts: Option<Arc
 pub fn router_with(engine: Arc<Engine>, guard: GuardOptions, services: Services) -> Router {
     let state = AppState { engine, fts: services.fts, cleanup: services.cleanup, read_only: guard.read_only };
     let guard = Arc::new(guard);
-    let writes = Router::new()
-        .route("/v1/cleanup/plan", post(cleanup::plan))
-        .route("/v1/cleanup/plans/{id}/execute", post(cleanup::execute))
-        .route("/v1/archive/{key}", delete(cleanup::remove))
-        .route_layer(axum::middleware::from_fn_with_state(guard.clone(), write::require_write));
     Router::new()
         .route("/", get(index))
         .route("/demo", get(demo))
@@ -98,11 +97,17 @@ pub fn router_with(engine: Arc<Engine>, guard: GuardOptions, services: Services)
         .route("/v1/models", get(usage::models))
         .route("/v1/pricing", get(usage::pricing))
         .route("/v1/search", get(search::search))
+        .route("/v1/sessions/{key}/resume", get(agent::resume))
+        .route("/v1/sessions/{key}/open-terminal", axum::routing::post(agent::open_terminal))
+        .route("/v1/memory", get(agent::memory))
+        .route("/v1/memory/file", get(agent::memory_file))
         .route("/v1/stream", get(sse))
         .route("/v1/stream.ndjson", get(ndjson))
         .route("/v1/ws", get(ws))
         .route("/v1/archive", get(cleanup::archives))
-        .merge(writes)
+        .route("/v1/cleanup/plan", post(cleanup::plan))
+        .route("/v1/cleanup/plans/{id}/execute", post(cleanup::execute))
+        .route("/v1/archive/{key}", delete(cleanup::remove))
         .layer(axum::middleware::from_fn_with_state(guard, guard::guard))
         .with_state(state)
 }
@@ -147,7 +152,7 @@ async fn index() -> impl IntoResponse {
         "name": "uniflo",
         "version": env!("CARGO_PKG_VERSION"),
         "schema": SCHEMA_VERSION,
-        "endpoints": ["/demo", "/v1/health", "/v1/harnesses", "/v1/sessions", "/v1/sessions/{key}", "/v1/sessions/{key}/events", "/v1/search", "/v1/stream", "/v1/stream.ndjson", "/v1/ws", "/v1/stats", "/v1/usage", "/v1/sessions/{key}/usage", "/v1/models", "/v1/pricing", "/v1/cleanup/plan", "/v1/cleanup/plans/{id}/execute", "/v1/archive", "/v1/archive/{key}"],
+        "endpoints": ["/demo", "/v1/health", "/v1/harnesses", "/v1/sessions", "/v1/sessions/{key}", "/v1/sessions/{key}/events", "/v1/search", "/v1/stream", "/v1/stream.ndjson", "/v1/ws", "/v1/stats", "/v1/usage", "/v1/sessions/{key}/usage", "/v1/models", "/v1/pricing", "/v1/cleanup/plan", "/v1/cleanup/plans/{id}/execute", "/v1/archive", "/v1/archive/{key}", "/v1/sessions/{key}/resume", "/v1/sessions/{key}/open-terminal", "/v1/memory", "/v1/memory/file"],
     }))
 }
 

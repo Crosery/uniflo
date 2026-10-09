@@ -1,5 +1,7 @@
-//! Guard for endpoints that change anything (session cleanup, archive deletion, and any later
-//! write endpoint). On top of the read guard (`guard.rs`), a write request must
+//! Conditions for requests that change anything (any method but GET / HEAD / OPTIONS: session
+//! cleanup, archive deletion, opening a terminal, …). [`crate::guard::guard`] applies them to
+//! every write route after the read checks, so a new write route needs no extra wiring. A
+//! write request must
 //!
 //! - name a loopback Host (`--allow-host` never extends to writes);
 //! - carry no Origin, or a loopback one, or one listed in `--cors-origin` (`*` does not count);
@@ -7,30 +9,18 @@
 //! - carry the token when one is configured.
 //!
 //! Anything else answers 403, and so does every write while the daemon runs `--read-only`.
-//! Mount write routes on their own router layered with [`require_write`]:
-//! `Router::new().route(…).route_layer(from_fn_with_state(guard, write::require_write))`.
 //! Rules and rationale: `docs/api.md#写接口`, ADR-0006.
 
-use crate::guard::{GuardOptions, deny, host_name, is_loopback, token_ok};
-use axum::extract::{Request, State};
-use axum::http::{StatusCode, header};
-use axum::middleware::Next;
-use axum::response::Response;
-use std::sync::Arc;
+use crate::guard::{GuardOptions, host_name, is_loopback, token_ok};
+use axum::extract::Request;
+use axum::http::header;
 
 pub const WRITE_HEADER: &str = "x-uniflo-write";
-
-pub async fn require_write(State(g): State<Arc<GuardOptions>>, req: Request, next: Next) -> Response {
-    match check(&g, &req) {
-        Ok(()) => next.run(req).await,
-        Err(why) => deny(StatusCode::FORBIDDEN, why),
-    }
-}
 
 /// The write conditions; the error says which one failed.
 pub fn check(g: &GuardOptions, req: &Request) -> Result<(), &'static str> {
     if g.read_only {
-        return Err("read-only daemon: write endpoints are disabled");
+        return Err("read-only");
     }
     let h = req.headers();
     let host = h.get(header::HOST).and_then(|v| v.to_str().ok()).unwrap_or("");
@@ -50,7 +40,7 @@ pub fn check(g: &GuardOptions, req: &Request) -> Result<(), &'static str> {
         }
     }
     if h.get(WRITE_HEADER).is_none_or(|v| v.as_bytes() != b"1") {
-        return Err("write requests need the header X-Uniflo-Write: 1");
+        return Err("missing X-Uniflo-Write: 1");
     }
     if let Some(want) = &g.token
         && !token_ok(req, want)

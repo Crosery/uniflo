@@ -9,6 +9,7 @@
 - v1 只增不改：会新增可选字段和新的 `kind` / `type` 取值；客户端必须忽略不认识的字段和取值。
 - 删除、改名、改语义 → `SCHEMA_VERSION` 加一，`/v1/health` 的 `schema` 字段随之变化。
 - 时间一律 Unix 毫秒（`i64`）；可选字段缺省时不输出。
+- 对象的键顺序不是契约。`tool_call` 的 `input` 这类透传 JSON 按 harness 原文的键顺序输出（`serde_json` 开启了 `preserve_order`）。
 
 ## Session
 
@@ -111,6 +112,18 @@
 | `ModelUsage` | `/v1/models` 一项 | `model`（原始名）、`match`（`exact` / `approx` / `none`）、`catalog_id?`、`provider?`、`prices[]`、`context_limit?`、`output_limit?`、`sessions`、`steps`、`cost_usd?`、`unpriced_steps` |
 | `PriceSegment` | 一段价格 | `from`、`until?`（epoch ms，`[from, until)`）、`input`、`output`、`cache_read`、`cache_write?`、`tiers[]`（`{above, input, output, cache_read, cache_write?}`） |
 | `PricingStatus` | `/v1/pricing` | `source`、`fetched_at?`、`stale`、`error?`、`models`、`overrides`、`last_attempt?`、`pending`、`sync_enabled` |
+
+## agent 接入接口的类型
+
+`/v1/sessions/{key}/resume`、`/v1/memory`、`/v1/memory/file`、`uniflo context --json` 的响应类型在 `crates/uniflo-schema/src/agent.rs`，同样只增不改。用法见 `docs/agents.md`。
+
+| 类型 | 用途 | 字段 |
+|---|---|---|
+| `ResumeInfo` | `/v1/sessions/{key}/resume`、MCP `uniflo_resume` | `key`、`harness`、`supported`、`argv`（总是输出，不支持时为 `[]`）、`cwd?`、`command?`（POSIX shell 一行）、`command_powershell?`、`reason?`（`supported=false` 时的原因） |
+| `MemoryFile` | `/v1/memory` 一项 | `path`、`scope`（`global` / `project`）、`harness`（加载它的 harness；共享的 `AGENTS.md` 约定为 `agents`）、`bytes`、`updated_at`（文件修改时间） |
+| `MemoryContent` | `/v1/memory/file` | `MemoryFile` 的全部字段，加 `content`（UTF-8，非法字节替换，最多 256 KB）、`truncated?`（文件比 `content` 大时为 true，否则不输出） |
+| `ContextReport` | `uniflo context --json`、MCP `uniflo_context` | `project`（git 根，不在仓库里时为目录本身）、`since`、`sessions[]`（最近活动倒序） |
+| `ContextSession` | 一个会话 | `key`、`harness`、`title?`、`cwd?`、`updated_at`、`preview?`（首条用户输入，最多 80 字符含省略号）、`cost_usd`（API 等价费用，未知时 `null`） |
 
 ## Envelope
 
