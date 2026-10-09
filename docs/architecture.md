@@ -2,7 +2,7 @@
 
 > 守护进程如何从各 harness 的会话存储得到统一、实时的会话与事件流。
 
-状态：`current` · 更新：2026-10-02
+状态：`current` · 更新：2026-10-08
 
 ## 数据流
 
@@ -71,5 +71,5 @@ Gateway（axum）                       ← uniflo-gateway
 
 - 新 harness：实现 `LineDecoder`（一文件一会话的 JSONL）或 `Adapter`（其他），见 `docs/adapters.md`。
 - 新传输：基于 `uniflo_gateway::stream::envelopes()`，与 SSE/NDJSON/WS 共用过滤与截断。
-- 网页客户端：`examples/web/index.html` 是参考实现（快照 + `since` 续流、按 id upsert、工具结果并入调用卡片），守护进程在 `/demo` 提供。
+- 网页客户端：`examples/web/index.html` 是参考实现（快照 + `since` 续流、按 id upsert、工具结果并入调用卡片）；`crates/uniflo-gateway/src/index.html` 是内容相同的 cargo 包内副本，由网关编译进 `/demo`，修改时必须同步。
 - 嵌入式使用：直接依赖 `uniflo-core` + `uniflo-adapters`，`Engine::new(all(), opts)` → `index()` → `run()`，无需网关。

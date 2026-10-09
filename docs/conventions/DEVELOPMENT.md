@@ -2,7 +2,7 @@
 
 > 模块边界、代码风格、性能预算和隐私红线；改任何 crate 前读。
 
-状态：`current` · 更新：2026-10-02
+状态：`current` · 更新：2026-10-08
 
 ## 模块边界
 
@@ -51,5 +51,5 @@
 - 适配器：每个模块至少覆盖一个完整回合（用户 → 工具调用 → 工具结果 → 回复 → 结束）的事件序列、状态、元数据，以及 `unknown` 为空。
 - 引擎与网关：端到端测试真实起文件监听 / HTTP 服务，断言延迟上限和重放无缺口。
 - 跨平台差异（`/proc` vs `lsof`、FSEvents 路径）要有在当前平台实际跑的测试。
-- 网页演示（`examples/web/index.html`）：改动后跑 `scripts/verify.sh --e2e`。e2e 依赖的 DOM 钩子不能改名：`[data-check][data-ok]`、`.row[data-key][data-status]`、`#timeline [data-id][data-kind]`、`#more`、`#conn[data-state]`、URL 参数 `api` `token` `transport` `select`。
-- 演示页保持零依赖、单文件、可离线；对外文本一律先转义再拼 HTML，链接只允许 http(s)。
+- 网页演示（`examples/web/index.html`）：必须同步 `crates/uniflo-gateway/src/index.html`（cargo 包内的内嵌副本），改动后跑 `scripts/verify.sh --e2e`。e2e 依赖的 DOM 钩子不能改名：`[data-check][data-ok]`、`.row[data-key][data-status]`、`#timeline [data-id][data-kind]`、`#more`、`#conn[data-state]`、URL 参数 `api` `token` `transport` `select`。
+- 演示页保持单文件、免构建、无外部运行时依赖、可离线；组件库固定版本内嵌，并保留上游许可证与来源。对外文本一律先转义再拼 HTML，链接只允许 http(s)。

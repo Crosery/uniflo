@@ -2,7 +2,7 @@
 
 > `uniflo daemon` 暴露的 HTTP 接口：REST 拿快照，SSE / NDJSON / WebSocket 拿实时流。数据格式见 `docs/schema.md`。
 
-状态：`current` · 更新：2026-10-06
+状态：`current` · 更新：2026-10-08
 
 默认地址 `http://127.0.0.1:7311`。只支持 `GET`（和 CORS 预检 `OPTIONS`）。所有成功响应带 `x-uniflo-seq` 头：响应生成时的最新 `seq`，可作为随后订阅的 `since`。
 
@@ -11,7 +11,7 @@
 | 路径 | 参数 | 返回 |
 |---|---|---|
 | `GET /` | — | 名称、版本、schema 版本、端点列表 |
-| `GET /demo` | 页面参数见 `examples/web/index.html` 头注释 | 内置网页演示（单文件，零依赖） |
+| `GET /demo` | 页面参数见 `examples/web/index.html` 头注释 | 内置网页演示（单文件，无外部运行时依赖；内嵌副本 `crates/uniflo-gateway/src/index.html`） |
 | `GET /v1/health` | — | `{ok, version, schema, seq, sessions, working, uptime_ms, update_available, latest_version, latest_prerelease}` |
 | `GET /v1/harnesses` | — | `Harness[]`：`{id, name, roots, sessions, working}` |
 | `GET /v1/stats` | — | 索引与读取计数：`sessions`、`sources`、`bad_lines`、`unknown`、`read_errors`、`index_ms`…；`update` 为守护进程最近一次 crates.io 检查结果 `{current, latest, available, latest_prerelease, checked_at, error}`（`latest`/`available` 只看正式版，`latest_prerelease` 仅为探测到的更新预发布版、供用户自行决定是否安装），未开启后台检查时为 `null` |

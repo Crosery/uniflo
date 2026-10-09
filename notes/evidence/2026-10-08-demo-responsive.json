@@ -1,0 +1,249 @@
+{
+  "scope": "Synthetic fixtures; actual Chromium and isolated real gateway",
+  "before": {
+    "viewport": 800,
+    "connectionLabelHeight": 36,
+    "connectionContainerHeight": 26,
+    "noticeRows": [
+      {
+        "rowHeight": 26,
+        "labelHeight": 39
+      },
+      {
+        "rowHeight": 26,
+        "labelHeight": 58.5
+      }
+    ]
+  },
+  "after": [
+    {
+      "width": 1480,
+      "headerHeight": 45,
+      "panels": [
+        "side",
+        "conv",
+        "rail"
+      ],
+      "connectionContained": true,
+      "summariesContained": true,
+      "timelineWidth": 860,
+      "timelineHeight": 517,
+      "timelineOverflow": 0,
+      "documentOverflow": 0,
+      "appBottom": 720,
+      "viewportHeight": 720
+    },
+    {
+      "width": 1181,
+      "headerHeight": 45,
+      "panels": [
+        "side",
+        "conv",
+        "rail"
+      ],
+      "connectionContained": true,
+      "summariesContained": true,
+      "timelineWidth": 574,
+      "timelineHeight": 500,
+      "timelineOverflow": 0,
+      "documentOverflow": 0,
+      "appBottom": 720,
+      "viewportHeight": 720
+    },
+    {
+      "width": 1180,
+      "headerHeight": 43,
+      "panels": [
+        "side",
+        "conv"
+      ],
+      "connectionContained": true,
+      "summariesContained": true,
+      "timelineWidth": 873,
+      "timelineHeight": 519,
+      "timelineOverflow": 0,
+      "documentOverflow": 0,
+      "appBottom": 720,
+      "viewportHeight": 720
+    },
+    {
+      "width": 1024,
+      "headerHeight": 43,
+      "panels": [
+        "side",
+        "conv"
+      ],
+      "connectionContained": true,
+      "summariesContained": true,
+      "timelineWidth": 758,
+      "timelineHeight": 519,
+      "timelineOverflow": 0,
+      "documentOverflow": 0,
+      "appBottom": 720,
+      "viewportHeight": 720
+    },
+    {
+      "width": 960,
+      "headerHeight": 69,
+      "panels": [
+        "side",
+        "conv"
+      ],
+      "connectionContained": true,
+      "summariesContained": true,
+      "timelineWidth": 710,
+      "timelineHeight": 493,
+      "timelineOverflow": 0,
+      "documentOverflow": 0,
+      "appBottom": 720,
+      "viewportHeight": 720
+    },
+    {
+      "width": 800,
+      "headerHeight": 69,
+      "panels": [
+        "side",
+        "conv"
+      ],
+      "connectionContained": true,
+      "summariesContained": true,
+      "timelineWidth": 560,
+      "timelineHeight": 476,
+      "timelineOverflow": 0,
+      "documentOverflow": 0,
+      "appBottom": 720,
+      "viewportHeight": 720
+    },
+    {
+      "width": 761,
+      "headerHeight": 69,
+      "panels": [
+        "side",
+        "conv"
+      ],
+      "connectionContained": true,
+      "summariesContained": true,
+      "timelineWidth": 521,
+      "timelineHeight": 476,
+      "timelineOverflow": 0,
+      "documentOverflow": 0,
+      "appBottom": 720,
+      "viewportHeight": 720
+    },
+    {
+      "width": 760,
+      "headerHeight": 69,
+      "panels": [
+        "conv"
+      ],
+      "connectionContained": true,
+      "summariesContained": true,
+      "timelineWidth": 760,
+      "timelineHeight": 457,
+      "timelineOverflow": 0,
+      "documentOverflow": 0,
+      "appBottom": 720,
+      "viewportHeight": 720
+    },
+    {
+      "width": 600,
+      "headerHeight": 98,
+      "panels": [
+        "conv"
+      ],
+      "connectionContained": true,
+      "summariesContained": true,
+      "timelineWidth": 600,
+      "timelineHeight": 428,
+      "timelineOverflow": 0,
+      "documentOverflow": 0,
+      "appBottom": 720,
+      "viewportHeight": 720
+    },
+    {
+      "width": 390,
+      "headerHeight": 98,
+      "panels": [
+        "conv"
+      ],
+      "connectionContained": true,
+      "summariesContained": true,
+      "timelineWidth": 390,
+      "timelineHeight": 393,
+      "timelineOverflow": 0,
+      "documentOverflow": 0,
+      "appBottom": 720,
+      "viewportHeight": 720
+    },
+    {
+      "width": 320,
+      "headerHeight": 98,
+      "panels": [
+        "conv"
+      ],
+      "connectionContained": true,
+      "summariesContained": true,
+      "timelineWidth": 320,
+      "timelineHeight": 376,
+      "timelineOverflow": 0,
+      "documentOverflow": 0,
+      "appBottom": 720,
+      "viewportHeight": 720
+    }
+  ],
+  "interactionChecks": {
+    "searchEnterOpensConversation": true,
+    "focusMovesToBackButton": true,
+    "focusOutlineVisible": true,
+    "escapeReturnsToSearch": true,
+    "noticeExpansionDoesNotOverlapFollowingEvent": true,
+    "transports": [
+      "ws",
+      "ndjson",
+      "sse"
+    ],
+    "railTogglePreservesSidebarWidth": 320,
+    "railPreferenceSurvivesResize": true,
+    "narrowStartupShowsSessionList": true,
+    "emptyFilterHasNoHorizontalOverflow": true
+  },
+  "zoom": {
+    "mode": "200% equivalent CSS viewport, not native browser zoom",
+    "physicalViewport": [
+      1480,
+      920
+    ],
+    "cssViewport": [
+      740,
+      460
+    ],
+    "horizontalOverflow": 0,
+    "timelineHeight": 199
+  },
+  "shortViewport": {
+    "width": 320,
+    "height": 240,
+    "horizontalOverflow": 0,
+    "timelineHeight": 49
+  },
+  "verification": {
+    "command": "scripts/verify.sh --e2e",
+    "result": "passed",
+    "e2ePassed": 34,
+    "e2eFailed": 0,
+    "liveAppendLatencyMs": {
+      "sse": 13,
+      "ws": 7,
+      "ndjson": 7
+    }
+  },
+  "screenshots": [
+    "2026-10-08-demo-responsive-desktop.png",
+    "2026-10-08-demo-responsive-narrow.png"
+  ],
+  "unverified": [
+    "Native browser zoom",
+    "Physical phone Safari/Firefox"
+  ],
+  "observedNetworkCancellations": "ERR_ABORTED when switching or navigating streaming requests; no JavaScript exceptions observed"
+}

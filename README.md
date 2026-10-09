@@ -89,15 +89,20 @@ es.addEventListener("event", (m) => upsertEvent(JSON.parse(m.data).event)); // �
 
 ## 网页演示
 
-[`examples/web/index.html`](examples/web/index.html) 是一个零依赖、免构建的单文件客户端，守护进程直接在 `/demo` 提供，也可以复制出去改造：
+[`examples/web/index.html`](examples/web/index.html) 是一个无外部运行时依赖、免构建的单文件客户端，守护进程直接在 `/demo` 提供，也可以复制出去改造：
 
-- 左侧：fd/fzf 式搜索、harness 过滤、按「工作中 / 最近」分组的会话列表（状态点、子代理、存活进程）。
+- 左侧：fd/fzf 式搜索、可搜索的 harness 单选下拉、按「工作中 / 最近」分组的会话列表（状态点、子代理、存活进程）。选择新的 harness 会替换原来的正向 `h:` / `harness:` 条件，保留其他查询条件；选「全部 harness」清除该条件。
 - 中间：归一后的会话流——用户气泡、Markdown 回复（代码块可复制）、折叠的思考、一行一个的工具调用（参数 + 输出 + 耗时 + 状态），按回合汇总 token。
 - 右侧：10 个接口的实时自检与延迟、索引健康度、实时 Envelope 流。
 - 顶栏切换 SSE / WebSocket / NDJSON；跟随系统明暗主题；`/` 搜索，`j` `k` 切换会话。
+- 响应式布局：宽屏三栏，≤1180px 自动收起右栏，≤760px 改为会话列表 / 会话内容单栏切换；「会话列表」按钮或 `Esc` 返回列表，`/` 打开搜索。通知与工具标题按内容撑高，不遮挡相邻行。
 - URL 参数：`?api=http://127.0.0.1:7311`（从其他本地端口打开时）、`?token=`、`?transport=ws`、`?select=<key>`、`?redact`（模糊所有正文，便于录屏）。
 
+harness 下拉使用 [Tom Select](https://tom-select.js.org/) 2.6.2：脚本、样式及 Apache-2.0 许可证已内嵌，不请求 CDN，也不需要 npm 安装或前端构建。触发器、弹层、选中项和焦点沿用页面主题 token，弹层支持内部滚动及短视口向上展开。
+
 `scripts/demo-e2e.mjs` 用无头 Chrome 对它做端到端验收（合成数据，不碰真实会话）：三种传输、全部接口、实时追加延迟、work/idle 切换、跨域接入与 token。
+
+`/demo` 从 `crates/uniflo-gateway/src/index.html` 编译进守护进程；修改演示页时需同步该副本，再重新构建并重启守护进程、刷新浏览器。
 
 ![demo light](docs/assets/demo-light.png)
 
