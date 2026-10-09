@@ -24,7 +24,8 @@ done
 step "branch invariants"
 node scripts/check-branch-invariants.mjs
 
-step "third-party notices"
+step "release packaging + third-party notices"
+node scripts/check-dist.mjs
 node scripts/third-party-notices.mjs --check
 
 step "tests"

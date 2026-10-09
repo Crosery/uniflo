@@ -7,6 +7,7 @@ mod grep;
 mod mcp;
 mod render;
 mod setup;
+mod update;
 mod usage;
 
 use anyhow::{Context, Result, bail};
@@ -75,7 +76,8 @@ enum Cmd {
         #[arg(long)]
         read_only: bool,
     },
-    /// Check crates.io for a newer stable release, or install it (`cargo install uniflo --force`).
+    /// Check crates.io for a newer stable release, or install it the way this executable was
+    /// installed (`cargo install`, or the prebuilt release package for an install-script install).
     Update {
         /// Only report; do not install.
         #[arg(long)]
@@ -84,6 +86,7 @@ enum Cmd {
         /// prereleases do not guarantee stability).
         #[arg(long = "pre")]
         prerelease: bool,
+        /// The check result plus `method` (cargo|binary|unknown); exit code 10 = update available.
         #[arg(long)]
         json: bool,
     },
@@ -189,6 +192,10 @@ enum Cmd {
 }
 
 fn main() -> Result<()> {
+    #[cfg(windows)]
+    if let Ok(exe) = std::env::current_exe() {
+        uniflo_core::install::remove_aside(&exe);
+    }
     let cli = Cli::parse();
     if !matches!(
         cli.cmd,
@@ -223,7 +230,7 @@ fn main() -> Result<()> {
             daemon(bind, guard, stale_after, no_cache, !no_update_check, price_sync, !no_fts)
         }
         Cmd::Scan { json, no_cache } => scan(json, no_cache),
-        Cmd::Update { check, prerelease, json } => update(check, prerelease, json),
+        Cmd::Update { check, prerelease, json } => update::run(check, prerelease, json),
         Cmd::Pricing(ref a) => usage::pricing(&cli, a),
         Cmd::Mcp => mcp::run(&cli),
         Cmd::Skill { ref action } => {
@@ -351,102 +358,6 @@ fn scan(json: bool, no_cache: bool) -> Result<()> {
     if let Some(e) = stats.last_error {
         println!("\nlast read error: {e}");
     }
-    Ok(())
-}
-
-/// Check crates.io, and unless `--check`, install the new version with cargo and restart the
-/// daemon. The default target is the newest **stable** release; a prerelease is only ever
-/// announced, and installed solely via the explicit `--pre` opt-in.
-fn update(check: bool, prerelease: bool, json: bool) -> Result<()> {
-    let info = uniflo_core::update::check();
-    if json {
-        println!("{}", serde_json::to_string_pretty(&info)?);
-        if info.available {
-            std::process::exit(10);
-        }
-        return Ok(());
-    }
-    if let Some(err) = &info.error {
-        println!("uniflo {}: 无法检查更新 — {err}", info.current);
-        return Ok(());
-    }
-    // Decide what (if anything) to install.
-    let target: Option<(&str, bool)> = if prerelease {
-        info.latest_prerelease.as_deref().map(|v| (v, true))
-    } else {
-        info.available.then(|| (info.latest.as_deref().unwrap_or("?"), false))
-    };
-    if prerelease && target.is_none() {
-        println!("uniflo {}：crates.io 上没有比你更新的预发布版。", info.current);
-        return Ok(());
-    }
-    match (&info.latest, target) {
-        (_, Some((v, true))) => println!("uniflo {} → 预发布版 {}（不保证稳定，已按 --pre 显式选择）", info.current, v),
-        (_, Some((v, _))) => println!("uniflo {} → 新版本 {} 可用（正式版）", info.current, v),
-        (Some(latest), None) if info.current.contains('-') => {
-            println!("uniflo {} 为预发布版；最新正式版 {}。", info.current, latest)
-        }
-        (Some(latest), None) => println!("uniflo {} 已是最新（crates.io 最新正式版 {}）", info.current, latest),
-        (None, None) => println!("uniflo {}: crates.io 没有已发布版本", info.current),
-    }
-    if !prerelease && let Some(pre) = &info.latest_prerelease {
-        println!("检测到预发布 {pre}（不保证稳定）；如需试用：`uniflo update --pre`。");
-    }
-    let Some((version, is_pre)) = target else { return Ok(()) };
-    if check {
-        return Ok(());
-    }
-    let status = std::process::Command::new("cargo")
-        .args(["install", "uniflo", "--force", "--version", version])
-        .status()
-        .with_context(|| format!("cargo 不可用；手动运行 `cargo install uniflo --force --version {version}`"))?;
-    if !status.success() {
-        bail!("cargo install 失败（exit {:?}）", status.code());
-    }
-    println!("已安装 uniflo {}{}。", version, if is_pre { "（预发布版）" } else { "" });
-    // Replace the running daemon so the new binary actually serves requests.
-    #[cfg(target_os = "macos")]
-    {
-        let loaded = std::process::Command::new("launchctl")
-            .args(["list"])
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .output()
-            .map(|o| String::from_utf8_lossy(&o.stdout).contains("com.crosery.uniflo"))
-            .unwrap_or(false);
-        if loaded {
-            let uid = std::process::Command::new("id")
-                .arg("-u")
-                .output()
-                .ok()
-                .and_then(|o| String::from_utf8(o.stdout).ok())
-                .map(|s| s.trim().to_owned());
-            let ok = uid.is_some_and(|uid| {
-                std::process::Command::new("launchctl")
-                    .args(["kickstart", "-k", &format!("gui/{uid}/com.crosery.uniflo")])
-                    .status()
-                    .map(|s| s.success())
-                    .unwrap_or(false)
-            });
-            println!(
-                "{}",
-                if ok {
-                    "launchd 服务已重启（KeepAlive），新守护进程在跑。"
-                } else {
-                    "launchd 服务在跑但自动重启失败：`launchctl kickstart -k gui/$(id -u)/com.crosery.uniflo`"
-                }
-            );
-        } else {
-            println!("守护进程若正在运行，重启后生效：`uniflo daemon`（旧进程仍是旧版本）。");
-        }
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        println!(
-            "守护进程若正在运行，请先停掉再启动新版（Windows 上运行中的二进制无法被覆盖，建议 update 前停 daemon）。"
-        );
-    }
-    setup::after_update();
     Ok(())
 }
 

@@ -22,6 +22,7 @@ Uniflo：本机常驻守护进程，持续读取所有 agent harness（Claude Co
 | 行为变更、缺陷、测试、交付证据 | `docs/conventions/TESTING.md` |
 | 较大需求（跨模块、要澄清、要分阶段验收） | 用 `/comet` 走 Native 流程；规范文档已接入它的项目知识检索 |
 | 为什么这样定 | `docs/decisions/ADR-*.md`；过程与证据 `notes/` |
+| 发布流程、安装脚本、`uniflo update` | `docs/decisions/ADR-0009-预编译分发与自升级.md`、`docs/conventions/BRANCHING.md` |
 
 ## 契约
 
@@ -49,6 +50,11 @@ Uniflo：本机常驻守护进程，持续读取所有 agent harness（Claude Co
 - omp/Pi 没有在线注册表：存活进程靠 `core::procs`（`ps` + 一次批量 `lsof`）按 `--resume` 参数 → 打开的会话文件 → cwd 推断三级映射。Codex app-server 一个进程服务多会话，不做 pid 映射，状态全靠 `task_started/task_complete`。
 - Claude 子代理收尾时 `stop_reason` 为空、没有回合结束标记，靠 90 s settle 窗口转 idle；不要为此给适配器加时间判断。
 - 清理归档在数据目录 `archive/`（`<harness>/<id>.jsonl.zst`、`index.json`、`cleanup.log.jsonl`、`tombstones.json`）。墓碑下的路径不作为源读取，除非内容与清单一致（大小 + SHA-256，即从回收站还原）；排查"会话消失 / 还原后不出现"时先看这里。
+- 安装与升级测试：
+  - `UNIFLO_RELEASE_BASE_URL`、`UNIFLO_UPDATE_INDEX_URL` 指向本地 HTTP 服务，`UNIFLO_INSTALL_DIR`、`UNIFLO_CONFIG_DIR`（或 `UNIFLO_HOME`）、`TMPDIR` 指向临时目录。
+  - 不得替换 `~/.cargo/bin/uniflo` 或 PATH 上的 uniflo，不得写真实的 `install.json`，不得对 `com.crosery.uniflo` 运行 `launchctl kickstart` / `bootout` / `load`。
+  - `uniflo update` 只在 launchd 服务运行的就是被升级的那份可执行文件时才 kickstart，临时安装不会触发；改这段逻辑时用注入的 `launchctl` 做单测。
+  - 依赖变化后运行 `node scripts/third-party-notices.mjs`，否则 `scripts/verify.sh` 失败。
 - 本仓 Rust edition 2024 写在各 crate 的 `Cargo.toml` 里（不用 `edition.workspace`），因为本机 rustfmt 钩子靠它识别 let-chains。
 
 ## 完成标准

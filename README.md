@@ -29,17 +29,22 @@ Claude Code、Qoder、Qwen Work、Codex、Pi、oh-my-pi、Crosery Agent、Comman
 
 ### 安装
 
+三种方式任选其一：
+
 ```sh
-# 方式 1：通过 crates.io 安装
+# 方式 1：crates.io（推荐给 Rust 用户，从源码编译）
 cargo install uniflo
 
-# 方式 2：直接通过 GitHub 安装最新预发布版
-cargo install --git https://github.com/Crosery/uniflo.git uniflo
+# 方式 2：一行安装脚本（无需 Rust；下载预编译包，校验 SHA-256 后装到 ~/.local/bin）
+curl -fsSL https://github.com/Crosery/uniflo/releases/latest/download/install.sh | sh
+#   Windows PowerShell（装到 %LOCALAPPDATA%\Programs\uniflo）：
+#   irm https://github.com/Crosery/uniflo/releases/latest/download/install.ps1 | iex
 
-# 方式 3：从源码安装
-git clone https://github.com/Crosery/uniflo.git && cd uniflo
-cargo install --path crates/uniflo-cli
+# 方式 3：cargo-binstall（下载同一份预编译包，不编译）
+cargo binstall uniflo
 ```
+
+预编译包覆盖 macOS（arm64 / x86_64）、Linux（x86_64 / aarch64，静态 musl）、Windows（x86_64），随每个 GitHub Release 发布，附 `SHA256SUMS`。安装脚本可用的环境变量：`UNIFLO_VERSION`（指定版本，默认最新正式版）、`UNIFLO_INSTALL_DIR`（安装目录）、`UNIFLO_NO_SETUP=1` 或 `sh -s -- --no-setup`（不运行 `uniflo setup`）。在终端里运行时，脚本最后会调用 `uniflo setup`，询问是否接入本机 agent。安装记录写在配置目录的 `install.json`，`uniflo update` 靠它识别安装方式。决策见 [ADR-0009](docs/decisions/ADR-0009-预编译分发与自升级.md)。
 
 ### 启动服务
 
@@ -55,16 +60,23 @@ scripts/install-service.sh
 
 ### 升级
 
-守护进程默认每小时向 crates.io 稀疏索引发一次 HTTPS GET（系统 `curl`）。**更新只指向正式版**；预发布版（`-rc`/`-beta`）仅被探测并提示，装不装由你决定：
+守护进程默认每小时向 crates.io 稀疏索引发一次 HTTPS GET（系统 `curl`）。**更新只指向正式版**；预发布版（`-rc`/`-beta`）仅被探测并提示，装不装由你决定。`uniflo update` 按安装方式升级：
 
 ```sh
 uniflo update --check                     # 只查询有没有新正式版（退出码 10 = 有新版）
-uniflo update                             # cargo install uniflo --force --version <最新正式版>，macOS 上尝试 kickstart 重启 launchd 服务
+uniflo update --check --json              # 同上，JSON 另含 method：cargo | binary | unknown
+uniflo update                             # 升级到最新正式版；macOS 上 launchd 服务若运行的就是这个可执行文件，则 kickstart 重启
 uniflo update --pre                       # 显式选择：安装探测到的最新预发布版（不保证稳定）
 uniflo daemon --no-update-check           # 关闭后台检查
 ```
 
-Windows 上运行中的 exe 无法被覆盖：先停掉 daemon 再执行 `uniflo update`。
+| 安装方式 | 判定 | `uniflo update` 的做法 |
+|---|---|---|
+| `cargo` | 可执行文件在 `$CARGO_HOME/bin` 或 `~/.cargo/bin` | `cargo install uniflo --force --version <新版本>` |
+| `binary` | `install.json` 记录的路径就是当前可执行文件（安装脚本写入） | 下载新版本的包和 `SHA256SUMS`，校验后原子替换，并更新 `install.json`；任何一步失败，原可执行文件都不变 |
+| `unknown` | 其他（源码构建、拷贝的文件等） | 只打印上面两种升级方式，不做改动 |
+
+Windows 上 cargo 无法覆盖运行中的 exe：cargo 安装请先停掉 daemon 再执行 `uniflo update`。binary 安装会把运行中的 `uniflo.exe` 改名为 `uniflo.exe.old` 再放入新版本，`.old` 在下次启动 uniflo 时删除。
 
 ### 价格目录
 
@@ -165,6 +177,7 @@ docs/              架构、契约、规范、决策记录
 ## 开发
 
 ```sh
+cargo install --path crates/uniflo-cli   # 从源码安装当前检出（uniflo update 视为 unknown，不会替换它）
 scripts/verify.sh          # fmt + clippy -D warnings + 每个适配器 feature 单独编译 + 全量测试
 scripts/verify.sh --e2e    # 再用无头 Chrome 跑一遍网页演示（需要 bun + Chrome）
 ```

@@ -2,7 +2,7 @@
 
 > 让 agent 直接查询本机所有会话：stdio MCP 服务器 `uniflo mcp`、随二进制分发的 Skill、一条命令全局接入的 `uniflo setup`，以及恢复会话、记忆与指令文件、接力上下文。
 
-状态：`current` · 更新：2026-10-09
+状态：`current` · 更新：2026-10-10
 
 同一能力有三个入口：REST（`docs/api.md`）、CLI `--json`、MCP `structuredContent`。MCP 工具内部就是对网关 REST 路由的 `GET`，所以三者的数值与 id 一致（`crates/uniflo-cli/tests/agent.rs` 的 `mcp_cli_and_rest_agree` 逐项比对）。浮点也逐位一致：`serde_json` 开启了 `float_roundtrip`，响应解析后再输出不会改动最后一位。唯一会随时间变的是全文检索的 `score`：它带最近活动加权，隔一段时间再查会略有变化，比对时去掉它。
 
@@ -96,6 +96,7 @@ Pi、Grok 没有可用的 MCP 客户端，只装 Skill（选了 MCP 也会装）
 
 - 第一次在终端里运行任意查询类命令（不含 `daemon`、`mcp`、`setup`、`skill`、`context`、`update`）且从未问过时，提示一次；回答"否"会记进 `setup.json`，不再追问。
 - `uniflo update` 安装成功后（仅终端里）：从未配置过 → 完整询问一次；已配置 → 静默 `--reload`，只对新检测到的 harness 询问；选过"跳过"→ 什么都不做。
+- 安装脚本（`install.sh` / `install.ps1`）结尾：在终端里运行 `uniflo setup`；`--no-setup`、`UNIFLO_NO_SETUP=1` 或非终端时跳过。
 - `CI` 有值、`UNIFLO_NO_SETUP=1`、非终端、守护进程、MCP 服务器：从不提问。
 
 ### SessionStart hook（可选，仅 Claude Code）

@@ -33,3 +33,13 @@ tracing-subscriber.workspace = true
 rusqlite.workspace = true
 ruzstd.workspace = true
 tempfile.workspace = true
+
+# cargo binstall: the release packages built by .github/workflows/release.yml (ADR-0009).
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ version }-{ target }.tar.gz"
+bin-dir = "{ name }-{ version }-{ target }/{ bin }{ binary-ext }"
+pkg-fmt = "tgz"
+
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ version }-{ target }.zip"
+pkg-fmt = "zip"

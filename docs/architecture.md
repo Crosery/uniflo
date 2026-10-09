@@ -2,7 +2,7 @@
 
 > 守护进程如何从各 harness 的会话存储得到统一、实时的会话与事件流。
 
-状态：`current` · 更新：2026-10-09
+状态：`current` · 更新：2026-10-10
 
 ## 数据流
 
@@ -120,10 +120,27 @@ agent（Claude Code、Codex…）──stdio JSON-RPC──► uniflo mcp（unif
 | 函数 | macOS 默认 | 覆盖 |
 |---|---|---|
 | `data_dir()` | `~/Library/Application Support/uniflo`（`pricing/`、会话清理的 `archive/` 在这里） | `UNIFLO_DATA_DIR` |
-| `config_dir()` | `~/Library/Application Support/uniflo`（`setup.json` 在这里） | `UNIFLO_CONFIG_DIR` |
+| `config_dir()` | `~/Library/Application Support/uniflo`（`setup.json`、安装脚本写的 `install.json` 在这里） | `UNIFLO_CONFIG_DIR` |
 | `cache_dir()` | `~/Library/Caches/uniflo` | `UNIFLO_CACHE_DIR` |
 
 设了 `UNIFLO_HOME` 时，三者按相对真实家目录的同一路径改挂到它下面，测试不会碰到真实目录。
+
+## 分发与升级
+
+决策见 `docs/decisions/ADR-0009-预编译分发与自升级.md`，这里只写代码分布。
+
+- `uniflo-core::install`：
+  - 安装方式识别（`detect`：`install.json` → binary，cargo bin 目录 → cargo，其余 unknown）；
+  - 发布包命名（`asset_name`、`TARGETS`）；
+  - 自升级 `upgrade_binary`：系统 `curl` 下载 → `sha2` 校验 → 系统 `tar` / PowerShell `Expand-Archive` 解包 → `--version` 自检 → `swap` 改名替换（Windows 为 `.old` 改名）。
+- `uniflo-core::update`：crates.io 版本检查（ADR-0005）。
+- `uniflo-cli::update`：`uniflo update` 的接线：按安装方式分派、unknown 时的提示、launchd 重启判断，最后调用 `setup::after_update`。
+- 脚本：
+  - `scripts/package.sh`：打包，CI 与测试共用；
+  - `scripts/install.sh` / `install.ps1`：安装；
+  - `scripts/check-dist.mjs`：检查工作流、binstall 元数据与包名一致；
+  - `scripts/third-party-notices.mjs`：生成第三方许可证清单；
+  - `scripts/dist-e2e.sh`：本机发布包全链路。
 
 ## 状态机
 

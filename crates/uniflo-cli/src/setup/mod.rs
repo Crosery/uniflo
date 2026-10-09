@@ -273,14 +273,13 @@ pub fn should_ask_first_run(tty: bool, var: fn(&str) -> Option<String>, state: O
     prompts_allowed(tty, var) && state.is_none_or(|s| !s.asked && s.mode.is_none())
 }
 
-/// End of a successful `uniflo update`: let the newly installed binary run the setup step.
-pub fn after_update() {
+/// End of a successful `uniflo update`: let the newly installed binary at `exe` run the setup
+/// step (`current_exe()` of a replaced executable is no longer valid on Linux).
+pub fn after_update(exe: &Path) {
     if !prompts_allowed(tty(), |k| std::env::var(k).ok().filter(|v| !v.is_empty())) {
         return;
     }
-    if let Ok(exe) = std::env::current_exe() {
-        let _ = Command::new(exe).args(["setup", "--after-update"]).status();
-    }
+    let _ = Command::new(exe).args(["setup", "--after-update"]).status();
 }
 
 #[derive(Debug, PartialEq)]
