@@ -256,6 +256,92 @@ fn short_terms_stop_early_and_within_their_budget() {
     assert!(r.total == 30 && !r.partial && r.scanned_until.is_none(), "{r:?}");
 }
 
+/// A long term with a short one: the index narrows the rows, the short term filters them in the
+/// same newest-first scan, with the same early stop and budget as a short term alone.
+#[test]
+fn mixed_terms_stop_early_and_within_their_budget() {
+    let env = Env::new();
+    let now = now_ms();
+    // c00..c29 say "cache fn", c00 the most recent; five newer sessions say cache without fn; only
+    // the oldest has zq.
+    for s in 0..30i64 {
+        let t = now - (s + 10) * 600_000;
+        let body: String = (0..3).map(|i| user(&format!("u{i}"), t + i, &format!("cache fn step {i}"))).collect();
+        std::fs::write(env.path(&format!("claude/-w-demo/c{s:02}.jsonl")), body).unwrap();
+    }
+    for s in 0..5i64 {
+        std::fs::write(
+            env.path(&format!("claude/-w-demo/n{s}.jsonl")),
+            user("u0", now - (s + 1) * 600_000, "cache only"),
+        )
+        .unwrap();
+    }
+    std::fs::write(env.path("claude/-w-demo/old.jsonl"), user("o1", now - 30 * DAY, "cache zq")).unwrap();
+    let engine = env.engine();
+    let fts = env.fts(&engine, FtsOptions::default());
+    idle(&fts);
+
+    let page = |offset: usize| {
+        search_with(&fts, SearchParams { q: "cache fn".into(), limit: 5, offset, ..Default::default() })
+    };
+    let r = page(0);
+    assert_eq!(r.order, SearchOrder::Recent);
+    assert_eq!(sessions(&r), vec!["claude:c00", "claude:c01", "claude:c02", "claude:c03", "claude:c04"]);
+    let hits: Vec<&str> = r.results[0].hits.iter().map(|h| h.event.as_str()).collect();
+    assert_eq!(hits, vec!["u2", "u1", "u0"], "newest first");
+    assert!(r.results[0].hits[0].snippet.contains("\u{2}fn\u{3}"), "{:?}", r.results[0].hits[0].snippet);
+    assert!(!r.partial);
+    assert!(r.total < 30 && r.scanned_until.is_some(), "stopped early: {} sessions, {:?}", r.total, r.scanned_until);
+    assert_eq!(sessions(&page(5)), vec!["claude:c05", "claude:c06", "claude:c07", "claude:c08", "claude:c09"]);
+
+    let r = search(&fts, "cache zq");
+    assert_eq!(sessions(&r), vec!["claude:old"]);
+    assert!(r.total == 1 && !r.partial && r.scanned_until.is_none(), "{r:?}");
+    // A short exclusion filters the same scan.
+    let r = search(&fts, "cache -fn");
+    assert_eq!(r.order, SearchOrder::Recent);
+    assert_eq!(sessions(&r), vec!["claude:n0", "claude:n1", "claude:n2", "claude:n3", "claude:n4", "claude:old"]);
+    assert!(!r.partial && r.scanned_until.is_none(), "{r:?}");
+    drop(fts);
+
+    let fts = env.fts(&engine, FtsOptions { like_budget: Duration::ZERO, ..Default::default() });
+    idle(&fts);
+    let r = search(&fts, "cache zq");
+    assert!(r.partial && r.results.is_empty() && r.scanned_until.is_some(), "{r:?}");
+}
+
+/// Equal scores page in one fixed order (score, then activity, then session key): no session
+/// repeats or goes missing across pages, and asking again gives the same answer.
+#[test]
+fn equal_scores_page_in_a_stable_order() {
+    let env = Env::new();
+    let t = now_ms() - DAY;
+    for s in 0..25 {
+        std::fs::write(env.path(&format!("claude/-w-demo/e{s:02}.jsonl")), user("u1", t, "same tiebreak text 平局"))
+            .unwrap();
+    }
+    let engine = env.engine();
+    let fts = env.fts(&engine, FtsOptions::default());
+    idle(&fts);
+
+    for q in ["tiebreak", "平局"] {
+        let all = search_with(&fts, SearchParams { q: q.into(), limit: 200, ..Default::default() });
+        let keys: Vec<String> = sessions(&all).into_iter().map(str::to_owned).collect();
+        let want: Vec<String> = (0..25).map(|s| format!("claude:e{s:02}")).collect();
+        assert_eq!(keys, want, "{q}: ties fall back to the session key");
+        for _ in 0..3 {
+            let paged: Vec<String> = (0..25)
+                .step_by(7)
+                .flat_map(|offset| {
+                    let r = search_with(&fts, SearchParams { q: q.into(), limit: 7, offset, ..Default::default() });
+                    sessions(&r).into_iter().map(str::to_owned).collect::<Vec<_>>()
+                })
+                .collect();
+            assert_eq!(paged, keys, "{q}");
+        }
+    }
+}
+
 /// Scenario: 增量更新与 partial 覆盖.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn live_appends_and_partial_overwrites() {

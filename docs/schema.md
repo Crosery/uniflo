@@ -96,8 +96,8 @@
 | `indexing` | bool | 索引仍在构建或追赶，结果可能不全 |
 | `progress` | `{done, total, events}` | 已建完的会话数 / 会话总数 / 已入索引的事件数 |
 | `results` | `SearchSession[]` | 当前页 |
-| `partial` | bool? | 只有短词的查询在时间预算（2 s）内没扫完：`results` 是已找到的最新命中，更早的可能缺失；缺省为 false |
-| `scanned_until` | i64? | 只有短词的查询在扫到最老的会话之前就停了（结果已够，或 `partial`）：最后活动时间不晚于此刻的会话可能没被搜索，`total` 只是下限 |
+| `partial` | bool? | 含短词的查询在时间预算（2 s）内没扫完：`results` 是已找到的最新命中，更早的可能缺失；缺省为 false |
+| `scanned_until` | i64? | 含短词的查询在扫到最老的会话之前就停了（结果已够，或 `partial`）：最后活动时间不晚于此刻的会话可能没被搜索，`total` 只是下限 |
 
 `SearchSession`：`session`（会话 key）、`harness`、`title?`、`cwd?`、`updated_at?`、`score`（越大越相关，`recent` 时为 0）、`hits`（最多 3 条，最好的在前）。
 

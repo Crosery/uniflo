@@ -37,7 +37,7 @@
 | 追加一行到客户端收到事件 | < 50 ms（监听命中时个位数毫秒） | `crates/uniflo-core/tests/engine.rs`、`crates/uniflo-gateway/tests/gateway.rs` |
 | 冷启动全量索引 | 本机全部会话 < 2 s；有缓存 < 300 ms | `uniflo scan --no-cache` / `uniflo scan` |
 | 全文检索（`/v1/search`，≥ 3 字符的词，索引建成后） | p50 < 50 ms、p95 < 200 ms | 另起端口的守护进程建完索引后，按词频挑 10 个中文词 + 10 个代码子串各查 5 次，只记耗时与计数 |
-| 只有短词（< 3 字符）的全文检索 | 常见词 < 1 s；最多 2 s，超时返回 `partial` | 同上，按 `/v1/search` 实测；预算常量 `LIKE_BUDGET` |
+| 含短词（< 3 字符）的全文检索：只有短词，或与 ≥ 3 字符的词混合 | 常见词 < 1 s；最多 2 s，超时返回 `partial` | 同上，按 `/v1/search` 实测；预算常量 `LIKE_BUDGET` |
 | 新事件可被全文检索到 | < 2 s | `crates/uniflo-search/tests/fts.rs` |
 
 引擎循环里不得做阻塞 IO：读文件、`ps`/`lsof`、SQLite 都走 `spawn_blocking`，结果回到单写者循环再写状态。

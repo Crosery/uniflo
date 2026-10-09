@@ -25,9 +25,9 @@ pub struct Plan {
 }
 
 impl Plan {
-    /// A short positive term means substring scanning: results go newest first.
+    /// A short term, positive or excluded, means substring scanning: results go newest first.
     pub fn recent(&self) -> bool {
-        !self.like.is_empty()
+        !self.like.is_empty() || !self.not_like.is_empty()
     }
 }
 
