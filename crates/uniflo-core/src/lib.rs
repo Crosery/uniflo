@@ -5,6 +5,7 @@
 //! - [`status`]: the shared work/idle state machine
 //! - [`engine`]: live index, change detection and event fan-out
 //! - [`update`]: crates.io version check via the system curl
+//! - [`window`]: event windows centred on one event (search hit → transcript)
 
 pub mod adapter;
 pub mod cache;
@@ -15,8 +16,10 @@ pub mod status;
 pub mod update;
 pub mod util;
 mod watch;
+pub mod window;
 
 pub use adapter::{Adapter, Cursor, HarnessInfo, HistoryQuery, LiveSession, MetaPatch, ReadOutput, Record};
 pub use engine::{Engine, EngineOptions, IndexReport, Stats};
 pub use jsonl::{Cx, JsonlAdapter, LineDecoder, SourceId};
 pub use update::UpdateInfo;
+pub use window::Window;
