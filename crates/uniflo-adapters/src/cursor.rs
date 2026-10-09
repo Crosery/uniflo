@@ -1,24 +1,134 @@
-//! Cursor agent CLI transcripts.
+//! Cursor agent transcripts, plus the Cursor IDE store (`cursor_ide.rs`).
 //!
 //! Layout: `~/.cursor/projects/[<slug>/]agent-transcripts/<chat>/<chat>.jsonl`. Records are
 //! `{role, message:{content[...]}}` with no ids or timestamps, so events use position ids and
 //! `ts = 0`. Tool calls carry no id (call ids are position-derived) and results are not logged;
-//! a text-only assistant record ends the turn.
+//! a text-only assistant record ends the turn. The chat id is the IDE composer id: title, cwd,
+//! model, times and sub-agent parent come from the IDE store's `composerData:<id>`. Composers
+//! that kept their messages in the IDE store and have no transcript are listed from the store
+//! (source = `state.vscdb`); composers without any message are not listed.
 
 use crate::common::under_any;
+use crate::cursor_ide::{Ide, default_db};
+use anyhow::Result;
 use serde_json::Value;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use uniflo_core::util::{home, json_arg, str_of};
-use uniflo_core::{Adapter, Cx, HarnessInfo, JsonlAdapter, LineDecoder, SourceId};
-use uniflo_schema::Body;
+use uniflo_core::{
+    Adapter, Cursor as SrcCursor, Cx, HarnessInfo, HistoryQuery, JsonlAdapter, LineDecoder, ReadOutput, Record,
+    SourceId,
+};
+use uniflo_schema::{Body, Event};
 
 pub struct Cursor {
     roots: Vec<PathBuf>,
 }
 
 pub fn adapters() -> Vec<Arc<dyn Adapter>> {
-    vec![Arc::new(JsonlAdapter::new(Cursor { roots: vec![home().join(".cursor/projects")] }))]
+    vec![Arc::new(CursorAgent::new(home().join(".cursor/projects"), default_db()))]
+}
+
+/// Agent transcripts (one file per chat) and the IDE store (many composers) as one harness.
+pub struct CursorAgent {
+    transcripts: JsonlAdapter<Cursor>,
+    ide: Ide,
+}
+
+impl CursorAgent {
+    pub fn new(projects: PathBuf, db: PathBuf) -> Self {
+        CursorAgent { transcripts: JsonlAdapter::new(Cursor { roots: vec![projects] }), ide: Ide::new(db) }
+    }
+
+    fn is_ide(&self, src: &Path) -> bool {
+        src == self.ide.db
+    }
+
+    fn transcript_ids(&self) -> HashSet<String> {
+        self.transcripts.discover().iter().filter_map(|p| self.transcripts.decoder.identify(p)).map(|s| s.id).collect()
+    }
+
+    fn with_ide_meta(&self, src: &Path, records: &mut Vec<(String, Record)>) {
+        let Some(id) = self.transcripts.decoder.identify(src).map(|s| s.id) else { return };
+        if let Some(m) = self.ide.meta(&id) {
+            records.push((id, Record::Meta(m)));
+        }
+    }
+}
+
+impl Adapter for CursorAgent {
+    fn info(&self) -> HarnessInfo {
+        self.transcripts.info()
+    }
+
+    fn roots(&self) -> Vec<PathBuf> {
+        self.transcripts.roots()
+    }
+
+    fn source_for(&self, path: &Path) -> Option<PathBuf> {
+        crate::sqlite::source_for_db(&self.ide.db, path).or_else(|| self.transcripts.source_for(path))
+    }
+
+    fn discover(&self) -> Vec<PathBuf> {
+        let mut out = self.transcripts.discover();
+        if self.ide.db.is_file() {
+            out.push(self.ide.db.clone());
+        }
+        out
+    }
+
+    fn read(&self, src: &Path, cursor: Option<&SrcCursor>) -> Result<ReadOutput> {
+        if self.is_ide(src) {
+            if let Some(c) = cursor.filter(|c| !self.ide.changed(c)) {
+                return Ok(ReadOutput { cursor: c.clone(), ..Default::default() });
+            }
+            let (batch, c) = self.ide.read(&self.transcript_ids(), None)?;
+            return Ok(ReadOutput { cursor: c, batch, summary: cursor.is_none(), reset: cursor.is_some() });
+        }
+        let mut out = self.transcripts.read(src, cursor)?;
+        self.with_ide_meta(src, &mut out.batch.items);
+        Ok(out)
+    }
+
+    fn history(&self, src: &Path, session_id: &str, q: &HistoryQuery) -> Result<Vec<Event>> {
+        if !self.is_ide(src) {
+            return self.transcripts.history(src, session_id, q);
+        }
+        let (batch, _) = self.ide.read(&HashSet::new(), Some(session_id))?;
+        let mut evs: Vec<Event> = batch
+            .items
+            .into_iter()
+            .filter_map(|(_, r)| match r {
+                Record::Event(e) => Some(e),
+                Record::Meta(_) => None,
+            })
+            .filter(|e| q.before.is_none_or(|b| e.pos.unwrap_or(0) < b))
+            .collect();
+        let skip = evs.len().saturating_sub(q.limit.max(1));
+        Ok(evs.split_off(skip))
+    }
+
+    fn read_all(&self, src: &Path, sessions: &[String], sink: &mut dyn FnMut(&str, Record)) -> Result<SrcCursor> {
+        if self.is_ide(src) {
+            let (batch, c) = self.ide.read(&self.transcript_ids(), None)?;
+            for (id, r) in batch.items {
+                sink(&id, r);
+            }
+            return Ok(c);
+        }
+        let c = self.transcripts.read_all(src, sessions, sink)?;
+        let mut meta = Vec::new();
+        self.with_ide_meta(src, &mut meta);
+        for (id, r) in meta {
+            sink(&id, r);
+        }
+        Ok(c)
+    }
+
+    fn changed(&self, src: &Path, cursor: &SrcCursor) -> bool {
+        if self.is_ide(src) { self.ide.changed(cursor) } else { self.transcripts.changed(src, cursor) }
+    }
 }
 
 /// Cursor wraps the human's prompt in `<user_query>` tags.
@@ -186,5 +296,97 @@ mod tests {
         }
         assert_eq!(uniflo_core::Adapter::discover(&a).len(), 2);
         assert_eq!(a.decoder.identify(&main), Some(SourceId { id: "chat1".into(), parent: None }));
+    }
+
+    #[test]
+    fn ide_store_fills_transcript_metadata_and_lists_ide_only_composers() {
+        use crate::cursor_ide::tests::store;
+        let fx = Fixture::new();
+        let tid = "c-transcript";
+        let p = fx.write(
+            &format!("projects/slug/agent-transcripts/{tid}/{tid}.jsonl"),
+            &(l(json!({"role":"user","message":{"content":[{"type":"text","text":"hi"}]}}))
+                + &l(json!({"role":"assistant","message":{"content":[{"type":"text","text":"hello"}]}}))),
+        );
+        let db = fx.root().join("state.vscdb");
+        let data = |name: &str, heads: Value| {
+            json!({"composerId":"x","name":name,"createdAt":1790000000000i64,"lastUpdatedAt":1790000900000i64,
+                "modelConfig":{"modelName":"gpt-5"},"workspaceIdentifier":{"id":"w","uri":{"fsPath":"/w/app"}},
+                "fullConversationHeadersOnly":heads})
+        };
+        let bubble = |extra: Value| {
+            let mut b = json!({"createdAt":"2026-09-21T14:13:30Z"});
+            b.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            b
+        };
+        let heads = json!([{"bubbleId":"b1","type":1},{"bubbleId":"b2","type":2},{"bubbleId":"b3","type":1},{"bubbleId":"b4","type":2}]);
+        let kv = vec![
+            (format!("composerData:{tid}"), data("Transcript chat", json!([]))),
+            ("composerData:c-ide".to_owned(), data("Old chat", heads)),
+            ("composerData:c-empty".to_owned(), data("Draft", json!([]))),
+            // Key order differs from conversation order on purpose.
+            ("bubbleId:c-ide:b4".to_owned(), bubble(json!({"type":2,"text":"second answer"}))),
+            (
+                "bubbleId:c-ide:b2".to_owned(),
+                bubble(json!({"type":2,"text":"first answer","thinking":{"text":"hmm"},
+                "tokenCount":{"inputTokens":40,"outputTokens":9},"modelInfo":{"modelName":"claude-4"}})),
+            ),
+            ("bubbleId:c-ide:b1".to_owned(), bubble(json!({"type":1,"text":"first question"}))),
+            ("bubbleId:c-ide:b3".to_owned(), bubble(json!({"type":1,"text":"second question"}))),
+        ];
+        store(&db, &kv, &[(tid, 1, json!({"subagentInfo":{"parentComposerId":"c-ide"}})), ("c-ide", 0, json!({}))]);
+        let a = CursorAgent::new(fx.root().join("projects"), db.clone());
+        let mut found = a.discover();
+        found.sort();
+        assert_eq!(found, vec![p.clone(), db.clone()]);
+
+        let r = fx.index(&a, &p);
+        assert_eq!(kinds(&r.events), ["user_message", "assistant_message", "turn_end"]);
+        assert_eq!(r.meta.title.as_deref(), Some("Transcript chat"));
+        assert_eq!(r.meta.cwd.as_deref(), Some("/w/app"));
+        assert_eq!(r.meta.model.as_deref(), Some("gpt-5"));
+        assert_eq!(r.meta.started_at, Some(1790000000000));
+        assert_eq!(r.meta.parent.as_deref(), Some("c-ide"));
+
+        let out = a.read(&db, None).unwrap();
+        let g = crate::common::testkit::group(out.batch);
+        assert_eq!(
+            g.keys().collect::<Vec<_>>(),
+            ["c-ide"],
+            "transcript and empty composers are not listed from the store"
+        );
+        let ide = &g["c-ide"];
+        assert_eq!(
+            kinds(&ide.events),
+            [
+                "user_message",
+                "reasoning",
+                "assistant_message",
+                "usage",
+                "turn_end",
+                "user_message",
+                "assistant_message",
+                "turn_end"
+            ]
+        );
+        let texts: Vec<&str> = ide
+            .events
+            .iter()
+            .filter_map(|e| match &e.body {
+                Body::UserMessage { text, .. } | Body::AssistantMessage { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(texts, ["first question", "first answer", "second question", "second answer"]);
+        assert!(
+            matches!(&ide.events[3].body, Body::Usage(u) if (u.input, u.output) == (40, 9) && u.model.as_deref() == Some("claude-4"))
+        );
+        assert_eq!(ide.meta.title.as_deref(), Some("Old chat"));
+        assert_eq!(ide.status(), uniflo_schema::Status::Idle);
+        assert!(!a.changed(&db, &out.cursor), "unchanged store is not re-read");
+        let again = a.read(&db, Some(&out.cursor)).unwrap();
+        assert!(again.batch.items.is_empty());
+        let h = a.history(&db, "c-ide", &HistoryQuery { before: Some(3), limit: 10 }).unwrap();
+        assert_eq!(kinds(&h), ["user_message", "reasoning", "assistant_message", "usage", "turn_end"]);
     }
 }

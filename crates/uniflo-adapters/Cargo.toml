@@ -11,7 +11,8 @@ rust-version.workspace = true
 [features]
 default = [
     "claude", "codex", "pi", "prime", "cline", "gemini", "antigravity",
-    "opencode", "kilo", "workbuddy", "hermes", "minimax", "factory", "reasonix", "cursor", "dsh"
+    "opencode", "kilo", "workbuddy", "hermes", "minimax", "factory", "reasonix", "cursor", "dsh",
+    "grok", "kiro", "kimi", "codebuddy", "copilot", "devin", "craft", "openclaw"
 ]
 claude = []
 codex = []
@@ -27,8 +28,16 @@ hermes = ["dep:rusqlite"]
 minimax = ["dep:rusqlite"]
 factory = []
 reasonix = []
-cursor = []
+cursor = ["dep:rusqlite"]
 dsh = ["dep:ruzstd"]
+grok = []
+kiro = []
+kimi = []
+codebuddy = ["workbuddy"]
+copilot = ["dep:rusqlite"]
+devin = ["dep:rusqlite"]
+craft = []
+openclaw = ["pi", "dep:rusqlite"]
 
 [dependencies]
 uniflo-core.workspace = true
@@ -41,3 +50,4 @@ ruzstd = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile.workspace = true
+tokio.workspace = true

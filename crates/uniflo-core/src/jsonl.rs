@@ -46,6 +46,10 @@ pub trait LineDecoder: Send + Sync + 'static {
     fn identify(&self, path: &Path) -> Option<SourceId>;
     fn decode(&self, record: &Value, cx: &mut Cx<'_, Self::State>);
 
+    /// End of a contiguous run of records (one read window): emit what is still open, e.g. a
+    /// message streamed as fragments, as `partial`; its completed version reuses the id.
+    fn finish(&self, _cx: &mut Cx<'_, Self::State>) {}
+
     /// The file is one JSON document rewritten in place instead of appended lines.
     fn whole_file(&self, _path: &Path) -> bool {
         false
@@ -170,10 +174,19 @@ impl<D: LineDecoder> JsonlAdapter<D> {
                 && let Ok(v) = serde_json::from_slice::<Value>(rest)
             {
                 self.decode_value(&v, at, base + start as u64, state, sink);
-                return buf.len() as u64;
+                start = buf.len();
             }
         }
+        if start > 0 {
+            self.finish(at, base + start as u64, state, sink);
+        }
         start as u64
+    }
+
+    fn finish(&self, at: At<'_>, pos: u64, state: &mut D::State, sink: &mut Sink) {
+        let mut cx = Cx { key: at.key, src: at.src, pos, state, sink, n: 0 };
+        self.decoder.finish(&mut cx);
+        sink.flush_meta();
     }
 
     fn decode_line(&self, line: &[u8], pos: u64, at: At<'_>, state: &mut D::State, sink: &mut Sink) {
@@ -338,6 +351,7 @@ impl<D: LineDecoder> Adapter for JsonlAdapter<D> {
             let mut probe = Sink::default();
             let mut st = D::State::default();
             self.decode_line(&line, pos, At { src, key: &key }, &mut st, &mut probe);
+            self.finish(At { src, key: &key }, pos, &mut st, &mut probe);
             estimate += probe.records.iter().filter(|r| matches!(r, Record::Event(_))).count();
             lines.push((pos, line));
         }
@@ -347,6 +361,7 @@ impl<D: LineDecoder> Adapter for JsonlAdapter<D> {
         for (pos, line) in &lines {
             self.decode_line(line, *pos, At { src, key: &key }, &mut state, &mut sink);
         }
+        self.finish(At { src, key: &key }, end, &mut state, &mut sink);
         Ok(dedupe_events(sink.records))
     }
 
@@ -432,6 +447,30 @@ fn hash_event(e: &Event) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     serde_json::to_string(e).unwrap_or_default().hash(&mut h);
     h.finish()
+}
+
+/// Records and unknown discriminators produced by [`decode_record`].
+#[derive(Debug, Default)]
+pub struct Decoded {
+    pub records: Vec<Record>,
+    pub unknown: Vec<String>,
+}
+
+/// Feed one record that does not come from a JSONL file (e.g. a database row holding the
+/// same entry format) through `decoder`; `pos` is the caller's ordinal for it.
+pub fn decode_record<D: LineDecoder>(
+    decoder: &D,
+    key: &str,
+    src: &Path,
+    pos: u64,
+    v: &Value,
+    state: &mut D::State,
+) -> Decoded {
+    let mut sink = Sink::default();
+    let mut cx = Cx { key, src, pos, state, sink: &mut sink, n: 0 };
+    decoder.decode(v, &mut cx);
+    sink.flush_meta();
+    Decoded { records: sink.records, unknown: sink.unknown }
 }
 
 /// Keep one event per id: first position, latest content (in-place streaming updates).
@@ -856,5 +895,81 @@ mod tests {
             got.push((pos, String::from_utf8(l).unwrap()));
         }
         assert_eq!(got, vec![(7, "ccc".into()), (6, "".into()), (3, "bb".into()), (0, "a\r".into())]);
+    }
+
+    /// Fragments `{"f":"…"}` accumulate in state until `{"t":"end"}`; open text is flushed partial.
+    struct Frag;
+
+    impl LineDecoder for Frag {
+        type State = Option<(u64, String)>;
+        fn info(&self) -> HarnessInfo {
+            HarnessInfo { id: "frag", name: "Frag" }
+        }
+        fn roots(&self) -> Vec<PathBuf> {
+            Vec::new()
+        }
+        fn is_source(&self, _: &Path) -> bool {
+            true
+        }
+        fn identify(&self, p: &Path) -> Option<SourceId> {
+            Some(SourceId { id: p.file_stem()?.to_str()?.to_owned(), parent: None })
+        }
+        fn decode(&self, v: &Value, cx: &mut Cx<'_, Self::State>) {
+            match v.get("f").and_then(Value::as_str) {
+                Some(f) => cx.state.get_or_insert_with(|| (cx.pos, String::new())).1.push_str(f),
+                None => {
+                    if let Some((at, text)) = cx.state.take() {
+                        cx.emit(format!("m{at}"), 0, Body::AssistantMessage { text, model: None });
+                    }
+                    cx.emit_at(0, Body::TurnEnd { reason: None });
+                }
+            }
+        }
+        fn finish(&self, cx: &mut Cx<'_, Self::State>) {
+            if let Some((at, text)) = cx.state.clone() {
+                cx.emit(format!("m{at}"), 0, Body::AssistantMessage { text, model: None }).partial = true;
+            }
+        }
+    }
+
+    #[test]
+    fn finish_flushes_open_fragments_as_partial_then_completes_same_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = JsonlAdapter::new(Frag);
+        let p = dir.path().join("f.jsonl");
+        std::fs::write(&p, "{\"f\":\"he\"}\n{\"f\":\"llo \"}\n").unwrap();
+        let out = a.read(&p, None).unwrap();
+        let evs = events(&out);
+        assert_eq!(evs.len(), 1);
+        assert!(evs[0].partial);
+        assert!(matches!(&evs[0].body, Body::AssistantMessage { text, .. } if text == "hello "));
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&p)
+            .unwrap()
+            .write_all(b"{\"f\":\"you\"}\n{\"t\":\"end\"}\n")
+            .unwrap();
+        let out2 = a.read(&p, Some(&out.cursor)).unwrap();
+        let evs2 = events(&out2);
+        assert_eq!(evs2.len(), 2);
+        assert_eq!(evs2[0].id, evs[0].id, "completed version replaces the partial one");
+        assert!(!evs2[0].partial);
+        assert!(matches!(&evs2[0].body, Body::AssistantMessage { text, .. } if text == "hello you"));
+        let h = a.history(&p, "f", &HistoryQuery { before: None, limit: 10 }).unwrap();
+        assert_eq!(h.iter().map(|e| e.body.kind()).collect::<Vec<_>>(), ["assistant_message", "turn_end"]);
+    }
+
+    #[test]
+    fn decode_record_feeds_values_outside_files() {
+        let toy = Toy { root: PathBuf::new() };
+        let mut st = Count::default();
+        let v: Value = serde_json::from_str(&line("u", "hi", 5)).unwrap();
+        let d = decode_record(&toy, "toy:x", Path::new("/db"), 42, &v, &mut st);
+        assert!(matches!(&d.records[..], [Record::Event(e)] if e.pos == Some(42) && e.session == "toy:x" && e.ts == 5));
+        let bad: Value = serde_json::json!({"t":"zzz"});
+        let d2 = decode_record(&toy, "toy:x", Path::new("/db"), 43, &bad, &mut st);
+        assert!(d2.records.is_empty());
+        assert_eq!(d2.unknown, vec!["t=Some(\"zzz\")".to_string()]);
+        assert_eq!(st.0, 2);
     }
 }
