@@ -17,7 +17,8 @@ Uniflo 只做这一层：
 - **fd / fzf 式搜索**：`s:work h:claude in:uniflo since:2h 'gateway`。见 [`docs/search.md`](docs/search.md)。
 - **用量与费用**：每次模型调用的 token 统一口径（input 不含缓存、output 含思考），按 harness / 模型 / 项目 / 目录 / 日期 / 会话聚合，按事件时间的价格段计算 API 等价成本；未知模型单独计数，不按 0 计。见 [`docs/api.md`](docs/api.md#v1usage-参数)、[ADR-0010](docs/decisions/ADR-0010-价格目录同步与费用口径.md)。
 - **全文检索**：按中文词或代码子串查所有会话的正文、思考、工具参数与输出，命中直达事件上下文：`uniflo grep 缓存击穿`、`/v1/search`。索引在后台构建，见 [`docs/search.md#全文检索`](docs/search.md#全文检索)。
-- **只读、只听本机**：从不写 harness 数据；网关校验 Host / Origin，可选 token。
+- **agent 也能用**：stdio MCP 服务器 `uniflo mcp` 和随二进制分发的 Skill，`uniflo setup` 一条命令接入本机检测到的 harness；另有恢复会话、记忆与指令文件、接力上下文。见 [`docs/agents.md`](docs/agents.md)。
+- **只读、只听本机**：从不写 harness 会话数据（`uniflo setup` 只在你确认后改 harness 的 MCP 配置，可撤销，见 [ADR-0007](docs/decisions/ADR-0007-setup-写-harness-配置.md)）；网关校验 Host / Origin，可选 token。
 
 ## 已支持的 harness
 
@@ -91,6 +92,21 @@ uniflo usage --by dir --under ~/work      # 目录树下钻
 uniflo usage claude:4f1c                  # 一个会话每一步的用量、费用与上下文占用
 ```
 
+## 接入 agent
+
+```sh
+uniflo setup                              # 终端里交互：选 MCP / Skill / 两者，选 harness，确认后执行
+uniflo setup --mcp --agents claude,codex --yes   # 非交互（不加 --yes 只打印计划）
+uniflo setup --dry-run                    # 只看检测结果和计划改动
+uniflo setup --uninstall                  # 按记录撤销，备份保留
+uniflo mcp                                # MCP 服务器本体（stdio），由 harness 启动
+uniflo skill print                        # 输出内置 SKILL.md
+uniflo resume claude:4f1c                 # 在会话自己的 harness 里继续它（--print 只打印命令）
+uniflo context --cwd .                    # 本项目最近会话的 Markdown 摘要，可做 SessionStart hook
+```
+
+接入后 agent 可用 10 个只读工具：`uniflo_sessions`、`uniflo_session`、`uniflo_search`、`uniflo_usage`、`uniflo_session_usage`、`uniflo_models`、`uniflo_resume`、`uniflo_memory`、`uniflo_context`、`uniflo_status`。守护进程没在跑时 MCP 服务器在进程内建一次索引回答。支持的 harness、注册方式和撤销规则见 [`docs/agents.md`](docs/agents.md)。
+
 ## 接入自己的应用
 
 ```js
@@ -134,7 +150,7 @@ crates/
   uniflo-search    查询语法 + 模糊排序；全文索引（SQLite FTS5）
   uniflo-adapters  每个 harness 一个模块 / 一个 cargo feature
   uniflo-gateway   REST / SSE / NDJSON / WebSocket + Host/Origin/token 守卫
-  uniflo-cli       uniflo 二进制
+  uniflo-cli       uniflo 二进制：守护进程、查询客户端、MCP 服务器、setup
 examples/web       网页演示（同时由守护进程在 /demo 提供）
 docs/              架构、契约、规范、决策记录
 ```

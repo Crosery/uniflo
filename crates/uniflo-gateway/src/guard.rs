@@ -14,6 +14,8 @@ pub struct GuardOptions {
     pub cors_origins: Vec<String>,
     /// Extra Host header values accepted besides loopback names.
     pub allowed_hosts: Vec<String>,
+    /// Refuse every write route (403).
+    pub read_only: bool,
 }
 
 fn host_name(host: &str) -> &str {
@@ -54,6 +56,10 @@ fn constant_eq(a: &str, b: &str) -> bool {
     a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
+fn is_write(m: &Method) -> bool {
+    !matches!(*m, Method::GET | Method::HEAD | Method::OPTIONS)
+}
+
 fn deny(code: StatusCode, msg: &str) -> Response {
     (code, axum::Json(serde_json::json!({ "error": msg }))).into_response()
 }
@@ -61,10 +67,10 @@ fn deny(code: StatusCode, msg: &str) -> Response {
 fn cors_headers(h: &mut HeaderMap, origin: &HeaderValue) {
     h.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin.clone());
     h.insert(header::VARY, HeaderValue::from_static("Origin"));
-    h.insert(header::ACCESS_CONTROL_ALLOW_METHODS, HeaderValue::from_static("GET, OPTIONS"));
+    h.insert(header::ACCESS_CONTROL_ALLOW_METHODS, HeaderValue::from_static("GET, POST, DELETE, OPTIONS"));
     h.insert(
         header::ACCESS_CONTROL_ALLOW_HEADERS,
-        HeaderValue::from_static("authorization, last-event-id, content-type"),
+        HeaderValue::from_static("authorization, last-event-id, content-type, x-uniflo-write"),
     );
     h.insert(header::ACCESS_CONTROL_EXPOSE_HEADERS, HeaderValue::from_static("x-uniflo-seq"));
 }
@@ -92,6 +98,14 @@ pub async fn guard(State(g): State<Arc<GuardOptions>>, req: Request, next: Next)
         && !token_ok(&req, want)
     {
         return deny(StatusCode::UNAUTHORIZED, "missing or wrong token");
+    }
+    if is_write(req.method()) {
+        if g.read_only {
+            return deny(StatusCode::FORBIDDEN, "read-only");
+        }
+        if req.headers().get("x-uniflo-write").is_none_or(|v| v.as_bytes() != b"1") {
+            return deny(StatusCode::FORBIDDEN, "missing X-Uniflo-Write: 1");
+        }
     }
     let mut resp = next.run(req).await;
     if let Some(o) = &origin {

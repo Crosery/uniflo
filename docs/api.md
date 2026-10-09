@@ -4,7 +4,7 @@
 
 状态：`current` · 更新：2026-10-09
 
-默认地址 `http://127.0.0.1:7311`。只支持 `GET`（和 CORS 预检 `OPTIONS`）。所有成功响应带 `x-uniflo-seq` 头：响应生成时的最新 `seq`，可作为随后订阅的 `since`。
+默认地址 `http://127.0.0.1:7311`。读接口只用 `GET`（和 CORS 预检 `OPTIONS`）；写接口（目前只有 `POST /v1/sessions/{key}/open-terminal`）另需请求头 `X-Uniflo-Write: 1`，见[安全](#安全)。所有成功响应带 `x-uniflo-seq` 头：响应生成时的最新 `seq`，可作为随后订阅的 `since`。
 
 ## REST
 
@@ -24,8 +24,12 @@
 | `GET /v1/sessions/{key}/usage` | — | `SessionUsageDetail`：每一步明细与按回合汇总；未知 key 返回 404 |
 | `GET /v1/models` | `q` 查询 | `ModelUsage[]`：会话里出现过的模型、目录匹配结果（`exact` / `approx` / `none`）、价格段、上下文上限、步数与费用 |
 | `GET /v1/pricing` | — | `PricingStatus`：`{source, fetched_at, stale, error, models, overrides, last_attempt, pending, sync_enabled}` |
+| `GET /v1/sessions/{key}/resume` | — | `ResumeInfo`：在会话自己的 harness 里继续它的命令 `{key, harness, supported, argv, cwd, command, command_powershell, reason}`，只给命令、不执行；规则与支持的 harness 见 `docs/agents.md#恢复会话`；未知 key 404 |
+| `POST /v1/sessions/{key}/open-terminal` | `terminal=terminal`（默认）\|`iterm`\|`ghostty` | 写接口。macOS 在新终端窗口切到 cwd 执行恢复命令，返回 `{opened, terminal, command, cwd}`；不支持恢复、目录不存在或终端未安装 422，终端名无效 400；其他平台 501 并附 `command`、`command_powershell` |
+| `GET /v1/memory` | `cwd`（绝对路径，可用 `~`，可省） | `MemoryFile[]`：agent 记忆与指令文件 `{path, scope, harness, bytes, updated_at}`，范围见 `docs/agents.md#记忆与指令文件`；`cwd` 不是绝对路径 400 |
+| `GET /v1/memory/file` | `path`（必填） | `MemoryContent`：上面能列出的文件之一及其内容（最多 256 KB，超出 `truncated: true`）；其他路径 403，不存在 404 |
 
-`{key}` 需要 URL 编码（`claude%3A4f1c…`）。类型定义见 `docs/schema.md#用量与价格接口的类型`。
+`{key}` 需要 URL 编码（`claude%3A4f1c…`；key 里可能有 `/`，也必须编码）。类型定义见 `docs/schema.md#用量与价格接口的类型`、`docs/schema.md#agent-接入接口的类型`。
 
 ### /v1/usage 参数
 
@@ -81,7 +85,8 @@
 | Host 校验 | 只接受 `localhost` / `127.0.0.1` / `::1` / `*.localhost`，以及 `--allow-host` 列出的值；否则 403（防 DNS rebinding） |
 | Origin 校验 | 带 `Origin` 的请求只放行回环来源和 `--cors-origin` 列出的来源（`*` 放行全部）；否则 403 |
 | Token | 配了 `--token` / `UNIFLO_TOKEN` 时，必须带 `Authorization: Bearer <token>` 或 `?token=<token>`（浏览器 EventSource/WebSocket 用后者）；否则 401 |
-| 只读 | 网关没有任何写接口，不会修改 harness 数据；价格同步由守护进程定时或 `uniflo pricing sync` 在本机执行，不经网关 |
+| 写接口 | 写接口安全边界（见 ADR-0006 / docs/api.md）：`GET` / `HEAD` / `OPTIONS` 以外的请求通过上面三项检查后，还必须带 `X-Uniflo-Write: 1`，否则 403 `missing X-Uniflo-Write: 1`；网关以只读方式运行（`GuardOptions.read_only`）时一律 403 `read-only`。浏览器跨域发写请求要先过预检，CORS 放行 `GET, POST, DELETE, OPTIONS` 和 `x-uniflo-write` 头 |
+| harness 数据 | 网关不修改 harness 的会话数据；价格同步由守护进程定时或 `uniflo pricing sync` 在本机执行，不经网关 |
 
 `--allow-host` 必须与 token 一起使用；对局域网暴露前确认用户授权。
 
@@ -95,6 +100,9 @@ curl -s "localhost:7311/v1/usage?group_by=model&q=$(printf %s 'h:claude since:7d
 curl -s "localhost:7311/v1/usage?group_by=day&tz=Asia/Shanghai&since=30d"
 curl -sG localhost:7311/v1/search --data-urlencode 'q=缓存击穿 -rollback' --data-urlencode 'filter=h:claude since:7d'
 curl -s "localhost:7311/v1/sessions/claude%3A4f1c/events?around=msg_01:2&limit=20"   # 打开某条命中
+curl -s localhost:7311/v1/sessions/claude%3A4f1c/resume | jq -r .command                # 恢复命令
+curl -s -X POST -H 'X-Uniflo-Write: 1' 'localhost:7311/v1/sessions/claude%3A4f1c/open-terminal?terminal=ghostty'
+curl -sG localhost:7311/v1/memory --data-urlencode "cwd=$PWD"
 ```
 
 ```js

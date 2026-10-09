@@ -14,12 +14,17 @@
 //! | `GET /v1/usage?group_by=&q=&since=&until=&tz=&under=&depth=&limit=&sort=` | token / cost aggregation |
 //! | `GET /v1/sessions/{key}/usage` | per-step usage, per-turn totals |
 //! | `GET /v1/models?q=` · `GET /v1/pricing` | models seen with prices · catalog sync status |
+//! | `GET /v1/sessions/{key}/resume` | command that continues the session in its harness |
+//! | `POST /v1/sessions/{key}/open-terminal?terminal=` | macOS: run that command in a new terminal window (write route) |
+//! | `GET /v1/memory?cwd=` · `GET /v1/memory/file?path=` | agent memory / instruction files · one of them |
 //! | `GET /demo` | bundled single-page demo client (`examples/web/index.html`) |
 //!
 //! Snapshots carry `x-uniflo-seq`; subscribe with `since=<that>` for a gap-free view.
 //! Security: loopback Host only (DNS-rebinding guard), browser Origins limited to
-//! loopback + `--cors-origin`, optional bearer token (`Authorization` or `?token=`).
+//! loopback + `--cors-origin`, optional bearer token (`Authorization` or `?token=`); write
+//! routes also need `X-Uniflo-Write: 1` and are refused when `GuardOptions::read_only`.
 
+pub mod agent;
 mod guard;
 mod search;
 mod stream;
@@ -73,6 +78,10 @@ pub fn router_with_fts(engine: Arc<Engine>, guard: GuardOptions, fts: Option<Arc
         .route("/v1/models", get(usage::models))
         .route("/v1/pricing", get(usage::pricing))
         .route("/v1/search", get(search::search))
+        .route("/v1/sessions/{key}/resume", get(agent::resume))
+        .route("/v1/sessions/{key}/open-terminal", axum::routing::post(agent::open_terminal))
+        .route("/v1/memory", get(agent::memory))
+        .route("/v1/memory/file", get(agent::memory_file))
         .route("/v1/stream", get(sse))
         .route("/v1/stream.ndjson", get(ndjson))
         .route("/v1/ws", get(ws))
@@ -120,7 +129,7 @@ async fn index() -> impl IntoResponse {
         "name": "uniflo",
         "version": env!("CARGO_PKG_VERSION"),
         "schema": SCHEMA_VERSION,
-        "endpoints": ["/demo", "/v1/health", "/v1/harnesses", "/v1/sessions", "/v1/sessions/{key}", "/v1/sessions/{key}/events", "/v1/search", "/v1/stream", "/v1/stream.ndjson", "/v1/ws", "/v1/stats", "/v1/usage", "/v1/sessions/{key}/usage", "/v1/models", "/v1/pricing"],
+        "endpoints": ["/demo", "/v1/health", "/v1/harnesses", "/v1/sessions", "/v1/sessions/{key}", "/v1/sessions/{key}/events", "/v1/search", "/v1/stream", "/v1/stream.ndjson", "/v1/ws", "/v1/stats", "/v1/usage", "/v1/sessions/{key}/usage", "/v1/models", "/v1/pricing", "/v1/sessions/{key}/resume", "/v1/sessions/{key}/open-terminal", "/v1/memory", "/v1/memory/file"],
     }))
 }
 

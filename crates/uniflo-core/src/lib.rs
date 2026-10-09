@@ -9,14 +9,19 @@
 //! - [`usage`]: per-step usage ledgers and their aggregations
 //! - [`paths`]: Uniflo's own data / config / cache directories
 //! - [`window`]: event windows centred on one event (search hit → transcript)
+//! - [`resume`], [`memory`], [`context`]: resume commands, agent memory / instruction files and
+//!   the recent-session hand-off for agents
 
 pub mod adapter;
 pub mod cache;
+pub mod context;
 pub mod engine;
 pub mod jsonl;
+pub mod memory;
 pub mod paths;
 pub mod pricing;
 pub mod procs;
+pub mod resume;
 pub mod status;
 pub mod update;
 pub mod usage;

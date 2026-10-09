@@ -11,6 +11,7 @@
 | `api.md` | 网关 REST / SSE / NDJSON / WebSocket 与安全规则 |
 | `search.md` | 会话搜索语法（fd 式过滤 + fzf 式模糊）与全文检索语法 |
 | `adapters.md` | 已支持的 harness 与新增适配步骤 |
+| `agents.md` | agent 接入：MCP 服务器、Skill、`uniflo setup`、恢复会话、记忆与指令文件、接力上下文 |
 | `conventions/DEVELOPMENT.md` | 模块边界、代码风格、性能预算、隐私红线 |
 | `assets/` | README 截图，由 `scripts/demo-e2e.mjs` 用合成数据生成，不含真实会话 |
 | `conventions/COMMITS.md` | 提交信息与原子性 |

@@ -14,6 +14,7 @@ Uniflo：本机常驻守护进程，持续读取所有 agent harness（Claude Co
 | 新增或修改 harness 适配 | `docs/adapters.md` |
 | 改网关接口、鉴权、CORS | `docs/api.md` + `docs/decisions/ADR-0004-网关只监听本机.md` |
 | 改搜索语法 | `docs/search.md` |
+| 改 MCP 服务器、Skill、`uniflo setup`、resume / memory / context | `docs/agents.md` + `docs/decisions/ADR-0007-setup-写-harness-配置.md` |
 | 改网页演示 | `examples/web/index.html`、`scripts/demo-e2e.mjs`、`docs/conventions/DEVELOPMENT.md#测试` |
 | 提交代码 | `docs/conventions/COMMITS.md` |
 | 分支、MR/PR、合并 | `docs/conventions/BRANCHING.md`、`docs/conventions/GIT.md` |
@@ -28,6 +29,8 @@ Uniflo：本机常驻守护进程，持续读取所有 agent harness（Claude Co
 - **依赖方向单向**：`schema ← core ← search / adapters ← gateway ← cli`。下游不得被上游引用；`uniflo-schema` 只依赖 serde。新 crate 或新边要写进 `docs/architecture.md`。
 - **适配器只翻译，不判状态**：work/idle 由 `uniflo-core::status` 从归一事件统一推导。适配器不得自己写状态机；只能通过 `TurnStart`/`TurnEnd` 事件或 `live()` 表达。
 - **只读 harness 数据**：任何适配器、测试、脚本都不得写入、移动、复制、锁定 harness 的会话文件或数据库。SQLite 一律走 `sqlite::open_ro`（`SQLITE_OPEN_READ_ONLY`）。
+  - 唯一例外是 `uniflo setup`（ADR-0007）：经用户确认（终端确认或 `--yes`）后，只增删 harness 配置里名为 `uniflo` 的 MCP 条目、指向 Uniflo Skill 的软链和可选的 SessionStart hook，先备份、原子写入、按 `setup.json` 记录对称撤销；不覆盖别人的同名条目。会话文件和数据库仍然只读。
+  - 开发和测试里，非 `--dry-run` 的 `uniflo setup`（含 `--uninstall`、`--reload`）只能在临时 HOME 中运行：设 `HOME` 和 `UNIFLO_HOME` 为临时目录，并清掉 `CLAUDE_CONFIG_DIR` 和 `CODEX_HOME`。
 - **隐私**：测试夹具只能手写合成数据，禁止拷贝真实会话；调试输出只打印键名、计数、类型，不打印会话正文、提示词、文件内容、token。`~/.claude/sessions/*.key` 之类的凭据文件永不读取。
 - **网关默认只听回环**：非回环 Host 必须同时配 `--allow-host` 和 token；不得放宽 Host/Origin 校验来"方便调试"。
 - 生成物不入库：`target/`、缓存（`~/Library/Caches/uniflo/`）不提交。

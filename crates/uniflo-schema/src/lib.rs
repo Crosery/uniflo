@@ -13,6 +13,8 @@ use serde_json::Value;
 pub mod search;
 mod usage;
 pub use usage::*;
+mod agent;
+pub use agent::*;
 
 pub const SCHEMA_VERSION: u32 = 1;
 

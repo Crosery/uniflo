@@ -1,8 +1,11 @@
 //! `uniflo` — daemon and command line for the unified agent-harness session gateway.
 
+mod agent;
 mod client;
 mod grep;
+mod mcp;
 mod render;
+mod setup;
 mod usage;
 
 use anyhow::{Context, Result, bail};
@@ -157,10 +160,33 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// stdio MCP server for agents (what `uniflo setup --mcp` registers).
+    Mcp,
+    /// The agent Skill shipped with this binary.
+    Skill {
+        #[command(subcommand)]
+        action: agent::SkillAction,
+    },
+    /// Connect the agent harnesses on this machine: MCP server and/or Skill (asks first).
+    Setup(setup::SetupArgs),
+    /// Continue a session in its own harness from its cwd; `--print` only prints the command.
+    Resume {
+        key: String,
+        #[arg(long)]
+        print: bool,
+    },
+    /// This project's recent sessions as short Markdown for an agent (empty without a daemon).
+    Context(agent::ContextArgs),
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    if !matches!(
+        cli.cmd,
+        Cmd::Daemon { .. } | Cmd::Mcp | Cmd::Setup(_) | Cmd::Skill { .. } | Cmd::Context(_) | Cmd::Update { .. }
+    ) {
+        setup::first_run();
+    }
     match cli.cmd {
         Cmd::Daemon {
             ref bind,
@@ -177,6 +203,7 @@ fn main() -> Result<()> {
                 token: cli.token.clone(),
                 cors_origins: cors_origins.clone(),
                 allowed_hosts: allow_hosts.clone(),
+                ..Default::default()
             };
             if !allow_hosts.is_empty() && guard.token.is_none() {
                 bail!("--allow-host exposes transcripts beyond loopback; set --token as well");
@@ -188,6 +215,13 @@ fn main() -> Result<()> {
         Cmd::Scan { json, no_cache } => scan(json, no_cache),
         Cmd::Update { check, prerelease, json } => update(check, prerelease, json),
         Cmd::Pricing(ref a) => usage::pricing(&cli, a),
+        Cmd::Mcp => mcp::run(&cli),
+        Cmd::Skill { ref action } => {
+            agent::skill(action);
+            Ok(())
+        }
+        Cmd::Setup(ref a) => setup::run(a),
+        Cmd::Context(ref a) => agent::context(&cli, a),
         ref cmd => Source::open(&cli)?.run(cmd),
     }
 }
@@ -401,6 +435,7 @@ fn update(check: bool, prerelease: bool, json: bool) -> Result<()> {
             "守护进程若正在运行，请先停掉再启动新版（Windows 上运行中的二进制无法被覆盖，建议 update 前停 daemon）。"
         );
     }
+    setup::after_update();
     Ok(())
 }
 
@@ -549,7 +584,15 @@ impl Source {
             }
             Cmd::Usage(a) => usage::usage(self, a),
             Cmd::Grep { terms, filter, limit, json } => grep::run(self, terms, filter.as_deref(), *limit, *json),
-            Cmd::Daemon { .. } | Cmd::Scan { .. } | Cmd::Update { .. } | Cmd::Pricing(_) => unreachable!(),
+            Cmd::Resume { key, print } => agent::resume(self, key, *print),
+            Cmd::Daemon { .. }
+            | Cmd::Scan { .. }
+            | Cmd::Update { .. }
+            | Cmd::Pricing(_)
+            | Cmd::Mcp
+            | Cmd::Skill { .. }
+            | Cmd::Setup(_)
+            | Cmd::Context(_) => unreachable!(),
         }
     }
 }
