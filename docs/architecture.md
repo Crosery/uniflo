@@ -33,6 +33,11 @@ Gateway（axum）                       ← uniflo-gateway
 - **跟随**：偏移之后的新字节逐行解码；半行留到下次；文件变短或被重写视为重置，重新做头尾摘要。一次追平上限 16 MB，超过改走摘要。
 - **SQLite**：只读打开，按 rowid 读新行，未完成的 part/message 按主键重读；WAL 签名变化才触发读取。
 - **同一 `id` 的事件是覆盖**（流式更新）：客户端按 `(session, id)` upsert。
+- **流式片段**：`LineDecoder::finish` 在一次连续读取窗口结束时被调用，把还没闭合的消息（如 Grok 按片段写的文本）以 `partial` 发出；后续读到完整消息时复用同一 id 覆盖。历史分页只从 `LineDecoder::page_start` 认可的行开始（Grok 是带回合号与模型的提问、Kimi 是 `turn.prompt`），页内按 `pos` 排序，所以任意 `limit` 下翻页拿到的 id 与正文都和整文件解码一致；页尾之后还有内容时，未闭合的消息按完整发出。
+- **旁路文件**：会话目录里原地重写的 JSON（标题、cwd、模型、父会话、逐回合用量）由 `uniflo-adapters::common::WithSidecars` 包装的 `Sidecar` 读取：摘要 / 重置、会话首次出现内容、或旁路文件签名（mtime + 大小）变化时才补发；只有元数据、没有任何事件的会话不列出（grok、kiro、kimi）。
+- **整文件重写**：Craft 以「临时文件 → 删除 → 改名」重写 `session.jsonl`，所以源是会话目录，每次读取整源重读并 `reset`；文件短暂缺失时保留上次结果，不计读错误。
+- **库内会话树**：Devin、OpenClaw 的消息是一棵树，只展示当前可见分支；分支延长按行跟随，切换到别的分支时整库重读（`reset`）。OpenClaw 库里的条目是 Pi 条目，经 `uniflo_core::decode_record` 交给 Pi 的 `LineDecoder` 解码，不重复实现。
+- **Cursor IDE 库**：`state.vscdb` 可达 GB 级，只按键前缀区间枚举、按主键取单值，不对每个值 `json_extract`；结果按库文件与 WAL 的签名缓存，签名不变不重读。
 - **缓存**：索引完成后、每 30 s（有变化时）和退出时把会话快照和游标写到 `~/Library/Caches/uniflo/index-v1.json`；启动时未变的源直接恢复，只读新增字节。缓存目录由 `core::cache::dir()` 给出，设了 `UNIFLO_HOME` 时随之移到其下，测试不会碰到真实缓存。
 
 ## 全文索引
@@ -103,7 +108,7 @@ Session.usage（随 session envelope 推送）· /v1/usage 聚合 · /v1/session
 | harness | 来源 |
 |---|---|
 | Claude Code | `~/.claude/sessions/<pid>.json` 注册表，只用来判断 pid 是否存活（其中的 `status` 会过期，不采信） |
-| WorkBuddy | `~/.workbuddy/sessions/<pid>.json` |
+| WorkBuddy / CodeBuddy | `~/.workbuddy/sessions/<pid>.json` / `~/.codebuddy/sessions/<pid>.json`（同一内核） |
 | omp / Pi | `core::procs`：`ps` 取启动时间与参数 + 一次批量 `lsof` 取 cwd 和打开的 `.jsonl`；映射优先级 `--resume` 参数 → 进程持有的会话文件 → 同 cwd 自启动以来写过的最新会话 |
 | 其他 | 无进程映射，靠回合事件 + 超时 |
 

@@ -26,6 +26,6 @@ pub mod window;
 
 pub use adapter::{Adapter, Cursor, HarnessInfo, HistoryQuery, LiveSession, MetaPatch, ReadOutput, Record};
 pub use engine::{Engine, EngineOptions, IndexReport, PriceSync, Stats};
-pub use jsonl::{Cx, JsonlAdapter, LineDecoder, SourceId};
+pub use jsonl::{Cx, JsonlAdapter, LineDecoder, SourceId, decode_record};
 pub use update::UpdateInfo;
 pub use window::Window;
