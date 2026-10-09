@@ -436,6 +436,16 @@ fn background_build_format_bump_and_incremental_restart() {
     assert_eq!((st.progress.events, st.progress.done, st.progress.total), (2000, 40, 40));
     assert!(st.bytes > 0 && st.errors == 0, "{st:?}");
     assert_eq!(events(&search(&fts, "marker7x49")), vec![("claude:b7", "u49")]);
+    // After the backlog: segments merged, pages read in.
+    let t0 = Instant::now();
+    while fts.status().warming {
+        assert!(t0.elapsed() < Duration::from_secs(20), "still warming");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let c = rusqlite::Connection::open(env.fts_path()).unwrap();
+    assert!(!uniflo_search::fts::store::scattered(&c).unwrap());
+    drop(c);
+    assert_eq!(events(&search(&fts, "marker7x49")), vec![("claude:b7", "u49")]);
     drop(fts);
     let sentinel = |set: bool| {
         let c = rusqlite::Connection::open(env.fts_path()).unwrap();

@@ -103,7 +103,7 @@
 
 `SearchHit`：`event`（事件 id，传给 `events?around=`）、`kind`、`ts`、`snippet`（高亮区间以 `\u0002` 开始、`\u0003` 结束，常量 `HIGHLIGHT_START` / `HIGHLIGHT_END`）。
 
-`FtsStatus`（`GET /v1/stats` 的 `fts`）：`indexing`、`progress`、`path`（索引文件）、`bytes`（索引文件含 WAL 的磁盘占用）、`rebuilt`（本次启动因格式标签变化或文件损坏而重建）、`build_ms?`（从空索引开始的最近一次全量构建耗时）、`errors`、`last_error?`。
+`FtsStatus`（`GET /v1/stats` 的 `fts`）：`indexing`、`progress`、`path`（索引文件）、`bytes`（索引文件含 WAL 的磁盘占用）、`rebuilt`（本次启动因格式标签变化或文件损坏而重建）、`warming?`（启动后索引仍在合并成一个段、或在读进系统页缓存，期间某个词的第一次查询可能较慢；缺省为 false）、`build_ms?`（从空索引开始的最近一次全量构建耗时）、`errors`、`last_error?`。
 
 ## 示例
 

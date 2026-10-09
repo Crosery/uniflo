@@ -36,7 +36,7 @@
 | 全量模糊搜索（fzf 语法扫全部会话） | < 50 ms | 同上，`/v1/sessions?q=<词>` |
 | 追加一行到客户端收到事件 | < 50 ms（监听命中时个位数毫秒） | `crates/uniflo-core/tests/engine.rs`、`crates/uniflo-gateway/tests/gateway.rs` |
 | 冷启动全量索引 | 本机全部会话 < 2 s；有缓存 < 300 ms | `uniflo scan --no-cache` / `uniflo scan` |
-| 全文检索（`/v1/search`，≥ 3 字符的词，索引建成后） | p50 < 50 ms、p95 < 200 ms | 另起端口的守护进程建完索引后，按词频挑 10 个中文词 + 10 个代码子串各查 5 次，只记耗时与计数 |
+| 全文检索（`/v1/search`，≥ 3 字符的词，索引建成后） | p50 < 50 ms、p95 < 200 ms，代码子串 p50 < 50 ms；每个词的第一次（冷）查询计入 | 另起端口的守护进程在 `/v1/stats` 的 `fts.indexing`、`fts.warming` 都为 false 后，用这个进程里没查过的词集：按词频挑 10 个中文词 + 10 个代码子串，各查 5 次，至少 3 组，只记耗时与计数 |
 | 含短词（< 3 字符）的全文检索：只有短词，或与 ≥ 3 字符的词混合 | 常见词 < 1 s；最多 2 s，超时返回 `partial` | 同上，按 `/v1/search` 实测；预算常量 `LIKE_BUDGET` |
 | 新事件可被全文检索到 | < 2 s | `crates/uniflo-search/tests/fts.rs` |
 

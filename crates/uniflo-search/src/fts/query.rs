@@ -16,6 +16,8 @@ pub struct Term {
 pub struct Plan {
     /// FTS5 MATCH expression over the long positive terms.
     pub fts: Option<String>,
+    /// Phrases in `fts`, exclusions included.
+    pub phrases: usize,
     /// `LIKE` patterns (already escaped for `ESCAPE '\'`) that must match.
     pub like: Vec<String>,
     /// `LIKE` patterns that must not match.
@@ -104,12 +106,15 @@ pub fn plan(terms: &[Term]) -> Option<Plan> {
         return None;
     }
     let mut not_like = Vec::new();
+    let mut phrases = 0;
     let fts = (!pos_long.is_empty()).then(|| {
         let mut e = format!("({})", pos_long.iter().map(|t| quote(t)).collect::<Vec<_>>().join(" AND "));
+        phrases = pos_long.len();
         for t in terms.iter().filter(|t| t.neg) {
             if is_long(&t.text) {
                 e.push_str(" NOT ");
                 e.push_str(&quote(&t.text));
+                phrases += 1;
             }
         }
         e
@@ -118,7 +123,7 @@ pub fn plan(terms: &[Term]) -> Option<Plan> {
         not_like.push(like_pattern(&t.text));
     }
     let marks = terms.iter().filter(|t| !t.neg).map(|t| t.text.clone()).collect();
-    Some(Plan { fts, like: short.iter().map(|t| like_pattern(t)).collect(), not_like, marks })
+    Some(Plan { fts, phrases, like: short.iter().map(|t| like_pattern(t)).collect(), not_like, marks })
 }
 
 /// Byte offset of the first ASCII-case-insensitive occurrence of `needle` (what SQLite `LIKE`
@@ -200,6 +205,7 @@ mod tests {
     fn long_terms_use_fts_short_terms_use_like() {
         let p = plan(&parse(r#"deploy "deploy script" -rollback"#)).unwrap();
         assert_eq!(p.fts.as_deref(), Some(r#"("deploy" AND "deploy script") NOT "rollback""#));
+        assert_eq!(p.phrases, 3);
         assert!(p.like.is_empty() && p.not_like.is_empty() && !p.recent());
 
         let p = plan(&parse("缓存 parse_rel -ab")).unwrap();

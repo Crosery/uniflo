@@ -87,6 +87,10 @@ pub struct FtsStatus {
     pub bytes: u64,
     /// The index was discarded at startup (format tag changed or file unreadable).
     pub rebuilt: bool,
+    /// After startup, the index is still being merged into one segment and read into the OS page
+    /// cache: until then a term's first query may wait on the disk.
+    #[serde(default, skip_serializing_if = "crate::is_false")]
+    pub warming: bool,
     /// Duration of the last backfill that started from an empty index.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub build_ms: Option<u64>,

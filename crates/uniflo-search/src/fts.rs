@@ -5,12 +5,17 @@
 //!   throttled, recording per-session progress so a restart only catches up what changed;
 //! - follows the engine broadcast, so new and overwritten events are searchable within ~100 ms;
 //! - reconciles against the engine's session list periodically, because summary reads are never
-//!   broadcast and a lagging subscriber loses envelopes, and drops sessions the engine removed.
+//!   broadcast and a lagging subscriber loses envelopes, and drops sessions the engine removed;
+//! - merges the index into one segment, in throttled steps, when a backlog leaves it spread over
+//!   many ([`store::scattered`]).
+//!
+//! A second thread then reads the index into the OS page cache ([`FtsStatus::warming`]).
 //!
 //! Queries run on a pool of read-only connections and never wait for the writer (WAL).
 //! Embedding: `engine.index()` first, then [`Fts::start`]; the gateway serves it as `/v1/search`.
 
 pub mod query;
+pub mod rank;
 pub mod store;
 
 use crate::{Query as SessionQuery, search as filter_sessions};
@@ -43,6 +48,8 @@ const SNIPPET_TOKENS: u32 = 40;
 pub const LIKE_BUDGET: Duration = Duration::from_secs(2);
 /// Rows per `LIKE` statement, so the budget is checked inside large sessions too.
 const LIKE_CHUNK: i64 = 1024;
+/// Leaf pages of work per step of the post-backlog segment merge (≈ 8 MB written per commit).
+const MERGE_PAGES: i64 = 2000;
 const DAY_MS: f64 = 86_400_000.0;
 
 #[derive(Debug, Clone)]
@@ -132,6 +139,9 @@ struct Shared {
     keys: HashMap<i64, String>,
     progress: IndexProgress,
     indexing: bool,
+    /// Until the writer has decided on, or finished, the post-backlog segment merge.
+    merging: bool,
+    warming: bool,
     build_ms: Option<u64>,
     errors: u64,
     last_error: Option<String>,
@@ -173,12 +183,13 @@ impl Inner {
 pub struct Fts {
     inner: Arc<Inner>,
     writer: Option<std::thread::JoinHandle<()>>,
+    warmer: Option<std::thread::JoinHandle<()>>,
 }
 
 impl Drop for Fts {
     fn drop(&mut self) {
         self.inner.stop.store(true, Ordering::Relaxed);
-        if let Some(h) = self.writer.take() {
+        for h in [self.writer.take(), self.warmer.take()].into_iter().flatten() {
             let _ = h.join();
         }
     }
@@ -191,7 +202,7 @@ impl Fts {
         let tag =
             format!("uniflo-fts/format{}/uniflo{}/schema{}", opts.format, env!("CARGO_PKG_VERSION"), SCHEMA_VERSION);
         let (conn, rebuilt) = store::open(&opts.path, &tag)?;
-        let mut shared = Shared::default();
+        let mut shared = Shared { merging: true, warming: true, ..Default::default() };
         for (k, r) in store::load_sessions(&conn)? {
             shared.remember(&k, r);
         }
@@ -216,6 +227,8 @@ impl Fts {
             lagged: Cell::new(false),
             tx_since: Cell::new(None),
             build: None,
+            merge_check: true,
+            merge: None,
         };
         w.reconcile();
         w.commit(true);
@@ -223,7 +236,17 @@ impl Fts {
             w.build = Some(Instant::now());
         }
         let writer = std::thread::Builder::new().name("uniflo-fts".into()).spawn(move || w.run())?;
-        Ok(Fts { inner, writer: Some(writer) })
+        let i = inner.clone();
+        let warmer = std::thread::Builder::new().name("uniflo-fts-warm".into()).spawn(move || {
+            let t0 = Instant::now();
+            match warm(&i) {
+                Ok(true) => tracing::info!("full-text index warmed in {} ms", t0.elapsed().as_millis()),
+                Ok(false) => {}
+                Err(e) => i.note_error(format!("warm: {e:#}")),
+            }
+            i.shared.lock().unwrap().warming = false;
+        })?;
+        Ok(Fts { inner, writer: Some(writer), warmer: Some(warmer) })
     }
 
     pub fn path(&self) -> &Path {
@@ -244,6 +267,7 @@ impl Fts {
             path: path.display().to_string(),
             bytes,
             rebuilt: self.inner.rebuilt,
+            warming: sh.warming,
             build_ms: sh.build_ms,
             errors: sh.errors,
             last_error: sh.last_error.clone(),
@@ -310,7 +334,7 @@ impl Fts {
         let mut end = ScanEnd::default();
         match &plan.fts {
             Some(expr) if !plan.recent() => {
-                self.rank_fts(&conn, expr, kinds.as_ref(), allowed.as_ref(), &mut groups)?
+                self.rank_fts(&conn, &plan, expr, kinds.as_ref(), allowed.as_ref(), &mut groups)?
             }
             _ => {
                 let need = p.offset + limit;
@@ -366,26 +390,40 @@ impl Fts {
         })
     }
 
-    /// Relevance: bm25 over the FTS index alone (session and kind are in the row id).
+    /// Relevance: bm25 over the FTS index alone (session and kind are in the row id). A single
+    /// phrase skips bm25()'s IDF pass (see [`rank`]); the IDF is applied once the rows are counted.
     fn rank_fts(
         &self,
         conn: &Connection,
+        plan: &query::Plan,
         expr: &str,
         kinds: Option<&HashSet<i64>>,
         allowed: Option<&HashSet<i64>>,
         groups: &mut HashMap<i64, Vec<Cand>>,
     ) -> Result<()> {
-        let mut st = conn.prepare_cached("SELECT rowid, bm25(docs_fts) FROM docs_fts WHERE docs_fts MATCH ?1")?;
+        let one = plan.phrases == 1;
+        let sql = if one {
+            "SELECT rowid, uniflo_bm25(docs_fts), uniflo_rows(docs_fts) FROM docs_fts WHERE docs_fts MATCH ?1"
+        } else {
+            "SELECT rowid, -bm25(docs_fts), 0 FROM docs_fts WHERE docs_fts MATCH ?1"
+        };
+        let mut st = conn.prepare_cached(sql)?;
         let mut rows = st.query([expr])?;
+        let (mut matched, mut table_rows) = (0i64, 0i64);
         while let Some(r) = rows.next()? {
+            matched += 1;
+            table_rows = r.get(2)?;
             let id: i64 = r.get(0)?;
             if kinds.is_some_and(|k| !k.contains(&store::kind_of(id)))
                 || allowed.is_some_and(|a| !a.contains(&store::sid_of(id)))
             {
                 continue;
             }
-            let v: f64 = r.get(1)?;
-            push_hit(groups, Cand { id, key: -v });
+            push_hit(groups, Cand { id, key: r.get(1)? });
+        }
+        if one {
+            let idf = rank::idf(table_rows, matched);
+            groups.values_mut().flatten().for_each(|c| c.key *= idf);
         }
         Ok(())
     }
@@ -582,6 +620,29 @@ impl Drop for Pooled<'_> {
     }
 }
 
+/// Once the backlog has drained and the segments are merged, read the two tables every query
+/// touches into the OS page cache: the term index, and the document lengths bm25 looks up for
+/// each matched row (`docs_fts_docsize`, under 1% of the index). Cold, those lookups cost a
+/// term's first query up to a second; the postings are read per term, sequentially once merged.
+/// False when stopped first.
+fn warm(inner: &Inner) -> Result<bool> {
+    while {
+        let sh = inner.shared.lock().unwrap();
+        sh.indexing || sh.merging
+    } {
+        if inner.stop.load(Ordering::Relaxed) {
+            return Ok(false);
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    let conn = store::open_reader(&inner.opts.path)?;
+    // count(*) visits every page of the b-tree.
+    for table in ["docs_fts_idx", "docs_fts_docsize"] {
+        conn.query_row(&format!("SELECT count(*) FROM {table}"), [], |_| Ok(()))?;
+    }
+    Ok(true)
+}
+
 /// Ranking weight `1 + 1/(1 + age_days/30)`: ×2 today, ×1.5 a month ago, →1 for old sessions.
 fn recency(now: i64, t: i64) -> f64 {
     1.0 + 1.0 / (1.0 + (now - t).max(0) as f64 / DAY_MS / 30.0)
@@ -654,6 +715,10 @@ struct Writer {
     /// Start of the open write transaction.
     tx_since: Cell<Option<Instant>>,
     build: Option<Instant>,
+    /// Look at the segments at the next idle turn: set at start and whenever a backlog drains.
+    merge_check: bool,
+    /// The running segment merge: its start, and whether its first step ran.
+    merge: Option<(Instant, bool)>,
 }
 
 impl Writer {
@@ -685,7 +750,7 @@ impl Writer {
                 None => {
                     self.commit(true);
                     self.settle();
-                    if !busy {
+                    if !self.merge_step() && !busy {
                         self.nap(IDLE);
                     }
                 }
@@ -712,6 +777,7 @@ impl Writer {
         }
         sh.indexing = false;
         sh.progress.done = sh.progress.total;
+        self.merge_check = true;
         if let Some(t0) = self.build.take() {
             let ms = t0.elapsed().as_millis() as u64;
             sh.build_ms = Some(ms);
@@ -721,6 +787,39 @@ impl Writer {
                 sh.progress.total
             );
         }
+    }
+
+    /// One step of merging the index into one segment, run on idle turns once a backlog leaves it
+    /// [`store::scattered`]: each step commits on its own (bounded WAL) and is throttled like the
+    /// backfill. Returns whether a step ran.
+    fn merge_step(&mut self) -> bool {
+        if self.merge.is_none() && std::mem::take(&mut self.merge_check) {
+            match store::scattered(&self.conn) {
+                Ok(true) => self.merge = Some((Instant::now(), false)),
+                Ok(false) => {}
+                Err(e) => self.inner.note_error(format!("merge: {e:#}")),
+            }
+        }
+        let Some((since, started)) = self.merge else {
+            self.inner.shared.lock().unwrap().merging = false;
+            return false;
+        };
+        let t0 = Instant::now();
+        let mut more = false;
+        let res = self.transaction(|_, tx| {
+            more = store::merge_step(tx, !started, MERGE_PAGES)?;
+            Ok(0)
+        });
+        self.commit(true);
+        self.merge = (res.is_ok() && more).then_some((since, true));
+        if self.merge.is_none() {
+            self.inner.shared.lock().unwrap().merging = false;
+            if res.is_ok() {
+                tracing::info!("full-text index merged into one segment in {} ms", since.elapsed().as_millis());
+            }
+        }
+        self.nap(t0.elapsed().mul_f32(self.inner.opts.pause));
+        true
     }
 
     /// Diff the engine's sessions against recorded progress: queue what changed, drop what is gone.

@@ -199,7 +199,32 @@ pub fn open_reader(path: &Path) -> Result<Connection> {
     let c = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)
         .with_context(|| format!("open {}", path.display()))?;
     c.busy_timeout(Duration::from_secs(2))?;
+    // Multi-phrase bm25() reads its doclists twice (IDF pass, then the rows); the default 2 MB
+    // cache drops them in between.
+    c.pragma_update(None, "cache_size", -32_000)?;
+    super::rank::register(&c)?;
     Ok(c)
+}
+
+/// Whether more than a quarter of the index's leaf pages lie outside its largest segment. A query
+/// reads each segment's share of a term's postings separately, so on a cold cache every trigram
+/// costs a seek per segment; merging into one segment makes the reads few and sequential.
+pub fn scattered(c: &Connection) -> Result<bool> {
+    // `pgno` is the leaf number shifted left once (the low bit flags a doclist index).
+    let mut st = c.prepare("SELECT (max(pgno) >> 1) - (min(pgno) >> 1) + 1 FROM docs_fts_idx GROUP BY segid")?;
+    let leaves: Vec<i64> = st.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+    let (total, largest) = (leaves.iter().sum::<i64>(), leaves.iter().copied().max().unwrap_or(0));
+    Ok(total - largest > total / 4)
+}
+
+/// One step of merging every segment into one, about `pages` leaf pages of work. The first step
+/// (`start`) gathers all segments into one merge; later ones continue it. Returns whether the
+/// step did any work (FTS5's documented `total_changes` test).
+pub fn merge_step(c: &Connection, start: bool, pages: i64) -> Result<bool> {
+    let before = c.total_changes();
+    let n = if start { -pages } else { pages };
+    c.prepare_cached("INSERT INTO docs_fts (docs_fts, rank) VALUES ('merge', ?1)")?.execute([n])?;
+    Ok(c.total_changes() - before >= 2)
 }
 
 #[derive(Debug, Clone, Default)]
@@ -378,6 +403,33 @@ mod tests {
             text(Body::ToolResult { call_id: "c".into(), name: None, output: "a\u{2}b".repeat(3000), is_error: false });
         let out = out.unwrap().1;
         assert!(out.len() <= OUTPUT_MAX && !out.contains('\u{2}'));
+    }
+
+    #[test]
+    fn scattered_segments_merge_into_one() {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(SCHEMA).unwrap();
+        let sid = insert_session(&c, "t:s").unwrap();
+        let segments =
+            || -> i64 { c.query_row("SELECT count(DISTINCT segid) FROM docs_fts_idx", [], |r| r.get(0)).unwrap() };
+        assert!(!scattered(&c).unwrap(), "empty index");
+        // Each commit flushes a segment; three equal ones stay below FTS5's automerge.
+        for i in 0..3 {
+            let msg = Body::AssistantMessage { text: format!("segment {i} talks about deploy"), model: None };
+            upsert(&c, sid, &ev(&format!("e{i}"), msg)).unwrap();
+        }
+        assert_eq!(segments(), 3);
+        assert!(scattered(&c).unwrap());
+        let mut start = true;
+        while merge_step(&c, start, 1).unwrap() {
+            start = false;
+        }
+        assert!(!start, "the first step did work");
+        assert_eq!(segments(), 1);
+        assert!(!scattered(&c).unwrap());
+        let n: i64 =
+            c.query_row("SELECT count(*) FROM docs_fts WHERE docs_fts MATCH '\"deploy\"'", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 3);
     }
 
     #[test]

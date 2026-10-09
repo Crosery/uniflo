@@ -47,6 +47,7 @@ uniflo ls --tsv -n 500 | fzf --with-nth 2.. --delimiter '\t' | cut -f1 | xargs u
   - 扫描最多 2 s。到时间就返回已找到的命中并带 `partial: true`，`uniflo grep` 会多打一行提示。罕见的短词可能因此找不全，加长成 ≥ 3 字符的词（`缓存击穿`）就能完整检索。
 - `snippet` 是命中附近的一段文本，高亮区间用 `\u0002` … `\u0003` 包起来；换行已替换为空格。用命中的 `event` 调 `GET /v1/sessions/{key}/events?around=<event>` 打开上下文。
 - 索引还在构建时结果不完整：响应带 `indexing: true` 和 `progress {done, total, events}`。
+- 建完（或启动）后，守护进程在后台把索引合并成一个段，再把词项索引和文档长度表读进系统页缓存；期间 `/v1/stats` 的 `fts.warming` 为 true，某个词的第一次查询可能要几百毫秒。合并只在一次补建让索引分散到多个段之后发生（本机 3.6 GB 索引约 3 min），预读约 3 s。
 
 ```sh
 uniflo grep 缓存击穿                         # 每个会话一行标题，下面是命中片段（终端里高亮）
