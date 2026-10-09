@@ -6,7 +6,7 @@
 //! (JSON output); commands as `say == "command"` and `say == "command_output"`;
 //! task completion as `say == "completion_result"`.
 
-use crate::common::under_any;
+use crate::common::{reported_cost, under_any};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 #[cfg(not(target_os = "windows"))]
@@ -199,17 +199,21 @@ impl LineDecoder for ClineFamily {
             } else if say == "api_req_started" || say == "api_req_finished" {
                 if let Ok(p) = serde_json::from_str::<Value>(text) {
                     let n = |k: &str| p.get(k).and_then(Value::as_u64).unwrap_or(0);
+                    let model = string_of(&p, "model");
+                    // Cline already splits cache reads/writes out of `tokensIn` for every provider.
                     let usage = Usage {
                         input: n("tokensIn"),
                         output: n("tokensOut"),
                         cache_read: n("cacheReads"),
                         cache_write: n("cacheWrites"),
                         reasoning: 0,
+                        model: model.clone(),
+                        cost_usd: reported_cost(p.get("cost")),
                     };
                     if usage.input > 0 || usage.output > 0 {
                         cx.emit(format!("{ts}:usage{idx}"), ts, Body::Usage(usage));
                     }
-                    if let Some(model) = string_of(&p, "model") {
+                    if let Some(model) = model {
                         cx.meta().model = Some(model);
                     }
                 }

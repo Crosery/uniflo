@@ -6,7 +6,7 @@
 //! There is no explicit turn end: a completed assistant `message` ends the turn, and any
 //! following tool call flips the status back to work.
 
-use crate::common::under_any;
+use crate::common::{output_with_reasoning, under_any};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -70,7 +70,8 @@ impl LineDecoder for WorkBuddy {
                     name: str_of(v, "name").unwrap_or("").to_owned(),
                     input: json_arg(v.get("arguments").unwrap_or(&Value::Null)),
                 };
-                cx.emit(id, t, body);
+                cx.emit(id.clone(), t, body);
+                usage(v, &id, t, cx);
             }
             "function_call_result" => {
                 let mut output = match v.get("output") {
@@ -200,15 +201,34 @@ fn assistant(v: &Value, id: String, t: i64, cx: &mut Cx<'_, ()>) {
     if !text.is_empty() {
         cx.emit(id.clone(), t, Body::AssistantMessage { text, model }).partial = !completed;
     }
-    if let Some(u) = v.pointer("/providerData/usage").filter(|u| u.is_object()) {
-        let n = |k: &str| u.get(k).and_then(Value::as_u64).unwrap_or(0);
-        let usage = Usage { input: n("inputTokens"), output: n("outputTokens"), ..Default::default() };
-        if usage.input + usage.output > 0 {
-            cx.emit(format!("{id}:usage"), t, Body::Usage(usage));
-        }
-    }
+    usage(v, &id, t, cx);
     if completed {
         cx.emit(format!("{id}:end"), t, Body::TurnEnd { reason: Some("completed".into()) });
+    }
+}
+
+/// The model call that produced this record (assistant message or tool call). OpenAI
+/// completions shape: `inputTokens` is the whole prompt including cached tokens, and
+/// `outputTokens` includes reasoning.
+fn usage(v: &Value, id: &str, t: i64, cx: &mut Cx<'_, ()>) {
+    let Some(u) = v.pointer("/providerData/usage").filter(|u| u.is_object()) else { return };
+    let n = |k: &str| u.get(k).and_then(Value::as_u64).unwrap_or(0);
+    let detail = |k: &str, f: &str| -> u64 {
+        u.get(k).and_then(Value::as_array).into_iter().flatten().filter_map(|d| d.get(f).and_then(Value::as_u64)).sum()
+    };
+    let cached = detail("inputTokensDetails", "cached_tokens");
+    let reasoning = detail("outputTokensDetails", "reasoning_tokens");
+    let usage = Usage {
+        input: n("inputTokens").saturating_sub(cached),
+        output: output_with_reasoning(n("outputTokens"), reasoning),
+        cache_read: cached,
+        cache_write: 0,
+        reasoning,
+        model: string_of(v.get("providerData").unwrap_or(&Value::Null), "model").filter(|m| !m.is_empty()),
+        cost_usd: None,
+    };
+    if usage.input + usage.output + usage.cache_read > 0 {
+        cx.emit(format!("{id}:usage"), t, Body::Usage(usage));
     }
 }
 
@@ -286,11 +306,30 @@ mod tests {
             matches!(&r.events[3].body, Body::ToolResult { output, is_error: false, name: Some(n), .. } if output == "a.txt" && n == "Bash")
         );
         assert!(matches!(&r.events[4].body, Body::ToolResult { output, is_error: true, .. } if output == "boom"));
-        assert!(matches!(&r.events[6].body, Body::Usage(u) if u.input == 7 && u.output == 3));
+        assert!(
+            matches!(&r.events[6].body, Body::Usage(u) if u.input == 7 && u.output == 3 && u.model.as_deref() == Some("m-1"))
+        );
         assert_eq!(r.events[0].ts, 1790942400000);
         assert_eq!(r.meta.title.as_deref(), Some("A title"));
         assert_eq!(r.meta.cwd.as_deref(), Some("/w"));
         assert_eq!(r.meta.model.as_deref(), Some("m-1"));
+    }
+
+    #[test]
+    fn completions_usage_splits_cache_out_of_prompt() {
+        let fx = Fixture::new();
+        let a = wb(&fx);
+        let usage = json!({"inputTokens":1000,"inputTokensDetails":[{"cached_tokens":600}],"outputTokens":50,
+            "outputTokensDetails":[{"reasoning_tokens":20}],"totalTokens":1050});
+        let s = rec(
+            "f1",
+            json!({"type":"function_call","callId":"c1","name":"Bash","arguments":"{}","providerData":{"model":"m-2","usage":usage}}),
+        );
+        let p = fx.write("projects/-w/s2.jsonl", &s);
+        let r = fx.index(&a, &p);
+        assert_eq!(kinds(&r.events), vec!["tool_call", "usage"]);
+        assert!(matches!(&r.events[1].body, Body::Usage(u)
+            if (u.input, u.cache_read, u.output, u.reasoning) == (400, 600, 50, 20) && u.model.as_deref() == Some("m-2")));
     }
 
     #[test]

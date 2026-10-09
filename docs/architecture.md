@@ -2,7 +2,7 @@
 
 > 守护进程如何从各 harness 的会话存储得到统一、实时的会话与事件流。
 
-状态：`current` · 更新：2026-10-08
+状态：`current` · 更新：2026-10-09
 
 ## 数据流
 
@@ -33,6 +33,43 @@ Gateway（axum）                       ← uniflo-gateway
 - **SQLite**：只读打开，按 rowid 读新行，未完成的 part/message 按主键重读；WAL 签名变化才触发读取。
 - **同一 `id` 的事件是覆盖**（流式更新）：客户端按 `(session, id)` upsert。
 - **缓存**：索引完成后、每 30 s（有变化时）和退出时把会话快照和游标写到 `~/Library/Caches/uniflo/index-v1.json`；启动时未变的源直接恢复，只读新增字节。
+
+## 用量与费用
+
+头尾摘要不够算全量用量，所以用量走一条独立的后台链路（`uniflo-core::usage`、`uniflo-core::pricing`，引擎胶水在 `engine_usage.rs`）：
+
+```text
+index()（头尾摘要，/v1/health 可用）
+   ▼
+run() → usage_loop
+   ├─ 恢复 usage-v1.json（与索引缓存同目录，标签含版本与 LEDGER_VERSION）→ 只跟随之后追加的部分
+   ├─ 其余源排队，按最近活动倒序，在 threads/2（1–8）个线程上 Adapter::read_all 全量读
+   ├─ 引擎每应用一次源变化 → 从账本自己的游标 Adapter::read 跟随（与引擎游标互不影响）
+   ├─ 每秒检查价格文件变化 → 重新计价全部步骤；守护进程按 PriceSync 定时同步价格
+   └─ 首次读完、之后每 5 分钟（有变化时）、退出时写回 usage-v1.json
+   ▼
+每会话账本 Ledger：步骤（usage 事件，按事件 id 去重 / 覆盖）+ 提问（非注入 user_message）+ 回合
+   ▼
+Session.usage（随 session envelope 推送）· /v1/usage 聚合 · /v1/sessions/{key}/usage · /v1/models
+```
+
+- **回合**：非注入的 `user_message` 或 `turn_start` 开一个新回合，中间没有任何活动的相邻边界合并成一个。
+- **步骤模型**：事件自带 `model` 优先，否则取该会话最近一条 assistant 消息 / 元数据的模型。
+- **价格三层**：`<数据目录>/pricing/overrides.json`（用户覆盖，同步不碰）> `catalog.json`（同步结果）> 内置快照 `crates/uniflo-core/data/pricing-snapshot.json`。按事件时间选价格段，所以重建索引后费用不变。规则见 ADR-0010。
+- **全量读**：`Adapter::read_all` 默认先取摘要元数据，再逐会话 `history()` 全量重放；JSONL 适配器按 4 MiB 分块顺序解码（单行更长时窗口翻倍），Hermes 覆盖它以追加会话级 usage。
+- **代价**（本机约 17 GB 会话数据、38 万步）：冷启动后台全量读约 20 s，缓存 33 MB，常驻内存比不建用量索引时多约 130 MB；有缓存时启动到 `/v1/health` 与改动前持平，账本恢复约 1 s。
+
+## 自有目录
+
+`uniflo-core::paths` 给出 Uniflo 自己的目录（不是 harness 的）：
+
+| 函数 | macOS 默认 | 覆盖 |
+|---|---|---|
+| `data_dir()` | `~/Library/Application Support/uniflo`（`pricing/` 在这里） | `UNIFLO_DATA_DIR` |
+| `config_dir()` | `~/Library/Application Support/uniflo` | `UNIFLO_CONFIG_DIR` |
+| `cache_dir()` | `~/Library/Caches/uniflo` | `UNIFLO_CACHE_DIR` |
+
+设了 `UNIFLO_HOME` 时，三者按相对真实家目录的同一路径改挂到它下面，测试不会碰到真实目录。
 
 ## 状态机
 
@@ -72,4 +109,4 @@ Gateway（axum）                       ← uniflo-gateway
 - 新 harness：实现 `LineDecoder`（一文件一会话的 JSONL）或 `Adapter`（其他），见 `docs/adapters.md`。
 - 新传输：基于 `uniflo_gateway::stream::envelopes()`，与 SSE/NDJSON/WS 共用过滤与截断。
 - 网页客户端：`examples/web/index.html` 是参考实现（快照 + `since` 续流、按 id upsert、工具结果并入调用卡片）；`crates/uniflo-gateway/src/index.html` 是内容相同的 cargo 包内副本，由网关编译进 `/demo`，修改时必须同步。
-- 嵌入式使用：直接依赖 `uniflo-core` + `uniflo-adapters`，`Engine::new(all(), opts)` → `index()` → `run()`，无需网关。
+- 嵌入式使用：直接依赖 `uniflo-core` + `uniflo-adapters`，`Engine::new(all(), opts)` → `index()` → `run()`，无需网关；不跑 `run()` 时用 `index_usage()` 一次性建好用量账本，再调 `usage_report()` / `session_usage()` / `models()`。`/v1/usage` 的参数解析与会话过滤在 `uniflo_gateway::usage::UsageParams`，CLI 本地模式复用它。

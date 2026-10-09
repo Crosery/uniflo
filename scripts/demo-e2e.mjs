@@ -273,7 +273,7 @@ let cdp;
 const api = `http://127.0.0.1:${PORT}`;
 
 async function main() {
-daemon = start(BIN, ["daemon", "--bind", `127.0.0.1:${PORT}`, "--no-cache", "--token", TOKEN], { UNIFLO_HOME: home });
+daemon = start(BIN, ["daemon", "--bind", `127.0.0.1:${PORT}`, "--no-cache", "--no-price-sync", "--token", TOKEN], { UNIFLO_HOME: home });
 const profile = mkdtempSync(join(tmpdir(), "uniflo-e2e-chrome-"));
 try {
   await until(async () => (await fetch(`${api}/v1/health?token=${TOKEN}`)).ok, 15_000, "daemon health");

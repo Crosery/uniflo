@@ -10,6 +10,9 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+mod usage;
+pub use usage::*;
+
 pub const SCHEMA_VERSION: u32 = 1;
 
 /// Coarse activity of a session: the agent is either producing work or silent.
@@ -62,6 +65,10 @@ pub struct Session {
     /// OS process currently attached to this session, when the harness exposes one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pid: Option<u32>,
+    /// Token and cost totals over every `usage` event, once the usage ledger has read them.
+    /// Boxed to keep `Session` (and every envelope) small; the JSON is the plain object.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<Box<SessionUsage>>,
 }
 
 /// One normalized transcript item.
@@ -148,18 +155,29 @@ impl Body {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// Tokens of one model call (one step). See `docs/schema.md#usage-口径` for the field
+/// semantics every adapter normalizes to.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Usage {
+    /// Prompt tokens that missed the cache (excludes `cache_read` and `cache_write`).
     #[serde(default)]
     pub input: u64,
+    /// Billed output tokens, thinking included.
     #[serde(default)]
     pub output: u64,
     #[serde(default)]
     pub cache_read: u64,
     #[serde(default)]
     pub cache_write: u64,
+    /// The thinking share of `output` (informational, never billed twice).
     #[serde(default)]
     pub reasoning: u64,
+    /// Model that served this step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Amount the harness itself reported for this step, USD.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
 }
 
 /// Static description of a supported harness plus live counters.
@@ -357,7 +375,21 @@ mod tests {
             Body::ToolResult { call_id: "c".into(), name: None, output: "o".into(), is_error: true },
             Body::TurnStart {},
             Body::TurnEnd { reason: Some("end_turn".into()) },
-            Body::Usage(Usage { input: 1, output: 2, cache_read: 3, cache_write: 4, reasoning: 5 }),
+            Body::Usage(Usage {
+                input: 1,
+                output: 2,
+                cache_read: 3,
+                cache_write: 4,
+                reasoning: 5,
+                ..Default::default()
+            }),
+            Body::Usage(Usage {
+                input: 1,
+                output: 2,
+                model: Some("m".into()),
+                cost_usd: Some(0.25),
+                ..Default::default()
+            }),
             Body::System { subtype: "compact".into(), text: String::new() },
         ];
         for b in bodies {
@@ -397,6 +429,33 @@ mod tests {
         let mut e = ev(Body::Reasoning { text: "short".into() });
         e.truncate_text(100);
         assert!(!e.truncated);
+    }
+
+    #[test]
+    fn usage_grows_optional_model_and_cost() {
+        let old = r#"{"id":"u","session":"x:y","ts":1,"kind":"usage","input":3,"output":4}"#;
+        let e: Event = serde_json::from_str(old).unwrap();
+        assert_eq!(e.body, Body::Usage(Usage { input: 3, output: 4, ..Default::default() }));
+        assert_eq!(serde_json::to_value(&e).unwrap()["model"], Value::Null, "absent fields stay absent");
+        let e = ev(Body::Usage(Usage { input: 1, model: Some("m".into()), cost_usd: Some(0.5), ..Default::default() }));
+        let v = serde_json::to_value(&e).unwrap();
+        assert_eq!(
+            (v["kind"].as_str(), v["model"].as_str(), v["cost_usd"].as_f64()),
+            (Some("usage"), Some("m"), Some(0.5))
+        );
+    }
+
+    #[test]
+    fn session_usage_is_optional() {
+        let s = r#"{"key":"x:y","harness":"x","id":"y","source":"/s","updated_at":1,"status":"idle","status_since":0}"#;
+        let sess: Session = serde_json::from_str(s).unwrap();
+        assert!(sess.usage.is_none());
+        assert!(!serde_json::to_string(&sess).unwrap().contains("usage"));
+        let u = SessionUsage { steps: 2, unpriced_steps: 1, cost_usd: None, ..Default::default() };
+        let v = serde_json::to_value(&u).unwrap();
+        assert_eq!(v["cost_usd"], Value::Null, "unpriced totals are null, not 0");
+        let m = ModelUsage { model: "m".into(), match_kind: Some(MatchKind::Approx), ..Default::default() };
+        assert_eq!(serde_json::to_value(&m).unwrap()["match"], "approx");
     }
 
     #[test]
