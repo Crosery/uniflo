@@ -187,6 +187,11 @@ impl LineDecoder for Cursor {
             && under_any(p, &self.roots)
     }
 
+    /// agent-transcripts/<id>/ holds this chat's transcript only.
+    fn cleanup_targets(&self, src: &Path) -> Option<Vec<PathBuf>> {
+        uniflo_core::cleanup::targets::parent_dir(src)
+    }
+
     fn identify(&self, p: &Path) -> Option<SourceId> {
         Some(SourceId { id: p.file_stem()?.to_str()?.to_owned(), parent: None })
     }

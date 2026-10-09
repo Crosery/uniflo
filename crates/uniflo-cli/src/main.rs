@@ -1,5 +1,6 @@
 //! `uniflo` — daemon and command line for the unified agent-harness session gateway.
 
+mod clean;
 mod client;
 mod grep;
 mod render;
@@ -11,6 +12,7 @@ use client::Client;
 use render::Style;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use uniflo_core::cleanup::{Cleanup, CleanupOptions};
 use uniflo_core::util::now_ms;
 use uniflo_core::{Engine, EngineOptions, HistoryQuery, PriceSync};
 use uniflo_gateway::GuardOptions;
@@ -66,6 +68,9 @@ enum Cmd {
         /// Do not build or serve the full-text index (`/v1/search` answers 503, no index file is created).
         #[arg(long)]
         no_fts: bool,
+        /// Disable every write endpoint (cleanup, archive deletion): they answer 403.
+        #[arg(long)]
+        read_only: bool,
     },
     /// Check crates.io for a newer stable release, or install it (`cargo install uniflo --force`).
     Update {
@@ -157,6 +162,10 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Archive sessions, then move their files to the trash (plan first; asks unless --yes).
+    Clean(clean::CleanArgs),
+    /// Archived (cleaned-up) sessions: `ls` (default) or `rm <key>`.
+    Archive(clean::ArchiveArgs),
 }
 
 fn main() -> Result<()> {
@@ -172,11 +181,13 @@ fn main() -> Result<()> {
             no_price_sync,
             price_sync_delay,
             no_fts,
+            read_only,
         } => {
             let guard = GuardOptions {
                 token: cli.token.clone(),
                 cors_origins: cors_origins.clone(),
                 allowed_hosts: allow_hosts.clone(),
+                read_only,
             };
             if !allow_hosts.is_empty() && guard.token.is_none() {
                 bail!("--allow-host exposes transcripts beyond loopback; set --token as well");
@@ -233,8 +244,9 @@ fn daemon(
         );
         let _ = engine.save_cache();
         let fts = fts.then(|| start_fts(&engine)).flatten();
+        let cleanup = Cleanup::new(engine.clone(), CleanupOptions::from_env()).ok().map(Arc::new);
         let runner = tokio::spawn(engine.clone().run());
-        let router = uniflo_gateway::router_with_fts(engine.clone(), guard, fts);
+        let router = uniflo_gateway::router_with(engine.clone(), guard, uniflo_gateway::Services { fts, cleanup });
         uniflo_gateway::serve(listener, router, async {
             let _ = tokio::signal::ctrl_c().await;
         })
@@ -549,6 +561,8 @@ impl Source {
             }
             Cmd::Usage(a) => usage::usage(self, a),
             Cmd::Grep { terms, filter, limit, json } => grep::run(self, terms, filter.as_deref(), *limit, *json),
+            Cmd::Clean(a) => clean::clean(self, a),
+            Cmd::Archive(a) => clean::archive(self, a),
             Cmd::Daemon { .. } | Cmd::Scan { .. } | Cmd::Update { .. } | Cmd::Pricing(_) => unreachable!(),
         }
     }

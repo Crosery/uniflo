@@ -36,6 +36,11 @@ impl LineDecoder for Factory {
         p.extension().is_some_and(|e| e == "jsonl") && under_any(p, &self.roots)
     }
 
+    /// <id>.jsonl and its <id>.settings.json.
+    fn cleanup_targets(&self, src: &Path) -> Option<Vec<PathBuf>> {
+        uniflo_core::cleanup::targets::with_siblings(src, src.file_stem()?.to_str()?)
+    }
+
     fn identify(&self, p: &Path) -> Option<SourceId> {
         Some(SourceId { id: p.file_stem()?.to_str()?.to_owned(), parent: None })
     }

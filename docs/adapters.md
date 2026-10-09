@@ -1,6 +1,6 @@
 # Harness 适配
 
-> 已支持的 harness、各自的存储与回合信号，跨平台路径映射（macOS、Linux、Windows），以及新增一个 harness 的步骤。
+> 已支持的 harness、各自的存储与回合信号、是否支持会话清理，跨平台路径映射（macOS、Linux、Windows），以及新增一个 harness 的步骤。
 
 状态：`current` · 更新：2026-10-09
 
@@ -76,6 +76,28 @@
 - `cost_usd` 只在 harness 自报正数时填写；≤ 0 视为未报，由价格目录计算。
 - 新适配器：先确认原始 input 是否含缓存、output 是否含思考（看 `total` 字段或 `cache_read > input` 这类不可能关系），再按上表口径换算，并在测试里断言换算后的四项。
 
+## 会话清理
+
+用户确认的清理会把下表"清理目标"移入系统回收站（流程、条件与安全边界见 `docs/api.md#会话清理`、ADR-0006）。目标由适配器声明：`LineDecoder::cleanup_targets(src)` 或 `Adapter::cleanup_targets(src, id)`，默认 `None` 即不支持。只有一个文件对应一个会话的 JSONL/JSON harness 声明，且只声明该会话独占的文件；子代理会话随父会话一起清理，共享目录、数据库和用户自己的产物永不列入。
+
+| id | 支持 | 清理目标（`src` = 会话主文件） |
+|---|---|---|
+| `claude` / `qoder` / `qwen` | 是 | `src` + 同目录下的 `<id>/`（子代理、工具结果）与 `<id>.*` 附属文件 |
+| `codex` | 是 | `src`（rollout 文件） |
+| `pi` / `omp` / `crosery` / `commandcode` | 是 | `src` + 同目录下的 `<文件名去扩展名>/` 与 `<文件名去扩展名>.*` |
+| `prime` | 是 | 根会话：`src` + `session-artifacts/<id>/`（子代理、内核状态）；子代理随根会话 |
+| `workbuddy` | 是 | 同 Claude |
+| `factory` | 是 | `src` + `<id>.*`（如 `<id>.settings.json`） |
+| `gemini` | 是 | `src`（`chats/` 目录与项目临时目录是共享的） |
+| `antigravity` | 是 | 只有 `transcript.jsonl`：`brain/<id>/` 其余内容是用户的产物与上传 |
+| `reasonix` | 是 | `<名字>.events.jsonl` + 同名快照 `<名字>.jsonl` 与 `<名字>.*` |
+| `cursor` | 是 | `agent-transcripts/<id>/`（只含该会话的转录） |
+| `dsh` | 是 | 会话目录 `<id>/`（转录与 `session.lock`） |
+| `opencode` / `kilo` / `zcode` / `mimocode` / `minimax` / `hermes` | 否 | SQLite，多会话共用一个库 |
+| `cline` / `roo` / `kodu` | 否 | 任务目录由 VS Code 扩展管理（扩展另有任务历史），不单独移走 |
+
+新增 harness 时：一文件一会话的 JSONL/JSON，在 decoder 里加一行声明，用 `uniflo_core::cleanup::targets` 的 `file(src)`（只有主文件）、`with_siblings(src, stem)`（主文件 + 同目录 `<stem>/`、`<stem>.*`、`.<文件名>.*`）或 `parent_dir(src)`（会话独占的目录），并把 id 加进 `crates/uniflo-adapters/tests/cleanup.rs` 的 `SUPPORTED` / `UNSUPPORTED`。目录里若混有其他会话的源，计划会以 `shared_target` 拒绝；不确定目录是否独占时只声明 `file(src)`。
+
 ## 跨平台路径解析规约
 
 1. **家目录与用户配置**：统一通过 `uniflo_core::util::home()` 获取。在 macOS/Linux 上解析为 `$HOME`，在 Windows 上解析为 `%USERPROFILE%`（如 `C:\Users\Username`）。
@@ -104,4 +126,5 @@
 6. **注册**：`Cargo.toml` 加 feature 并放进 `default`；`lib.rs` 加 `#[cfg(feature = "…")] pub mod …;` 并在 `all()` 中注册。
 7. **测试**：`common::testkit::Fixture` 写合成文件，至少断言一个完整回合的事件 kind 序列、最终状态、元数据、`unknown` 为空；有子代理/分叉时测 `identify()` 的 id 与 parent；有用量时断言换算后的 `input` / `output` / `cache_read` / `reasoning` / `model`。
 8. **真实数据验收**：`cargo build --release && ./target/release/uniflo scan --no-cache --json`，看该 harness 的会话数，以及 `stats.unknown` 为空、`bad_lines`、`read_errors` 为 0。
-9. **进程映射（可选）**：harness 有 pid 注册表时实现 `live()` + `live_roots()`；没有时可用 `uniflo_core::procs::ProcCache` 探测进程，并优先用确定性证据（命令行参数、打开的文件）。
+9. **会话清理**：按 [会话清理](#会话清理) 声明目标或保持不支持，并登记到 `crates/uniflo-adapters/tests/cleanup.rs`。
+10. **进程映射（可选）**：harness 有 pid 注册表时实现 `live()` + `live_roots()`；没有时可用 `uniflo_core::procs::ProcCache` 探测进程，并优先用确定性证据（命令行参数、打开的文件）。

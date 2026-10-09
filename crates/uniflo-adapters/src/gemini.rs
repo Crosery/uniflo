@@ -71,6 +71,10 @@ impl LineDecoder for Gemini {
             && p.extension().is_some_and(|e| e == "jsonl" || e == "json")
     }
 
+    fn cleanup_targets(&self, src: &Path) -> Option<Vec<PathBuf>> {
+        uniflo_core::cleanup::targets::file(src)
+    }
+
     fn identify(&self, p: &Path) -> Option<SourceId> {
         Some(SourceId { id: p.file_stem()?.to_str()?.to_owned(), parent: None })
     }

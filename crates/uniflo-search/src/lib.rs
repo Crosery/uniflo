@@ -9,6 +9,7 @@
 //! | `in:uniflo` / `cwd:` | cwd contains (case-insensitive) |
 //! | `since:2h` / `before:7d` / `since:2026-10-01` | updated_at window (`m`,`h`,`d`,`w`) |
 //! | `is:sub` / `is:root` / `is:live` | has parent / no parent / attached process |
+//! | `is:archived` | cleaned up, served from Uniflo's archive |
 //! | `id:01a0` | session id or key prefix |
 //! | `parent:<key>` | children of a session |
 //! | anything else | fzf syntax over title, preview, cwd, harness, id: `foo`, `'exact`, `^prefix`, `suffix$`, `!not` |
@@ -33,6 +34,7 @@ pub enum Filter {
     Before(i64),
     Sub(bool),
     Live,
+    Archived,
     Id(String),
     Parent(String),
     Not(Box<Filter>),
@@ -48,6 +50,7 @@ impl Filter {
             Filter::Before(t) => s.updated_at < *t,
             Filter::Sub(sub) => s.parent.is_some() == *sub,
             Filter::Live => s.pid.is_some(),
+            Filter::Archived => s.archived,
             Filter::Id(p) => s.id.starts_with(p.as_str()) || s.key.starts_with(p.as_str()),
             Filter::Parent(k) => s.parent.as_deref() == Some(k.as_str()),
             Filter::Not(f) => !f.matches(s),
@@ -121,6 +124,7 @@ fn parse_filter(tok: &str, now: i64) -> Option<Filter> {
             "sub" | "child" => Filter::Sub(true),
             "root" | "main" => Filter::Sub(false),
             "live" | "running" => Filter::Live,
+            "archived" => Filter::Archived,
             other => Filter::Status(parse_status(other)?),
         },
         _ => return None,
@@ -228,6 +232,7 @@ mod tests {
             status_reason: None,
             pid: None,
             usage: None,
+            archived: false,
         }
     }
 
@@ -236,12 +241,9 @@ mod tests {
         sub.parent = Some("claude:aaa".into());
         let mut live = s("omp", "01a0", "Refactor gateway", "/w/api-console", Status::Work, 1_000);
         live.pid = Some(42);
-        vec![
-            live,
-            sub,
-            s("claude", "aaa", "Build Uniflo daemon", "/w/Uniflo", Status::Work, 60_000),
-            s("codex", "bbb", "Fix login bug", "/w/web", Status::Idle, 3 * 86_400_000),
-        ]
+        let mut old = s("codex", "bbb", "Fix login bug", "/w/web", Status::Idle, 3 * 86_400_000);
+        old.archived = true;
+        vec![live, sub, s("claude", "aaa", "Build Uniflo daemon", "/w/Uniflo", Status::Work, 60_000), old]
     }
 
     fn keys(hits: &[Hit]) -> Vec<String> {
@@ -288,6 +290,8 @@ mod tests {
         assert_eq!(q("!h:claude"), vec!["omp:01a0", "codex:bbb"]);
         assert_eq!(q("parent:claude:aaa"), vec!["claude:agent-1"]);
         assert_eq!(q("id:bb"), vec!["codex:bbb"]);
+        assert_eq!(q("is:archived"), vec!["codex:bbb"]);
+        assert_eq!(q("!is:archived"), vec!["omp:01a0", "claude:agent-1", "claude:aaa"]);
     }
 
     #[test]

@@ -75,6 +75,10 @@ impl LineDecoder for Codex {
             && crate::common::under_any(p, &self.roots)
     }
 
+    fn cleanup_targets(&self, src: &Path) -> Option<Vec<PathBuf>> {
+        uniflo_core::cleanup::targets::file(src)
+    }
+
     fn identify(&self, p: &Path) -> Option<SourceId> {
         let stem = p.file_stem()?.to_str()?;
         // rollout-2026-10-02T18-11-56-<36-char uuid>

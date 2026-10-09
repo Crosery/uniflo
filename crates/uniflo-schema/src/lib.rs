@@ -10,6 +10,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub mod cleanup;
 pub mod search;
 mod usage;
 pub use usage::*;
@@ -70,6 +71,10 @@ pub struct Session {
     /// Boxed to keep `Session` (and every envelope) small; the JSON is the plain object.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<Box<SessionUsage>>,
+    /// The source files were cleaned up (moved to the system trash); events come from Uniflo's
+    /// compact archive. Disappears when the source is restored.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub archived: bool,
 }
 
 /// One normalized transcript item.
@@ -88,7 +93,7 @@ pub struct Event {
     /// Still being streamed by the harness; a later event with the same id completes it.
     #[serde(default, skip_serializing_if = "is_false")]
     pub partial: bool,
-    /// Text fields were cut by the gateway's `max_text`.
+    /// Text fields were cut: by the gateway's `max_text`, or when compacted into an archive.
     #[serde(default, skip_serializing_if = "is_false")]
     pub truncated: bool,
     #[serde(flatten)]
@@ -450,8 +455,9 @@ mod tests {
     fn session_usage_is_optional() {
         let s = r#"{"key":"x:y","harness":"x","id":"y","source":"/s","updated_at":1,"status":"idle","status_since":0}"#;
         let sess: Session = serde_json::from_str(s).unwrap();
-        assert!(sess.usage.is_none());
-        assert!(!serde_json::to_string(&sess).unwrap().contains("usage"));
+        assert!(sess.usage.is_none() && !sess.archived);
+        let out = serde_json::to_string(&sess).unwrap();
+        assert!(!out.contains("usage") && !out.contains("archived"));
         let u = SessionUsage { steps: 2, unpriced_steps: 1, cost_usd: None, ..Default::default() };
         let v = serde_json::to_value(&u).unwrap();
         assert_eq!(v["cost_usd"], Value::Null, "unpriced totals are null, not 0");

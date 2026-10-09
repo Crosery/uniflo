@@ -17,7 +17,8 @@ Uniflo 只做这一层：
 - **fd / fzf 式搜索**：`s:work h:claude in:uniflo since:2h 'gateway`。见 [`docs/search.md`](docs/search.md)。
 - **用量与费用**：每次模型调用的 token 统一口径（input 不含缓存、output 含思考），按 harness / 模型 / 项目 / 目录 / 日期 / 会话聚合，按事件时间的价格段计算 API 等价成本；未知模型单独计数，不按 0 计。见 [`docs/api.md`](docs/api.md#v1usage-参数)、[ADR-0010](docs/decisions/ADR-0010-价格目录同步与费用口径.md)。
 - **全文检索**：按中文词或代码子串查所有会话的正文、思考、工具参数与输出，命中直达事件上下文：`uniflo grep 缓存击穿`、`/v1/search`。索引在后台构建，见 [`docs/search.md#全文检索`](docs/search.md#全文检索)。
-- **只读、只听本机**：从不写 harness 数据；网关校验 Host / Origin，可选 token。
+- **只读、只听本机**：默认不写 harness 数据；网关校验 Host / Origin，可选 token。
+- **会话清理**：确认后把旧会话移入系统回收站释放空间，先写精简归档（zstd，去掉图片与大段输出），归档会话照常列出、检索、计入用量；从回收站还原即恢复。见 [`docs/api.md#会话清理`](docs/api.md#会话清理)、[ADR-0006](docs/decisions/ADR-0006-会话清理与写接口.md)。
 
 ## 已支持的 harness
 
@@ -44,6 +45,7 @@ cargo install --path crates/uniflo-cli
 ```sh
 uniflo daemon                             # 前台启动网关，默认 http://127.0.0.1:7311
 uniflo daemon --no-fts                    # 不建全文索引（/v1/search 返回 503）
+uniflo daemon --read-only                 # 关闭全部写接口（会话清理等返回 403）
 open http://127.0.0.1:7311/demo           # 打开内置网页演示
 
 # macOS 可一键安装 launchd 后台常驻服务（登录自启、静默运行）
@@ -89,6 +91,9 @@ uniflo ls --tsv -n 500 | fzf              # 接 fzf
 uniflo usage --by model --since 7d        # 按模型的 token 与费用（另有 harness/project/cwd/dir/day/hour/weekday/session）
 uniflo usage --by dir --under ~/work      # 目录树下钻
 uniflo usage claude:4f1c                  # 一个会话每一步的用量、费用与上下文占用
+uniflo clean --query 'h:claude before:90d' --dry-run   # 只看清理计划：可释放多少、哪些不可清理及原因
+uniflo clean claude:4f1c                  # 确认后归档并移入回收站（非交互加 --yes）
+uniflo archive ls                         # 已清理的会话与归档大小；archive rm <key> 永久删除归档
 ```
 
 ## 接入自己的应用

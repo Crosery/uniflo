@@ -61,6 +61,11 @@ impl LineDecoder for WorkBuddy {
         p.extension().is_some_and(|e| e == "jsonl") && under_any(p, &self.roots)
     }
 
+    /// <id>.jsonl, its <id>/ directory and <id>.* sidecars (meta, file rollback).
+    fn cleanup_targets(&self, src: &Path) -> Option<Vec<PathBuf>> {
+        uniflo_core::cleanup::targets::with_siblings(src, src.file_stem()?.to_str()?)
+    }
+
     fn identify(&self, p: &Path) -> Option<SourceId> {
         let id = p.file_stem()?.to_str()?.to_owned();
         let comps: Vec<&str> = p.iter().filter_map(|c| c.to_str()).collect();

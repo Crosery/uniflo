@@ -30,9 +30,11 @@ rusqlite = { version = "0.37", features = ["bundled"] }
 ruzstd = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
 tempfile = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "signal"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
+trash = "5"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_System_Kernel", "Win32_System_Diagnostics_Debug", "Wdk_System_Threading"] }

@@ -93,10 +93,10 @@ impl Engine {
     pub fn session_usage(&self, key: &str) -> Result<SessionUsageDetail> {
         self.pricing.refresh();
         let p = self.pricing.current();
-        let (adapter, src, id, model) = {
+        let (src, model) = {
             let st = self.state.read().unwrap();
             let e = st.sessions.get(key).ok_or_else(|| anyhow!("unknown session {key}"))?;
-            (e.adapter, e.src.clone(), e.session.id.clone(), e.session.model.clone())
+            (e.src.clone(), e.session.model.clone())
         };
         {
             let u = self.usage.read().unwrap();
@@ -105,7 +105,7 @@ impl Engine {
                 return Ok(l.detail(key, &p));
             }
         }
-        let evs = self.adapters[adapter].history(&src, &id, &HistoryQuery { before: None, limit: usize::MAX / 2 })?;
+        let evs = self.history(key, &HistoryQuery { before: None, limit: usize::MAX / 2 })?;
         let mut l = Ledger::default();
         let mut names = Names::default();
         l.apply(&Record::Meta(MetaPatch { model, ..Default::default() }), &mut names, &p);
@@ -136,6 +136,7 @@ impl Engine {
         let generation = self.pricing.generation();
         let mut queue: Vec<(i64, PathBuf)> = Vec::new();
         let mut restored: Vec<String> = Vec::new();
+        let archived = self.archived_ledgers();
         {
             let st = self.state.read().unwrap();
             let mut u = self.usage.write().unwrap();
@@ -156,6 +157,10 @@ impl Engine {
                         u.put_source(path.clone(), SourceLedger::queued(s.adapter, harness));
                     }
                 }
+            }
+            for (path, ledger, key) in archived {
+                u.put_source(path, ledger);
+                restored.push(key);
             }
             u.started = true;
         }
@@ -199,6 +204,11 @@ impl Engine {
             l.priced_at = generation;
         }
         {
+            let st = self.state.read().unwrap();
+            if !st.sources.contains_key(path) {
+                // Cleaned up while this read ran: the archive's ledger holds the session now.
+                return;
+            }
             let mut u = self.usage.write().unwrap();
             // Keys this source no longer has must drop their totals too.
             if let Some(old) = u.source(path) {
@@ -331,7 +341,7 @@ impl Engine {
     }
 
     /// Write ledger totals into the session snapshots; `publish` sends `session` envelopes.
-    fn refresh_sessions(&self, keys: &[String], publish: bool) {
+    pub(super) fn refresh_sessions(&self, keys: &[String], publish: bool) {
         if keys.is_empty() {
             return;
         }

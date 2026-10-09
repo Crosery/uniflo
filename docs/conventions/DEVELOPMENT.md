@@ -9,10 +9,10 @@
 | crate | 职责 | 允许依赖 |
 |---|---|---|
 | `uniflo-schema` | wire 类型（`Session`/`Event`/`Envelope`），唯一对外契约 | serde、serde_json |
-| `uniflo-core` | 适配器 trait、JSONL 驱动、状态机、引擎、缓存、文件监听、进程探测、用量账本与价格目录（`usage/`、`pricing/`）、自有目录（`paths`） | schema |
+| `uniflo-core` | 适配器 trait、JSONL 驱动、状态机、引擎、缓存、文件监听、进程探测、用量账本与价格目录（`usage/`、`pricing/`）、自有目录（`paths`）、会话清理与归档（`cleanup/`、`archive/`） | schema |
 | `uniflo-search` | 查询语法解析 + 模糊排序；全文索引 `fts`（SQLite FTS5，读 `Engine`） | schema、core |
 | `uniflo-adapters` | 每个 harness 一个模块，每个模块一个 cargo feature | core、schema |
-| `uniflo-gateway` | HTTP/SSE/NDJSON/WS 网关、Host/Origin/token 守卫 | core、search、schema |
+| `uniflo-gateway` | HTTP/SSE/NDJSON/WS 网关、Host/Origin/token 守卫、写接口守卫（`write.rs`） | core、search、schema |
 | `uniflo-cli` | `uniflo` 二进制：守护进程 + 查询客户端 | 以上全部 |
 
 - 依赖只能向下指；`core` 不知道任何具体 harness，`adapters` 不知道网关。
@@ -47,7 +47,7 @@
 
 ## 隐私与数据安全
 
-- harness 数据只读；任何代码、测试、脚本不写、不移、不锁会话文件和数据库。
+- harness 数据只读；任何代码、测试、脚本不写、不移、不锁会话文件和数据库。唯一例外是用户确认的会话清理（ADR-0006），只在 `uniflo-core::cleanup` 里，只移入回收站；测试注入回收站目录（`DirTrash` / `UNIFLO_TRASH_DIR`），绝不碰真实回收站，也不对真实数据执行清理。
 - 测试夹具一律手写合成数据（见各适配器 `tests` 模块与 `common::testkit`）；不提交真实会话片段，哪怕脱敏。
 - 调试真实数据只输出计数、键名、类型分布；日志里不打印会话正文。
 - 凭据只走环境变量（`UNIFLO_TOKEN`）或钥匙串；不进源码、日志、产物。

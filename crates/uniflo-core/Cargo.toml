@@ -15,10 +15,13 @@ chrono.workspace = true
 dirs.workspace = true
 memchr.workspace = true
 notify.workspace = true
+ruzstd.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+trash.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true

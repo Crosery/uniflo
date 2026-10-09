@@ -123,6 +123,17 @@ impl LineDecoder for PrimeDecoder {
             && under_any(p, &self.roots)
     }
 
+    /// Root sessions: the transcript and `session-artifacts/<id>/` (sub-agents, kernel state).
+    fn cleanup_targets(&self, src: &Path) -> Option<Vec<PathBuf>> {
+        let stem = src.file_stem()?.to_str()?;
+        let mut out = vec![src.to_path_buf()];
+        let dir = src.parent()?;
+        if dir.file_name().is_some_and(|d| d == "sessions") {
+            out.push(dir.parent()?.join("session-artifacts").join(stem));
+        }
+        Some(out)
+    }
+
     fn identify(&self, p: &Path) -> Option<SourceId> {
         let stem = p.file_stem()?.to_str()?.to_owned();
         let parent = header_parent(p).or_else(|| {
