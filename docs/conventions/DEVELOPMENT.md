@@ -2,7 +2,7 @@
 
 > 模块边界、代码风格、性能预算和隐私红线；改任何 crate 前读。
 
-状态：`current` · 更新：2026-10-08
+状态：`current` · 更新：2026-10-09
 
 ## 模块边界
 
@@ -10,7 +10,7 @@
 |---|---|---|
 | `uniflo-schema` | wire 类型（`Session`/`Event`/`Envelope`），唯一对外契约 | serde、serde_json |
 | `uniflo-core` | 适配器 trait、JSONL 驱动、状态机、引擎、缓存、文件监听、进程探测 | schema |
-| `uniflo-search` | 查询语法解析 + 模糊排序 | schema |
+| `uniflo-search` | 查询语法解析 + 模糊排序；全文索引 `fts`（SQLite FTS5，读 `Engine`） | schema、core |
 | `uniflo-adapters` | 每个 harness 一个模块，每个模块一个 cargo feature | core、schema |
 | `uniflo-gateway` | HTTP/SSE/NDJSON/WS 网关、Host/Origin/token 守卫 | core、search、schema |
 | `uniflo-cli` | `uniflo` 二进制：守护进程 + 查询客户端 | 以上全部 |
@@ -36,6 +36,8 @@
 | 全量模糊搜索（fzf 语法扫全部会话） | < 50 ms | 同上，`/v1/sessions?q=<词>` |
 | 追加一行到客户端收到事件 | < 50 ms（监听命中时个位数毫秒） | `crates/uniflo-core/tests/engine.rs`、`crates/uniflo-gateway/tests/gateway.rs` |
 | 冷启动全量索引 | 本机全部会话 < 2 s；有缓存 < 300 ms | `uniflo scan --no-cache` / `uniflo scan` |
+| 全文检索（`/v1/search`，≥ 3 字符的词，索引建成后） | p50 < 50 ms、p95 < 200 ms | 另起端口的守护进程建完索引后，按词频挑 10 个中文词 + 10 个代码子串各查 5 次，只记耗时与计数 |
+| 新事件可被全文检索到 | < 2 s | `crates/uniflo-search/tests/fts.rs` |
 
 引擎循环里不得做阻塞 IO：读文件、`ps`/`lsof`、SQLite 都走 `spawn_blocking`，结果回到单写者循环再写状态。
 
