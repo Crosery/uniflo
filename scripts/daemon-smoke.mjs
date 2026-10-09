@@ -21,7 +21,8 @@ if (!existsSync(binPath)) {
 
 console.log(`==> Starting ${binName} daemon smoke test on ${process.platform} (${process.arch}) at ${base}...`);
 
-const daemon = spawn(binPath, ["daemon", "--bind", bind, "--no-cache"], {
+// Real home, so keep every on-disk index out of the user's cache: no snapshot, no full-text index.
+const daemon = spawn(binPath, ["daemon", "--bind", bind, "--no-cache", "--no-fts"], {
   stdio: ["ignore", "pipe", "pipe"],
 });
 
@@ -79,6 +80,10 @@ async function run() {
     if (!sRes.ok) throw new Error(`/v1/sessions returned status ${sRes.status}`);
     const sessions = await sRes.json();
     console.log(`✓ /v1/sessions returned response with ${sessions.items ? sessions.items.length : 0} items`);
+
+    const ftsRes = await fetch(`${base}/v1/search?q=smoke`);
+    if (ftsRes.status !== 503) throw new Error(`/v1/search with --no-fts returned ${ftsRes.status}, want 503`);
+    console.log(`✓ /v1/search answers 503 with --no-fts`);
 
     console.log(`==> Daemon smoke test passed 100% on ${process.platform}!\n`);
   } finally {

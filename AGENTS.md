@@ -36,6 +36,7 @@ Uniflo：本机常驻守护进程，持续读取所有 agent harness（Claude Co
 
 - 默认端口 `127.0.0.1:7311`；CLI 读 `UNIFLO_URL`、`UNIFLO_TOKEN`；`UNIFLO_HOME` 覆盖家目录（测试用）。
 - 索引缓存 `~/Library/Caches/uniflo/index-v1.json`（macOS），标签含版本、schema 版本和适配器列表，任一变化自动失效；排查索引问题时加 `--no-cache`。
+- 全文索引 `~/Library/Caches/uniflo/fts-v1.sqlite`（含 `-wal`/`-shm`，本机约 5.6 GB，首建约 14 min），标签含格式版本、Uniflo 版本和 schema 版本，变化即整份重建。缓存目录随 `UNIFLO_HOME` 移动；一个缓存目录同时只该有一个守护进程写索引；用真实家目录另起守护进程做实验时，若常驻守护进程也开着全文索引，给其中一个加 `--no-fts`。
 - macOS FSEvents 报告规范化路径（`/private/var/...`），`core::watch` 会映射回配置的根；新增根目录时别绕过它。
 - omp/Pi 没有在线注册表：存活进程靠 `core::procs`（`ps` + 一次批量 `lsof`）按 `--resume` 参数 → 打开的会话文件 → cwd 推断三级映射。Codex app-server 一个进程服务多会话，不做 pid 映射，状态全靠 `task_started/task_complete`。
 - Claude 子代理收尾时 `stop_reason` 为空、没有回合结束标记，靠 90 s settle 窗口转 idle；不要为此给适配器加时间判断。

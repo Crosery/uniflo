@@ -2,6 +2,7 @@
 
 use std::io::IsTerminal;
 use uniflo_core::util::{now_ms, preview};
+use uniflo_schema::search::{HIGHLIGHT_END, HIGHLIGHT_START, SearchHit, SearchSession};
 use uniflo_schema::{Body, Event, Session, Status};
 
 pub struct Style {
@@ -141,5 +142,51 @@ fn input_summary(v: &serde_json::Value) -> String {
         }
         serde_json::Value::String(s) => s.clone(),
         other => other.to_string(),
+    }
+}
+
+pub fn search_session_line(st: &Style, s: &SearchSession) -> String {
+    let label = s.title.as_deref().unwrap_or("(untitled)");
+    let cwd = s.cwd.as_deref().map(short_path).unwrap_or_default();
+    format!(
+        "{} {} {} {} {}",
+        st.paint("1", &pad(&s.harness, 11)),
+        pad(&s.updated_at.map(age).unwrap_or_default(), 4),
+        pad(label, 60),
+        st.paint("2", &pad(&cwd, 28)),
+        st.paint("2", &s.session)
+    )
+}
+
+pub fn search_hit_line(st: &Style, h: &SearchHit) -> String {
+    let tag = match h.kind.as_str() {
+        "user_message" => "user",
+        "assistant_message" => "assistant",
+        "reasoning" => "thinking",
+        "tool_call" => "tool →",
+        "tool_result" => "tool ←",
+        other => other,
+    };
+    format!("{} {} {}", st.paint("2", &clock(h.ts)), st.paint("33", &pad(tag, 9)), highlight(st, &h.snippet))
+}
+
+/// Snippet markers → bold red on a terminal, nothing otherwise.
+pub fn highlight(st: &Style, snippet: &str) -> String {
+    if st.color {
+        snippet.replace(HIGHLIGHT_START, "\x1b[1;31m").replace(HIGHLIGHT_END, "\x1b[0m")
+    } else {
+        snippet.replace([HIGHLIGHT_START, HIGHLIGHT_END], "")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn snippet_highlight_follows_the_terminal() {
+        let s = "修复\u{2}缓存击穿\u{3}问题";
+        assert_eq!(highlight(&Style { color: true }, s), "修复\x1b[1;31m缓存击穿\x1b[0m问题");
+        assert_eq!(highlight(&Style { color: false }, s), "修复缓存击穿问题");
     }
 }
