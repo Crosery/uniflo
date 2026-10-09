@@ -31,7 +31,7 @@
 | `hermes` | Hermes | `~/.hermes/state.db` | SQLite | 终止型 `finish_reason` | — | `hermes --resume <id>` |
 | `factory` | Factory Droid | `~/.factory/sessions/<slug>/<id>.jsonl` | JSONL | 纯文本回复 | — | — |
 | `reasonix` | Reasonix | `~/.reasonix/projects/<slug>/sessions/*.events.jsonl` | 追加 / 替换日志 | 纯文本回复 | — | — |
-| `cursor` | Cursor Agent | `~/.cursor/projects/**/agent-transcripts/<id>/<id>.jsonl`；IDE 全局库 `state.vscdb`（macOS `~/Library/Application Support/Cursor/User/globalStorage/`，Linux `$XDG_CONFIG_HOME`（默认 `~/.config`）`/Cursor/User/globalStorage/`，Windows `%APPDATA%\Cursor\User\globalStorage\`） | JSONL（无 id、无时间）；IDE 库是 SQLite 键值表，补标题、cwd、模型、时间、父会话，并列出消息只存在库里的旧版 IDE 会话 | 纯文本回复 | — `cursor-agent --resume <id>` |
+| `cursor` | Cursor Agent | `~/.cursor/projects/**/agent-transcripts/<id>/<id>.jsonl`；IDE 全局库 `state.vscdb`（macOS `~/Library/Application Support/Cursor/User/globalStorage/`，Linux `$XDG_CONFIG_HOME`（默认 `~/.config`）`/Cursor/User/globalStorage/`，Windows `%APPDATA%\Cursor\User\globalStorage\`） | JSONL（无 id、无时间）；IDE 库是 SQLite 键值表，补标题、cwd、模型、时间、父会话，并列出消息只存在库里的旧版 IDE 会话 | 纯文本回复 | — | `cursor-agent --resume <id>` |
 | `dsh` | DeepSeek Harness | `~/.dsh/sessions/<cwd-slug>/<id>/session[.v4].jsonl.zstd` | zstd 帧批量 JSONL（帧 = 一次 flush 的若干整行；行永不跨帧） | `turn/end` reason completed/aborted/interrupted/error | `session.lock` 被 harness 进程持有 → `lsof`（Win 无 lsof，退化为事件规则） | — |
 | `grok` | Grok CLI | `~/.grok/sessions/<百分号编码的 cwd>/<uuid>/`：`updates.jsonl`，旁路 `summary.json`、`usage.json`、`events.jsonl`，子代理 `<父会话>/subagents/*/meta.json`（三平台同一相对路径） | ACP 风格 JSONL（消息与思考是流式片段，合并不 trim）+ 原地重写的 JSON 旁路文件；只有 hook 行的空壳会话不列出 | `turn_completed`（`stop_reason`）；没有它的版本用 `events.jsonl` 的 `turn_ended` | — | `grok --resume <id>` |
 | `kiro` | Kiro CLI | `~/.kiro/sessions/cli/<uuid>.jsonl` + 同名 `.json` 旁路（三平台同一相对路径） | JSONL（无 id，位置 id）+ JSON 旁路（cwd、标题、模型、时间） | 助手文本消息 | — | — |
@@ -44,7 +44,7 @@
 
 - **未经真机验证**：`kiro`、`copilot`、`openclaw`、`codebuddy`、`craft`、`devin` 本机没有数据；`kimi` 本机只有不含对话的空壳会话（不列出），对话映射同样未经真机验证；`cursor` 的 IDE 元数据补全与旧版 IDE 会话本机无可匹配数据（transcript id 与 IDE composer 不重合，库里没有消息行）。这些映射只由合成夹具测试覆盖。
 - 环境变量覆盖（`KIMI_CODE_HOME`、`COPILOT_HOME`、`OPENCLAW_STATE_DIR`、`CODEBUDDY_CONFIG_DIR`、`XDG_DATA_HOME` / `APPDATA`）只在该目录确有会话数据时采用，否则回落默认位置。
-- 恢复命令只是文档，与 `/v1/sessions/{key}/resume` 的表一致；"需 cwd" 表示要在会话的工作目录下执行。
+- 恢复命令列只记录各 harness 的命令行写法，Uniflo 不执行；"需 cwd" 表示要在会话的工作目录下执行。
 - `craft` 的 id 含 `/`，请求 `/v1/sessions/{key}` 时 key 必须百分号编码（CLI 与网页演示已编码）。Craft 的 Claude 引擎同时在 `~/.claude/projects` 写自己的 transcript（索引为 `claude`），同一对话会在两个 harness 各出现一次；用量只记在 `claude`。
 
 ## usage 口径
