@@ -4,7 +4,7 @@
 
 状态：`current` · 更新：2026-10-09
 
-同一能力有三个入口：REST（`docs/api.md`）、CLI `--json`、MCP `structuredContent`。MCP 工具内部就是对网关 REST 路由的 `GET`，所以三者的数值与 id 一致（`crates/uniflo-cli/tests/agent.rs` 的 `mcp_cli_and_rest_agree` 逐项比对）。唯一会随时间变的是全文检索的 `score`：它带最近活动加权，隔一段时间再查会略有变化，比对时去掉它。
+同一能力有三个入口：REST（`docs/api.md`）、CLI `--json`、MCP `structuredContent`。MCP 工具内部就是对网关 REST 路由的 `GET`，所以三者的数值与 id 一致（`crates/uniflo-cli/tests/agent.rs` 的 `mcp_cli_and_rest_agree` 逐项比对）。浮点也逐位一致：`serde_json` 开启了 `float_roundtrip`，响应解析后再输出不会改动最后一位。唯一会随时间变的是全文检索的 `score`：它带最近活动加权，隔一段时间再查会略有变化，比对时去掉它。
 
 ## MCP 服务器 `uniflo mcp`
 

@@ -35,6 +35,7 @@
 - 代价：要跟踪各 harness 的配置位置与命令（`crates/uniflo-cli/src/setup/harness.rs` 的 `SPECS`）；harness 改格式时 setup 会报"解析失败"或命令失败，需要更新表。
 - 已知差异：`codex mcp add/remove` 会省略其他条目里的 `args = []`，撤销后 `config.toml` 与原文件语义相同、字节可能不同。
 - 新依赖：`toml_edit`；`serde_json` 全工作区开启 `preserve_order`（`serde_json::Value` 里对象的键按读入顺序输出，不再按字母排序；wire 上键序本来就不是契约）。
+- `serde_json` 全工作区开启 `float_roundtrip`（已有依赖的特性，`Cargo.lock` 无变化）。默认的浮点解析不保证逐位还原，MCP 和 CLI 把守护进程的响应解析后再输出时，`cost_usd` 会在最后一位与 REST 不同（本机真实数据上相对差约 2e-16）。开启后解析是精确的，再用最短往返表示输出，与守护进程原样相同，所以 REST、CLI `--json`、MCP `structuredContent` 的数值逐位一致。代价只是解析浮点稍慢；`uniflo usage --json` 原样转发响应字节的做法保留不变。
 - 同步：`AGENTS.md` 契约里写明这条例外；`docs/agents.md` 记录每个 harness 的注册方式。
 
 ## 复议触发
