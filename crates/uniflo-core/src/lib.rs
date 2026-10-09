@@ -8,6 +8,7 @@
 //! - [`pricing`]: model price catalog (snapshot + sync + overrides) and per-step cost
 //! - [`usage`]: per-step usage ledgers and their aggregations
 //! - [`paths`]: Uniflo's own data / config / cache directories
+//! - [`window`]: event windows centred on one event (search hit → transcript)
 
 pub mod adapter;
 pub mod cache;
@@ -21,8 +22,10 @@ pub mod update;
 pub mod usage;
 pub mod util;
 mod watch;
+pub mod window;
 
 pub use adapter::{Adapter, Cursor, HarnessInfo, HistoryQuery, LiveSession, MetaPatch, ReadOutput, Record};
 pub use engine::{Engine, EngineOptions, IndexReport, PriceSync, Stats};
 pub use jsonl::{Cx, JsonlAdapter, LineDecoder, SourceId};
 pub use update::UpdateInfo;
+pub use window::Window;

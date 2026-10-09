@@ -16,6 +16,7 @@ Uniflo 只做这一层：
 - **毫秒级查询**：头尾摘要 + 游标跟随 + 索引缓存；本机 5600+ 会话、1.8 GB 数据，有缓存时启动约 0.2 s，REST 请求个位数毫秒。
 - **fd / fzf 式搜索**：`s:work h:claude in:uniflo since:2h 'gateway`。见 [`docs/search.md`](docs/search.md)。
 - **用量与费用**：每次模型调用的 token 统一口径（input 不含缓存、output 含思考），按 harness / 模型 / 项目 / 目录 / 日期 / 会话聚合，按事件时间的价格段计算 API 等价成本；未知模型单独计数，不按 0 计。见 [`docs/api.md`](docs/api.md#v1usage-参数)、[ADR-0010](docs/decisions/ADR-0010-价格目录同步与费用口径.md)。
+- **全文检索**：按中文词或代码子串查所有会话的正文、思考、工具参数与输出，命中直达事件上下文：`uniflo grep 缓存击穿`、`/v1/search`。索引在后台构建，见 [`docs/search.md#全文检索`](docs/search.md#全文检索)。
 - **只读、只听本机**：从不写 harness 数据；网关校验 Host / Origin，可选 token。
 
 ## 已支持的 harness
@@ -42,6 +43,7 @@ cargo install --path crates/uniflo-cli
 
 ```sh
 uniflo daemon                             # 前台启动网关，默认 http://127.0.0.1:7311
+uniflo daemon --no-fts                    # 不建全文索引（/v1/search 返回 503）
 open http://127.0.0.1:7311/demo           # 打开内置网页演示
 
 # macOS 可一键安装 launchd 后台常驻服务（登录自启、静默运行）
@@ -79,6 +81,7 @@ CLI（有守护进程时连它，否则 `--local` 进程内索引）：
 uniflo harnesses                          # 每个 harness 的会话数 / 工作中数量
 uniflo ps                                 # 正在工作的会话
 uniflo find "h:omp in:geek since:1d"      # 结构化过滤 + 模糊匹配
+uniflo grep 缓存击穿 --filter h:claude    # 全文检索正文，按会话分组列出命中片段
 uniflo show claude:4f1c                   # 会话详情（key 前缀即可）
 uniflo tail claude:4f1c -f                # 跟随一个会话的事件
 uniflo watch --kinds tool_call            # 全局实时事件流
@@ -128,7 +131,7 @@ harness 下拉使用 [Tom Select](https://tom-select.js.org/) 2.6.2：脚本、�
 crates/
   uniflo-schema    wire 类型（唯一对外契约）
   uniflo-core      适配器 trait、JSONL 驱动、状态机、引擎、缓存、监听、进程探测、用量账本与价格目录
-  uniflo-search    查询语法 + 模糊排序
+  uniflo-search    查询语法 + 模糊排序；全文索引（SQLite FTS5）
   uniflo-adapters  每个 harness 一个模块 / 一个 cargo feature
   uniflo-gateway   REST / SSE / NDJSON / WebSocket + Host/Origin/token 守卫
   uniflo-cli       uniflo 二进制

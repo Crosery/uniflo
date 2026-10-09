@@ -7,6 +7,8 @@
 //! | `GET /v1/sessions?q=&limit=&format=ndjson` | search (see `uniflo-search` syntax) |
 //! | `GET /v1/sessions/{key}` | one session |
 //! | `GET /v1/sessions/{key}/events?limit=&before=&max_text=&format=ndjson` | transcript, newest page first |
+//! | `GET /v1/sessions/{key}/events?around=<event id>&limit=` | transcript window centred on one event |
+//! | `GET /v1/search?q=&filter=&kinds=&limit=&offset=` | full-text hits grouped by session (503 without an index) |
 //! | `GET /v1/stream` (SSE) · `/v1/stream.ndjson` · `/v1/ws` | live envelopes; `since`, `session`, `harness`, `types`, `kinds`, `max_text` |
 //! | `GET /v1/stats` | engine counters, unknown discriminators |
 //! | `GET /v1/usage?group_by=&q=&since=&until=&tz=&under=&depth=&limit=&sort=` | token / cost aggregation |
@@ -19,6 +21,7 @@
 //! loopback + `--cors-origin`, optional bearer token (`Authorization` or `?token=`).
 
 mod guard;
+mod search;
 mod stream;
 pub mod usage;
 
@@ -38,6 +41,7 @@ use std::sync::Arc;
 use uniflo_core::util::now_ms;
 use uniflo_core::{Engine, HistoryQuery};
 use uniflo_schema::{Envelope, SCHEMA_VERSION};
+use uniflo_search::fts::Fts;
 use uniflo_search::{Query as SearchQuery, search};
 
 pub const DEFAULT_MAX_TEXT: usize = 32 * 1024;
@@ -45,10 +49,16 @@ pub const DEFAULT_MAX_TEXT: usize = 32 * 1024;
 #[derive(Clone)]
 struct AppState {
     engine: Arc<Engine>,
+    fts: Option<Arc<Fts>>,
 }
 
+/// Router without a full-text index: `/v1/search` answers 503.
 pub fn router(engine: Arc<Engine>, guard: GuardOptions) -> Router {
-    let state = AppState { engine };
+    router_with_fts(engine, guard, None)
+}
+
+pub fn router_with_fts(engine: Arc<Engine>, guard: GuardOptions, fts: Option<Arc<Fts>>) -> Router {
+    let state = AppState { engine, fts };
     Router::new()
         .route("/", get(index))
         .route("/demo", get(demo))
@@ -62,6 +72,7 @@ pub fn router(engine: Arc<Engine>, guard: GuardOptions) -> Router {
         .route("/v1/usage", get(usage::usage))
         .route("/v1/models", get(usage::models))
         .route("/v1/pricing", get(usage::pricing))
+        .route("/v1/search", get(search::search))
         .route("/v1/stream", get(sse))
         .route("/v1/stream.ndjson", get(ndjson))
         .route("/v1/ws", get(ws))
@@ -109,7 +120,7 @@ async fn index() -> impl IntoResponse {
         "name": "uniflo",
         "version": env!("CARGO_PKG_VERSION"),
         "schema": SCHEMA_VERSION,
-        "endpoints": ["/demo", "/v1/health", "/v1/harnesses", "/v1/sessions", "/v1/sessions/{key}", "/v1/sessions/{key}/events", "/v1/stream", "/v1/stream.ndjson", "/v1/ws", "/v1/stats", "/v1/usage", "/v1/sessions/{key}/usage", "/v1/models", "/v1/pricing"],
+        "endpoints": ["/demo", "/v1/health", "/v1/harnesses", "/v1/sessions", "/v1/sessions/{key}", "/v1/sessions/{key}/events", "/v1/search", "/v1/stream", "/v1/stream.ndjson", "/v1/ws", "/v1/stats", "/v1/usage", "/v1/sessions/{key}/usage", "/v1/models", "/v1/pricing"],
     }))
 }
 
@@ -138,7 +149,9 @@ async fn harnesses(State(s): State<AppState>) -> impl IntoResponse {
 }
 
 async fn stats(State(s): State<AppState>) -> impl IntoResponse {
-    Json(s.engine.stats())
+    let mut v = serde_json::to_value(s.engine.stats()).unwrap_or_default();
+    v["fts"] = serde_json::to_value(s.fts.as_ref().map(|f| f.status())).unwrap_or_default();
+    Json(v)
 }
 
 #[derive(Deserialize)]
@@ -168,6 +181,8 @@ async fn session(State(s): State<AppState>, Path(key): Path<String>) -> Response
 struct EventParams {
     limit: Option<usize>,
     before: Option<u64>,
+    /// Event id: return a window centred on it instead of a page.
+    around: Option<String>,
     max_text: Option<usize>,
     format: Option<String>,
 }
@@ -175,6 +190,10 @@ struct EventParams {
 async fn events(State(s): State<AppState>, Path(key): Path<String>, Query(p): Query<EventParams>) -> Response {
     if s.engine.session(&key).is_none() {
         return ApiError(StatusCode::NOT_FOUND, format!("unknown session {key}")).into_response();
+    }
+    if let Some(id) = p.around {
+        let (limit, max) = (p.limit.unwrap_or(200).clamp(1, 10_000), p.max_text.unwrap_or(DEFAULT_MAX_TEXT));
+        return search::around(s.engine.clone(), key, id, limit, max, p.format.as_deref() == Some("ndjson")).await;
     }
     let q = HistoryQuery { before: p.before, limit: p.limit.unwrap_or(200).clamp(1, 10_000) };
     let engine = s.engine.clone();

@@ -14,6 +14,11 @@
 //! | anything else | fzf syntax over title, preview, cwd, harness, id: `foo`, `'exact`, `^prefix`, `suffix$`, `!not` |
 //!
 //! Prefix a filter with `!` to negate it (`!h:codex`, `!is:sub`).
+//!
+//! [`fts`] is the full-text index over event bodies (`/v1/search`, `uniflo grep`); its
+//! `filter` reuses this syntax.
+
+pub mod fts;
 
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};

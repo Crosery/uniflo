@@ -10,7 +10,7 @@
 |---|---|---|
 | `uniflo-schema` | wire 类型（`Session`/`Event`/`Envelope`），唯一对外契约 | serde、serde_json |
 | `uniflo-core` | 适配器 trait、JSONL 驱动、状态机、引擎、缓存、文件监听、进程探测、用量账本与价格目录（`usage/`、`pricing/`）、自有目录（`paths`） | schema |
-| `uniflo-search` | 查询语法解析 + 模糊排序 | schema |
+| `uniflo-search` | 查询语法解析 + 模糊排序；全文索引 `fts`（SQLite FTS5，读 `Engine`） | schema、core |
 | `uniflo-adapters` | 每个 harness 一个模块，每个模块一个 cargo feature | core、schema |
 | `uniflo-gateway` | HTTP/SSE/NDJSON/WS 网关、Host/Origin/token 守卫 | core、search、schema |
 | `uniflo-cli` | `uniflo` 二进制：守护进程 + 查询客户端 | 以上全部 |
@@ -39,6 +39,9 @@
 | 守护进程启动到 `/v1/health` | 用量索引不得拖慢：有缓存时不超过改动前 +50% | release 二进制 `uniflo daemon --bind 127.0.0.1:74xx`，隔离 `HOME` 与 `UNIFLO_DATA_DIR`，轮询 `/v1/health` |
 | `/v1/usage` 聚合（索引就绪后） | 单次 < 100 ms（`project` 首次 stat 各 cwd 除外） | `curl -w '%{time_total}' '…/v1/usage?group_by=…'` |
 | 追加 usage 到 `session` envelope 带新合计 | < 2 s（热会话通常 < 100 ms） | `crates/uniflo-gateway/tests/usage.rs` |
+| 全文检索（`/v1/search`，≥ 3 字符的词，索引建成后） | p50 < 50 ms、p95 < 200 ms，代码子串 p50 < 50 ms；每个词的第一次（冷）查询计入 | 另起端口的守护进程在 `/v1/stats` 的 `fts.indexing`、`fts.warming` 都为 false 后，用这个进程里没查过的词集：按词频挑 10 个中文词 + 10 个代码子串，各查 5 次，至少 3 组，只记耗时与计数 |
+| 含短词（< 3 字符）的全文检索：只有短词，或与 ≥ 3 字符的词混合 | 常见词 < 1 s；最多 2 s，超时返回 `partial` | 同上，按 `/v1/search` 实测；预算常量 `LIKE_BUDGET` |
+| 新事件可被全文检索到 | < 2 s | `crates/uniflo-search/tests/fts.rs` |
 
 引擎循环里不得做阻塞 IO：读文件、`ps`/`lsof`、SQLite 都走 `spawn_blocking`，结果回到单写者循环再写状态。
 

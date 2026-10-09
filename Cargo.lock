@@ -1433,7 +1433,15 @@ dependencies = [
 name = "uniflo-search"
 version = "0.1.4"
 dependencies = [
+ "anyhow",
  "nucleo-matcher",
+ "rusqlite",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "uniflo-adapters",
+ "uniflo-core",
  "uniflo-schema",
 ]
 

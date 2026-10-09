@@ -1,6 +1,6 @@
 # Wire schema v1
 
-> 所有 harness 归一后的唯一对外格式：`Session`、`Event`、`Envelope`。真源 `crates/uniflo-schema/src/lib.rs`。
+> 所有 harness 归一后的唯一对外格式：`Session`、`Event`、`Envelope`，以及接口响应类型。真源 `crates/uniflo-schema/src/`。
 
 状态：`current` · 更新：2026-10-09
 
@@ -124,6 +124,31 @@
 | `lagged` | `seq`, `missed` | 订阅落后、有丢失：用 REST 重新拉快照 |
 
 `seq` 在一次守护进程运行内严格递增。断线重连带 `since=<最后收到的 seq>`（SSE 也认 `Last-Event-ID`）补齐缺口。守护进程重启后 `seq` 从 0 开始：`hello.seq` 小于本地记录时，重新拉快照。
+
+## 全文检索
+
+`GET /v1/search` 与 `uniflo grep --json` 的响应，真源 `crates/uniflo-schema/src/search.rs`。语法与排序见 `docs/search.md#全文检索`。
+
+`SearchResponse`：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `q` | string | 原样回显的检索词 |
+| `filter` | string? | 原样回显的会话过滤 |
+| `order` | `"relevance"` \| `"recent"` | `recent` 表示有少于 3 个字符的词，改按时间倒序 |
+| `total` | number | 命中的会话总数（分页前） |
+| `offset`, `limit` | number | 实际生效的分页参数 |
+| `indexing` | bool | 索引仍在构建或追赶，结果可能不全 |
+| `progress` | `{done, total, events}` | 已建完的会话数 / 会话总数 / 已入索引的事件数 |
+| `results` | `SearchSession[]` | 当前页 |
+| `partial` | bool? | 含短词的查询在时间预算（2 s）内没扫完：`results` 是已找到的最新命中，更早的可能缺失；缺省为 false |
+| `scanned_until` | i64? | 含短词的查询在扫到最老的会话之前就停了（结果已够，或 `partial`）：最后活动时间不晚于此刻的会话可能没被搜索，`total` 只是下限 |
+
+`SearchSession`：`session`（会话 key）、`harness`、`title?`、`cwd?`、`updated_at?`、`score`（越大越相关，`recent` 时为 0）、`hits`（最多 3 条，最好的在前）。
+
+`SearchHit`：`event`（事件 id，传给 `events?around=`）、`kind`、`ts`、`snippet`（高亮区间以 `\u0002` 开始、`\u0003` 结束，常量 `HIGHLIGHT_START` / `HIGHLIGHT_END`）。
+
+`FtsStatus`（`GET /v1/stats` 的 `fts`）：`indexing`、`progress`、`path`（索引文件）、`bytes`（索引文件含 WAL 的磁盘占用）、`rebuilt`（本次启动因格式标签变化或文件损坏而重建）、`warming?`（启动后索引仍在合并成一个段、或在读进系统页缓存，期间某个词的第一次查询可能较慢；缺省为 false）、`build_ms?`（从空索引开始的最近一次全量构建耗时）、`errors`、`last_error?`。
 
 ## 示例
 

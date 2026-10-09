@@ -29,8 +29,13 @@ pub struct CachedSession {
     pub title_rank: u8,
 }
 
+/// Uniflo's cache directory; see [`crate::paths::cache_dir`] (`UNIFLO_HOME` / `UNIFLO_CACHE_DIR`).
+pub fn dir() -> PathBuf {
+    crate::paths::cache_dir()
+}
+
 pub fn default_path() -> PathBuf {
-    dirs::cache_dir().unwrap_or_else(std::env::temp_dir).join("uniflo").join("index-v1.json")
+    dir().join("index-v1.json")
 }
 
 /// Load a cache written with the same `tag`; anything else is ignored (decoders changed).

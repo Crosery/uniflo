@@ -1,6 +1,6 @@
 [package]
 name = "uniflo-search"
-description = "Uniflo session search: fd-style filters + fzf-style fuzzy ranking"
+description = "Uniflo search: fd-style session filters + fzf-style fuzzy ranking, and the SQLite FTS5 full-text index"
 version.workspace = true
 edition = "2024"
 license.workspace = true
@@ -10,4 +10,15 @@ rust-version.workspace = true
 
 [dependencies]
 uniflo-schema.workspace = true
+uniflo-core.workspace = true
+anyhow.workspace = true
 nucleo-matcher.workspace = true
+rusqlite.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+uniflo-adapters = { workspace = true, features = ["claude", "gemini"] }

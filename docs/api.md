@@ -14,11 +14,12 @@
 | `GET /demo` | 页面参数见 `examples/web/index.html` 头注释 | 内置网页演示（单文件，无外部运行时依赖；内嵌副本 `crates/uniflo-gateway/src/index.html`） |
 | `GET /v1/health` | — | `{ok, version, schema, seq, sessions, working, uptime_ms, update_available, latest_version, latest_prerelease}` |
 | `GET /v1/harnesses` | — | `Harness[]`：`{id, name, roots, sessions, working}` |
-| `GET /v1/stats` | — | 索引与读取计数：`sessions`、`sources`、`bad_lines`、`unknown`、`read_errors`、`index_ms`…；`usage` 为后台用量索引进度 `{ready, done, total}`（关闭用量索引时为 `null`）；`update` 为守护进程最近一次 crates.io 检查结果 `{current, latest, available, latest_prerelease, checked_at, error}`（`latest`/`available` 只看正式版，`latest_prerelease` 仅为探测到的更新预发布版、供用户自行决定是否安装），未开启后台检查时为 `null` |
+| `GET /v1/stats` | — | 索引与读取计数：`sessions`、`sources`、`bad_lines`、`unknown`、`read_errors`、`index_ms`…；`usage` 为后台用量索引进度 `{ready, done, total}`（关闭用量索引时为 `null`）；`update` 为守护进程最近一次 crates.io 检查结果 `{current, latest, available, latest_prerelease, checked_at, error}`（`latest`/`available` 只看正式版，`latest_prerelease` 仅为探测到的更新预发布版、供用户自行决定是否安装），未开启后台检查时为 `null`；`fts` 为全文索引状态 `FtsStatus`（`docs/schema.md#全文检索`），`--no-fts` 时为 `null` |
 | `GET /v1/sessions` | `q` 查询（`docs/search.md`）、`limit`（默认 100）、`format=ndjson` | `Session[]`，有 `q` 时按相关度、否则按 `updated_at` 倒序 |
 | `GET /v1/sessions/{key}` | — | `Session`；未知 key 返回 404 |
 | `GET /v1/sessions/{key}/events` | `limit`（默认 200，最大 10000）、`before=<pos>`、`max_text`（默认 32768，0 不截断）、`format=ndjson` | `{session, events, next_before}`；`events` 按时间正序，翻更早一页传 `before=next_before`；`next_before` 为 `null` 当且仅当没有更早的事件 |
-
+| `GET /v1/sessions/{key}/events?around=<id>` | `limit`（默认 200，最大 10000）、`max_text`、`format=ndjson` | 以事件 `id` 为中心的窗口 `{session, around, events, next_before}`：前后各约 `limit/2` 条，一侧不足时由另一侧补足；`next_before` 同上，可继续往前翻；会话里没有该 id 时 404 |
+| `GET /v1/search` | `q`（必填，语法见 `docs/search.md#全文检索`）、`filter`（会话搜索语法）、`kinds`（逗号分隔的事件 kind）、`limit`（会话数，默认 20，最大 200）、`offset` | `SearchResponse`（`docs/schema.md#全文检索`）：按会话分组，每个会话最多 3 条命中；索引仍在构建时 `indexing: true` 并附 `progress`，结果只含已建部分。有短词（< 3 字符，含 `-` 排除的短词）时按时间倒序，从最近活动的会话往回扫，同时有 ≥ 3 字符的词时只扫它们在索引里的命中：凑够 `offset + limit` 个会话就停，此时带 `scanned_until`、`total` 为下限；超过 2 s 预算就返回已找到的部分，并带 `partial: true`。同分的会话按 `updated_at`、会话 key 排，翻页顺序固定。缺 `q` 或语法无效 400；以 `--no-fts` 启动或索引打不开时 503，`error` 说明原因 |
 | `GET /v1/usage` | 见下表 | `UsageReport`：按一个维度聚合 token 与费用；参数不合法返回 400 |
 | `GET /v1/sessions/{key}/usage` | — | `SessionUsageDetail`：每一步明细与按回合汇总；未知 key 返回 404 |
 | `GET /v1/models` | `q` 查询 | `ModelUsage[]`：会话里出现过的模型、目录匹配结果（`exact` / `approx` / `none`）、价格段、上下文上限、步数与费用 |
@@ -92,6 +93,8 @@ curl -s "localhost:7311/v1/sessions/$(printf %s 'claude:4f1c' | jq -sRr @uri)/ev
 curl -N localhost:7311/v1/stream.ndjson?kinds=tool_call,tool_result
 curl -s "localhost:7311/v1/usage?group_by=model&q=$(printf %s 'h:claude since:7d' | jq -sRr @uri)"
 curl -s "localhost:7311/v1/usage?group_by=day&tz=Asia/Shanghai&since=30d"
+curl -sG localhost:7311/v1/search --data-urlencode 'q=缓存击穿 -rollback' --data-urlencode 'filter=h:claude since:7d'
+curl -s "localhost:7311/v1/sessions/claude%3A4f1c/events?around=msg_01:2&limit=20"   # 打开某条命中
 ```
 
 ```js

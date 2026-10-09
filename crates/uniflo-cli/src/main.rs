@@ -1,6 +1,7 @@
 //! `uniflo` — daemon and command line for the unified agent-harness session gateway.
 
 mod client;
+mod grep;
 mod render;
 mod usage;
 
@@ -14,6 +15,7 @@ use uniflo_core::util::now_ms;
 use uniflo_core::{Engine, EngineOptions, HistoryQuery, PriceSync};
 use uniflo_gateway::GuardOptions;
 use uniflo_schema::{Envelope, Event, Harness, Session, Status};
+use uniflo_search::fts::{Fts, FtsOptions};
 use uniflo_search::{Query, search};
 
 const DEFAULT_URL: &str = "http://127.0.0.1:7311";
@@ -61,6 +63,9 @@ enum Cmd {
         /// Seconds after startup before the first price sync (tests).
         #[arg(long, default_value_t = 60, hide = true)]
         price_sync_delay: u64,
+        /// Do not build or serve the full-text index (`/v1/search` answers 503, no index file is created).
+        #[arg(long)]
+        no_fts: bool,
     },
     /// Check crates.io for a newer stable release, or install it (`cargo install uniflo --force`).
     Update {
@@ -137,6 +142,21 @@ enum Cmd {
     Usage(usage::UsageArgs),
     /// Price catalog status; `uniflo pricing sync` fetches it now.
     Pricing(usage::PricingArgs),
+    /// Full-text search over message, reasoning and tool text (Chinese and code substrings).
+    Grep {
+        /// Terms are ANDed; `"two words"` is a phrase, `-term` excludes (quote the whole query,
+        /// e.g. `'deploy -rollback'`, or put terms after `--`).
+        #[arg(required = true)]
+        terms: Vec<String>,
+        /// Session filter in the `uniflo ls` syntax, e.g. `h:claude in:work since:7d`.
+        #[arg(long)]
+        filter: Option<String>,
+        /// Sessions to show.
+        #[arg(short = 'n', long, default_value_t = 20)]
+        limit: usize,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -151,6 +171,7 @@ fn main() -> Result<()> {
             no_update_check,
             no_price_sync,
             price_sync_delay,
+            no_fts,
         } => {
             let guard = GuardOptions {
                 token: cli.token.clone(),
@@ -162,7 +183,7 @@ fn main() -> Result<()> {
             }
             let price_sync = (!no_price_sync)
                 .then(|| PriceSync { delay: Duration::from_secs(price_sync_delay), ..Default::default() });
-            daemon(bind, guard, stale_after, no_cache, !no_update_check, price_sync)
+            daemon(bind, guard, stale_after, no_cache, !no_update_check, price_sync, !no_fts)
         }
         Cmd::Scan { json, no_cache } => scan(json, no_cache),
         Cmd::Update { check, prerelease, json } => update(check, prerelease, json),
@@ -186,6 +207,7 @@ fn daemon(
     no_cache: bool,
     update_check: bool,
     price_sync: Option<PriceSync>,
+    fts: bool,
 ) -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -210,8 +232,9 @@ fn daemon(
             report.sessions, report.files, report.ms, report.read, report.restored
         );
         let _ = engine.save_cache();
+        let fts = fts.then(|| start_fts(&engine)).flatten();
         let runner = tokio::spawn(engine.clone().run());
-        let router = uniflo_gateway::router(engine.clone(), guard);
+        let router = uniflo_gateway::router_with_fts(engine.clone(), guard, fts);
         uniflo_gateway::serve(listener, router, async {
             let _ = tokio::signal::ctrl_c().await;
         })
@@ -222,6 +245,26 @@ fn daemon(
         eprintln!("uniflo: index cache saved, bye");
         Ok(())
     })
+}
+
+/// The index builds in its own thread; failing to open it only disables `/v1/search`.
+fn start_fts(engine: &Arc<Engine>) -> Option<Arc<Fts>> {
+    match Fts::start(engine.clone(), FtsOptions::default()) {
+        Ok(f) => {
+            let st = f.status();
+            eprintln!(
+                "uniflo: full-text index {} · {} of {} sessions to index in the background",
+                st.path,
+                st.progress.total - st.progress.done,
+                st.progress.total
+            );
+            Some(Arc::new(f))
+        }
+        Err(err) => {
+            tracing::warn!("full-text index unavailable, /v1/search disabled: {err:#}");
+            None
+        }
+    }
 }
 
 fn scan(json: bool, no_cache: bool) -> Result<()> {
@@ -362,7 +405,7 @@ fn update(check: bool, prerelease: bool, json: bool) -> Result<()> {
 }
 
 /// Query commands run against the daemon, or an in-process engine when none answers.
-enum Source {
+pub(crate) enum Source {
     Daemon(Client),
     Local(Arc<Engine>),
 }
@@ -505,6 +548,7 @@ impl Source {
                 Ok(())
             }
             Cmd::Usage(a) => usage::usage(self, a),
+            Cmd::Grep { terms, filter, limit, json } => grep::run(self, terms, filter.as_deref(), *limit, *json),
             Cmd::Daemon { .. } | Cmd::Scan { .. } | Cmd::Update { .. } | Cmd::Pricing(_) => unreachable!(),
         }
     }
@@ -553,7 +597,7 @@ fn print_sessions(st: &Style, list: &[Session], json: bool, tsv: bool) -> Result
 }
 
 /// Percent-encode a query/path component.
-fn enc(s: &str) -> String {
+pub(crate) fn enc(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
         match b {
