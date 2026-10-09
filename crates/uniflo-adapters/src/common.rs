@@ -262,6 +262,7 @@ pub mod testkit {
         pub cwd: Option<String>,
         pub model: Option<String>,
         pub started_at: Option<i64>,
+        pub updated_at: Option<i64>,
     }
 
     /// One session's view of an adapter read, merged like the engine does.
@@ -343,6 +344,9 @@ pub mod testkit {
                     }
                     if p.started_at.is_some() {
                         ix.meta.started_at = p.started_at;
+                    }
+                    if p.updated_at.is_some() {
+                        ix.meta.updated_at = ix.meta.updated_at.max(p.updated_at);
                     }
                 }
                 Record::Event(e) => {

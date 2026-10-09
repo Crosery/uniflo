@@ -6,11 +6,13 @@
 //! a text-only assistant record ends the turn. The chat id is the IDE composer id: title, cwd,
 //! model, times and sub-agent parent come from the IDE store's `composerData:<id>`. Composers
 //! that kept their messages in the IDE store and have no transcript are listed from the store
-//! (source = `state.vscdb`); composers without any message are not listed.
+//! (source = `state.vscdb`); composers without any message are not listed. A transcript is
+//! read again when the store changes, so its metadata follows renames in the IDE.
 
 use crate::common::under_any;
-use crate::cursor_ide::{Ide, default_db};
+use crate::cursor_ide::{Ide, Sig, default_db, sig};
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -57,6 +59,27 @@ impl CursorAgent {
     }
 }
 
+/// Transcript cursor: the transcript's own state plus the store signature its metadata was
+/// read at.
+#[derive(Serialize, Deserialize)]
+struct TranscriptState {
+    d: Value,
+    ide: Sig,
+}
+
+fn split(c: &SrcCursor) -> (SrcCursor, Option<Sig>) {
+    match serde_json::from_value::<TranscriptState>(c.state.clone()) {
+        Ok(t) => (SrcCursor { state: t.d, ..c.clone() }, Some(t.ide)),
+        Err(_) => (c.clone(), None),
+    }
+}
+
+fn wrap(mut c: SrcCursor, ide: Sig) -> SrcCursor {
+    let d = std::mem::take(&mut c.state);
+    c.state = serde_json::to_value(TranscriptState { d, ide }).unwrap_or(Value::Null);
+    c
+}
+
 impl Adapter for CursorAgent {
     fn info(&self) -> HarnessInfo {
         self.transcripts.info()
@@ -86,8 +109,11 @@ impl Adapter for CursorAgent {
             let (batch, c) = self.ide.read(&self.transcript_ids(), None)?;
             return Ok(ReadOutput { cursor: c, batch, summary: cursor.is_none(), reset: cursor.is_some() });
         }
-        let mut out = self.transcripts.read(src, cursor)?;
+        let inner = cursor.map(|c| split(c).0);
+        let mut out = self.transcripts.read(src, inner.as_ref())?;
+        let ide = sig(&self.ide.db);
         self.with_ide_meta(src, &mut out.batch.items);
+        out.cursor = wrap(out.cursor, ide);
         Ok(out)
     }
 
@@ -118,16 +144,21 @@ impl Adapter for CursorAgent {
             return Ok(c);
         }
         let c = self.transcripts.read_all(src, sessions, sink)?;
+        let ide = sig(&self.ide.db);
         let mut meta = Vec::new();
         self.with_ide_meta(src, &mut meta);
         for (id, r) in meta {
             sink(&id, r);
         }
-        Ok(c)
+        Ok(wrap(c, ide))
     }
 
     fn changed(&self, src: &Path, cursor: &SrcCursor) -> bool {
-        if self.is_ide(src) { self.ide.changed(cursor) } else { self.transcripts.changed(src, cursor) }
+        if self.is_ide(src) {
+            return self.ide.changed(cursor);
+        }
+        let (inner, ide) = split(cursor);
+        self.transcripts.changed(src, &inner) || ide != Some(sig(&self.ide.db))
     }
 }
 
@@ -346,7 +377,25 @@ mod tests {
         assert_eq!(r.meta.cwd.as_deref(), Some("/w/app"));
         assert_eq!(r.meta.model.as_deref(), Some("gpt-5"));
         assert_eq!(r.meta.started_at, Some(1790000000000));
+        assert_eq!(r.meta.updated_at, Some(1790000900000));
         assert_eq!(r.meta.parent.as_deref(), Some("c-ide"));
+
+        // Renamed in the IDE: only the store changes, the transcript is read again for it.
+        let first = a.read(&p, None).unwrap();
+        assert!(!a.changed(&p, &first.cursor));
+        let w = rusqlite::Connection::open(&db).unwrap();
+        w.execute(
+            "UPDATE cursorDiskKV SET value = ?1 WHERE key = ?2",
+            rusqlite::params![data("Renamed chat", json!([])).to_string(), format!("composerData:{tid}")],
+        )
+        .unwrap();
+        drop(w);
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
+        std::fs::File::options().write(true).open(&db).unwrap().set_modified(later).unwrap();
+        assert!(a.changed(&p, &first.cursor));
+        let renamed = crate::common::testkit::group(a.read(&p, Some(&first.cursor)).unwrap().batch);
+        assert_eq!(renamed[tid].meta.title.as_deref(), Some("Renamed chat"));
+        assert!(renamed[tid].events.is_empty(), "nothing new in the transcript");
 
         let out = a.read(&db, None).unwrap();
         let g = crate::common::testkit::group(out.batch);
