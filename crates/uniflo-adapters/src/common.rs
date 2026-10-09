@@ -1,6 +1,14 @@
 //! Helpers shared by several adapters.
 
+use anyhow::Result;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::path::{Path, PathBuf};
+use uniflo_core::util::file_mtime_ms;
+use uniflo_core::{
+    Adapter, Cursor, HarnessInfo, HistoryQuery, JsonlAdapter, LineDecoder, LiveSession, ReadOutput, Record,
+};
+use uniflo_schema::Event;
 
 pub fn under_any(p: &Path, roots: &[PathBuf]) -> bool {
     roots.iter().any(|r| p.starts_with(r))
@@ -27,6 +35,150 @@ pub fn output_with_reasoning(output: u64, reasoning: u64) -> u64 {
 pub fn after_ts_prefix(stem: &str) -> Option<&str> {
     let (ts, id) = stem.split_once('_')?;
     (ts.len() >= 20 && ts.as_bytes()[4] == b'-' && ts.contains('T') && !id.is_empty()).then_some(id)
+}
+
+/// `(mtime ms, size)` per file, `(0, 0)` when missing: a cheap change signature.
+pub type FileSig = Vec<(i64, u64)>;
+
+pub fn file_sig(paths: &[PathBuf]) -> FileSig {
+    paths.iter().map(|p| std::fs::metadata(p).map_or((0, 0), |m| (file_mtime_ms(&m), m.len()))).collect()
+}
+
+/// A JSONL transcript whose session metadata lives in sibling files rewritten in place
+/// (title, cwd, per-turn usage). [`WithSidecars`] re-reads them after every read, so a
+/// change to a sibling alone still lands.
+pub trait Sidecar: LineDecoder {
+    /// The transcript a changed sibling file belongs to.
+    fn transcript_of(&self, path: &Path) -> Option<PathBuf>;
+    /// Siblings of `src` whose change means `src` must be read again.
+    fn sidecars(&self, src: &Path) -> Vec<PathBuf>;
+    /// Records derived from the siblings after a read of `src`. Called only once the session
+    /// has events: a shell without conversation stays unlisted.
+    fn sidecar(&self, src: &Path, state: &mut Self::State) -> Vec<Record>;
+}
+
+pub struct WithSidecars<D: Sidecar> {
+    pub inner: JsonlAdapter<D>,
+}
+
+/// Cursor state of [`WithSidecars`]: the decoder's own state plus the sibling signature.
+#[derive(Serialize, Deserialize)]
+struct SideState {
+    d: Value,
+    #[serde(default)]
+    sig: FileSig,
+    /// The session has produced events (it is listed).
+    #[serde(default)]
+    content: bool,
+}
+
+impl<D: Sidecar> WithSidecars<D> {
+    pub fn new(decoder: D) -> Self {
+        WithSidecars { inner: JsonlAdapter::new(decoder) }
+    }
+
+    fn split(c: &Cursor) -> (Cursor, SideState) {
+        let side = serde_json::from_value::<SideState>(c.state.clone()).unwrap_or(SideState {
+            d: Value::Null,
+            sig: Vec::new(),
+            content: false,
+        });
+        (Cursor { state: side.d.clone(), ..c.clone() }, side)
+    }
+
+    /// Append sidecar records for `id` when they may differ from what was sent, then wrap the
+    /// inner cursor.
+    fn finish(
+        &self,
+        src: &Path,
+        cursor: &mut Cursor,
+        content: bool,
+        emit: Option<&[(i64, u64)]>,
+        push: &mut dyn FnMut(&str, Record),
+    ) {
+        let sig = file_sig(&self.inner.decoder.sidecars(src));
+        let mut st: D::State = serde_json::from_value(cursor.state.clone()).unwrap_or_default();
+        if content && emit.is_none_or(|prev| prev != sig.as_slice()) {
+            let id = self.inner.decoder.identify(src).map(|s| s.id).unwrap_or_default();
+            for r in self.inner.decoder.sidecar(src, &mut st) {
+                push(&id, r);
+            }
+        }
+        let d = serde_json::to_value(&st).unwrap_or(Value::Null);
+        cursor.state = serde_json::to_value(SideState { d, sig, content }).unwrap_or(Value::Null);
+    }
+}
+
+impl<D: Sidecar> Adapter for WithSidecars<D> {
+    fn info(&self) -> HarnessInfo {
+        self.inner.info()
+    }
+
+    fn roots(&self) -> Vec<PathBuf> {
+        self.inner.roots()
+    }
+
+    fn source_for(&self, path: &Path) -> Option<PathBuf> {
+        self.inner.source_for(path).or_else(|| self.inner.decoder.transcript_of(path))
+    }
+
+    fn discover(&self) -> Vec<PathBuf> {
+        self.inner.discover()
+    }
+
+    fn read(&self, src: &Path, cursor: Option<&Cursor>) -> Result<ReadOutput> {
+        let split = cursor.map(Self::split);
+        let mut out = self.inner.read(src, split.as_ref().map(|(c, _)| c))?;
+        let had = split.as_ref().is_some_and(|(_, s)| s.content) && !out.reset;
+        let content = had || out.batch.items.iter().any(|(_, r)| matches!(r, Record::Event(_)));
+        if !content {
+            // Metadata alone (headers, config records) would list an empty session.
+            out.batch.items.clear();
+        }
+        // A plain follow re-sends sidecar records only when a sibling changed.
+        let prev = split.as_ref().filter(|_| had && !out.summary).map(|(_, s)| s.sig.as_slice());
+        let mut extra = Vec::new();
+        self.finish(src, &mut out.cursor, content, prev, &mut |id, r| extra.push((id.to_owned(), r)));
+        out.batch.items.extend(extra);
+        Ok(out)
+    }
+
+    fn history(&self, src: &Path, session_id: &str, q: &HistoryQuery) -> Result<Vec<Event>> {
+        self.inner.history(src, session_id, q)
+    }
+
+    fn read_all(&self, src: &Path, sessions: &[String], sink: &mut dyn FnMut(&str, Record)) -> Result<Cursor> {
+        let mut content = false;
+        let mut held: Vec<(String, Record)> = Vec::new();
+        let mut cursor = self.inner.read_all(src, sessions, &mut |id, r| {
+            if !content && matches!(r, Record::Meta(_)) {
+                held.push((id.to_owned(), r));
+                return;
+            }
+            if !content {
+                content = true;
+                for (hid, h) in held.drain(..) {
+                    sink(&hid, h);
+                }
+            }
+            sink(id, r)
+        })?;
+        self.finish(src, &mut cursor, content, None, sink);
+        Ok(cursor)
+    }
+
+    fn changed(&self, src: &Path, cursor: &Cursor) -> bool {
+        let (inner, side) = Self::split(cursor);
+        self.inner.changed(src, &inner) || side.sig != file_sig(&self.inner.decoder.sidecars(src))
+    }
+
+    fn live(&self) -> Option<Vec<LiveSession>> {
+        self.inner.live()
+    }
+
+    fn live_roots(&self) -> Vec<PathBuf> {
+        self.inner.live_roots()
+    }
 }
 
 #[cfg(test)]

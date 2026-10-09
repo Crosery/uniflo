@@ -11,22 +11,38 @@ pub mod antigravity;
 pub mod claude;
 #[cfg(feature = "cline")]
 pub mod cline;
+#[cfg(feature = "codebuddy")]
+pub mod codebuddy;
 #[cfg(feature = "codex")]
 pub mod codex;
 #[allow(dead_code, reason = "shared helpers; a single-adapter feature set uses only some")]
 mod common;
+#[cfg(feature = "copilot")]
+pub mod copilot;
+#[cfg(feature = "craft")]
+pub mod craft;
 #[cfg(feature = "cursor")]
 pub mod cursor;
+#[cfg(feature = "devin")]
+pub mod devin;
 #[cfg(feature = "dsh")]
 pub mod dsh;
 #[cfg(feature = "factory")]
 pub mod factory;
 #[cfg(feature = "gemini")]
 pub mod gemini;
+#[cfg(feature = "grok")]
+pub mod grok;
 #[cfg(feature = "hermes")]
 pub mod hermes;
+#[cfg(feature = "kimi")]
+pub mod kimi;
+#[cfg(feature = "kiro")]
+pub mod kiro;
 #[cfg(feature = "minimax")]
 pub mod minimax;
+#[cfg(feature = "openclaw")]
+pub mod openclaw;
 #[cfg(feature = "opencode")]
 pub mod opencode;
 #[cfg(feature = "pi")]
@@ -35,7 +51,14 @@ pub mod pi;
 pub mod prime;
 #[cfg(feature = "reasonix")]
 pub mod reasonix;
-#[cfg(any(feature = "opencode", feature = "hermes", feature = "minimax"))]
+#[cfg(any(
+    feature = "opencode",
+    feature = "hermes",
+    feature = "minimax",
+    feature = "copilot",
+    feature = "devin",
+    feature = "openclaw"
+))]
 #[allow(dead_code, reason = "shared helpers; a single-adapter feature set uses only some")]
 mod sqlite;
 #[cfg(feature = "workbuddy")]
@@ -78,5 +101,21 @@ pub fn all() -> Vec<Arc<dyn Adapter>> {
     v.extend(cursor::adapters());
     #[cfg(feature = "dsh")]
     v.extend(dsh::adapters());
+    #[cfg(feature = "grok")]
+    v.extend(grok::adapters());
+    #[cfg(feature = "kiro")]
+    v.extend(kiro::adapters());
+    #[cfg(feature = "kimi")]
+    v.extend(kimi::adapters());
+    #[cfg(feature = "codebuddy")]
+    v.extend(codebuddy::adapters());
+    #[cfg(feature = "copilot")]
+    v.extend(copilot::adapters());
+    #[cfg(feature = "devin")]
+    v.extend(devin::adapters());
+    #[cfg(feature = "craft")]
+    v.extend(craft::adapters());
+    #[cfg(feature = "openclaw")]
+    v.extend(openclaw::adapters());
     v
 }
