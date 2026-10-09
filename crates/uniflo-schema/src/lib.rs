@@ -10,6 +10,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub mod search;
+
 pub const SCHEMA_VERSION: u32 = 1;
 
 /// Coarse activity of a session: the agent is either producing work or silent.
