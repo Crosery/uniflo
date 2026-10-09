@@ -29,8 +29,22 @@ pub struct CachedSession {
     pub title_rank: u8,
 }
 
+/// Uniflo's cache directory (`~/Library/Caches/uniflo` on macOS). With `UNIFLO_HOME` set it is
+/// re-rooted under that home, so sandboxes and tests never touch the real cache.
+pub fn dir() -> PathBuf {
+    let base = dirs::cache_dir().unwrap_or_else(std::env::temp_dir);
+    let base = match std::env::var_os("UNIFLO_HOME").map(PathBuf::from) {
+        Some(h) => match dirs::home_dir().and_then(|real| base.strip_prefix(real).ok().map(Path::to_path_buf)) {
+            Some(rel) => h.join(rel),
+            None => h.join(".cache"),
+        },
+        None => base,
+    };
+    base.join("uniflo")
+}
+
 pub fn default_path() -> PathBuf {
-    dirs::cache_dir().unwrap_or_else(std::env::temp_dir).join("uniflo").join("index-v1.json")
+    dir().join("index-v1.json")
 }
 
 /// Load a cache written with the same `tag`; anything else is ignored (decoders changed).
