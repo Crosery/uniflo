@@ -132,13 +132,74 @@
 
 - 标签含 Uniflo 版本（规格要求，与 `index-v1.json` 一致）：每次升级都会后台重建一次，约 14 min、约 2/3 个核，并重写 5.6 GB。
 - 同一缓存目录有两个守护进程时，会争用同一个索引文件；版本不同时还会互相判定标签不匹配而重建。AGENTS.md 已写明。
-- 只有短词的查询，在大索引上要十几到几十秒（见上）。
+- 只有短词的查询：已改为有界扫描，见下文「短词扫描有界化」。罕见短词在 2 s 内可能找不全（带 `partial`）。扫描能提前停，依赖「会话 `updated_at` ≥ 其事件 ts」；若某 harness 的事件时间晚于会话的 `updated_at`，这一页的排序可能有偏差（未见实例，未验证）。
 - 延迟依赖 OS 页缓存：冷缓存时，同一个 bm25 扫描在 sqlite3 CLI 里第一次 1.2–1.7 s，第二次 0.11–0.14 s。上面的基准包含了选词时的预查，冷缓存场景没有单独计入 p50/p95。
 - 没有守护进程时，`uniflo grep` 在本进程里补齐索引；落后很多或首次运行时要几分钟（首建约 14 min，不节流时会更快，未单独测）。
 - 未验证：
   - Linux / Windows 的缓存目录与索引行为（只在 macOS 上跑过）。
   - 多个客户端同时检索时的延迟（基准是串行请求）。
   - `uniflo grep` 不连守护进程、在真实数据上的首次构建耗时。
+
+## 短词扫描有界化（team-lead 跟进，19:10–19:30）
+
+问题：只有 < 3 字符的词时要全表 LIKE，本机 15–40 s。中文 2 字词（缓存、部署、报错）恰恰最常见。
+
+完成条件：
+- 常见短词凑够一页就停，远低于 1 s；
+- 扫描有 2 s 预算，超时返回已找到的部分，带 `partial: true` 和 `scanned_until`；
+- schema、文档、CLI 提示同步；
+- 合成数据测试覆盖提前停止和预算耗尽；
+- 真实数据重测 5 个常见 + 5 个罕见的 2 字词。
+
+改动：
+- `Fts::scan_like`：按会话 `updated_at` 从新到旧，在每个会话的行号区间上执行 `LIKE`，每 1024 行一条语句。用一个最小堆维护前 `offset + limit` 个会话的最新命中时间；下一个会话的 `updated_at` 不晚于堆顶时停止，此时这一页是精确的，`total` 为下限，带 `scanned_until`。每条语句之间检查 `LIKE_BUDGET`（2 s，`FtsOptions::like_budget` 可注入），超时返回 `partial: true`。
+- 带 ≥ 3 字符词的查询路径不变。
+- `SearchResponse` 新增可选字段 `partial`（false 时不输出）和 `scanned_until`，只增不改。
+- `uniflo grep` 的统计行在提前停止时显示 `N of M+`，`partial` 时多打一行提示。
+- 同步 docs/schema.md、api.md、search.md、ADR-0008、DEVELOPMENT.md 性能预算。
+
+测试：
+- `crates/uniflo-search/tests/fts.rs::short_terms_stop_early_and_within_their_budget`：
+  - 30 个会话各含「缓存」，`limit=5` 得到最新的 5 个会话；会话内命中按新到旧；`total < 30` 且带 `scanned_until`；翻第二页得到接下来的 5 个。
+  - 罕见词「鳕鱼」完整扫描，无 `scanned_until`。
+  - `like_budget = 0` 时同一查询返回 `partial: true`、结果为空。
+  - ≥ 3 字符的词不受预算影响（total 30）。
+- `grep::tests::footer_flags_lower_bounds_and_partial_scans`，以及 schema 线上形状测试的新字段。
+
+真实数据（release，`127.0.0.1:7421`，真实家目录，测完已停；只输出计数与耗时）：
+- 基准：先用 `/usr/bin/sqlite3 -readonly` 在索引上一次全表扫描，数出各词实际命中的会话数。耗时 54.1 s（user 29.8 s）。
+- 每个词查 5 次（`/tmp/uniflo-fts-bench/scripts/short.py`），机器负载 12–20。
+
+| 常见词 | 实际会话数 | 5 次（ms） | 结果 / total | partial | 往回扫到 |
+|---|---|---|---|---|---|
+| 缓存 | 2710 | 993.9 27.9 27.9 27.5 29.0 | 20 / 22+ | false | 0.2 天 |
+| 部署 | 2882 | 85.7 31.9 32.7 33.6 30.4 | 20 / 25+ | false | 0.3 天 |
+| 报错 | 2099 | 29.1 27.9 28.9 28.4 28.6 | 20 / 21+ | false | 0.3 天 |
+| 测试 | 3879 | 24.5 22.6 24.0 21.2 24.0 | 20 / 21+ | false | 0.2 天 |
+| 性能 | 1400 | 344.3 78.7 63.3 65.1 64.4 | 20 / 24+ | false | 0.6 天 |
+
+常见词合计 n=25：p50 29.0 ms，p95 344.3 ms，最大 993.9 ms（缓存冷时的首次）。
+
+| 罕见词 | 实际会话数 | 5 次（ms） | 找到 | partial | 往回扫到 |
+|---|---|---|---|---|---|
+| 火锅 | 3 | 2010.3 2002.5 2002.5 2003.1 2000.9 | 2 | true | 13.1 天 |
+| 足球 | 4 | 2008.2 2001.6 2029.8 2002.8 2005.3 | 3 | true | 13.4 天 |
+| 诗歌 | 9 | 2002.8 2008.4 2002.0 2000.9 2005.5 | 3 | true | 25.1 天 |
+| 瑜伽 | 12 | 2010.6 2006.2 2001.2 2003.3 2001.4 | 3 | true | 27.7 天 |
+| 熊猫 | 15 | 2002.3 2006.6 2040.5 2002.4 2010.7 | 7 | true | 25.1 天 |
+
+罕见词合计 n=25：p50 2003.1 ms，p95 2029.8 ms，最大 2040.5 ms。
+
+- 罕见词全部按预算在约 2 s 返回 `partial`，2 s 内往回覆盖约 13–28 天的会话；更早的命中要靠加长检索词。
+- `uniflo grep`（真实二进制）：
+  - `grep 缓存 -n 5`：5 个会话、14 条命中，stderr 为 `5 of 10+ matching sessions`。
+  - `grep 火锅 -n 5`：1 个会话，stderr 为 `1 of 1+ matching sessions`，并另起一行提示时间预算耗尽、某时间点之前的会话未搜索、可加长检索词。
+- 回归：同一 daemon 重跑 `bench.py`。
+  - ≥ 3 字符的词：中文 p50 3.8 / p95 23.2 ms，代码 19.8 / 71.6 ms，合计 12.7 / 64.6 ms，没有退化。
+  - 其中的短词：缓存 200.7 / 44.2 / 38.0 ms，性能 131.3 / 71.8 / 93.0，测试 25–28，fn 25–35，ok 23–26。
+- `scripts/verify.sh --e2e`：
+  - 第一次失败：clippy `items-after-test-module`，因为 `grep.rs` 的测试模块不在文件末尾；移到末尾后修复。
+  - 重跑通过，exit 0，墙钟 28.9 s；workspace 测试 152 passed，0 failed；e2e 34 passed，0 failed；smoke 中 `--no-fts` 下的 503 断言通过。
 
 ## 提交
 
@@ -150,5 +211,6 @@
 - `555f8a2` feat(search): SQLite FTS5 trigram 全文索引与查询
 - `ef25fca` feat(gateway): 新增 /v1/search 与 events?around= 窗口
 - `8b1ea12` feat(cli): 新增 uniflo grep 与 daemon --no-fts
+- `c91cbf9` feat(search): 只有短词的全文检索改为有界扫描
 
 没有推送、建分支或打 tag。7421 上的测试守护进程已停止；7311 上的用户守护进程未动。真实缓存里留有 `fts-v1.sqlite`（约 5.58 GB），可以删除。
