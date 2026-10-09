@@ -73,6 +73,13 @@ fn short_path(p: &str) -> String {
     }
 }
 
+/// Local `YYYY-MM-DD HH:MM`.
+pub fn date_time(ms: i64) -> String {
+    chrono::DateTime::from_timestamp_millis(ms)
+        .map(|dt| chrono::DateTime::<chrono::Local>::from(dt).format("%Y-%m-%d %H:%M").to_string())
+        .unwrap_or_else(|| "?".into())
+}
+
 fn clock(ms: i64) -> String {
     if ms <= 0 {
         return "--:--:--".into();

@@ -42,7 +42,10 @@ uniflo ls --tsv -n 500 | fzf --with-nth 2.. --delimiter '\t' | cut -f1 | xargs u
 - 能搜到的内容：user / assistant 正文、reasoning（隐藏的 `[redacted]` 除外）、tool_call 的工具名和参数值（前 2 KB）、tool_result 输出（前 4 KB）、system 的 subtype。同一事件 id 只保留最新版本，流式 `partial` 的旧内容搜不到。
 - `filter=` 就是上面的会话搜索语法（过滤器和模糊词都可以），只在匹配的会话里找：`filter=h:claude in:uniflo since:7d`。`kinds=` 限定事件 kind。
 - 排序：按会话分组，分数 = bm25 × `1 + 1/(1 + 距今天数/30)`，天数按会话 `updated_at` 计；每个会话最多 3 条命中，最好的在前。
-- 任一正向词少于 3 个字符（trigram 的下限，如 `ok`、`缓存`）时改为子串扫描：结果按时间倒序，`order` 为 `recent`、`score` 为 0。同时有 ≥ 3 字符的词时，只在它们的命中里扫描，很快；只有短词时要扫全部正文，在大索引上要十几秒以上，能加长就加长（`缓存击穿`）。
+- 任一正向词少于 3 个字符（trigram 的下限，如 `ok`、`缓存`）时改为子串扫描，结果按时间倒序，`order` 为 `recent`、`score` 为 0。
+  - 同时有 ≥ 3 字符的词时，只在它们的命中里扫描，完整且很快。
+  - 只有短词时，从最近活动的会话往回逐个扫。凑够这一页的会话、且剩下的会话不可能有更新的命中时就停：响应带 `scanned_until`，`total` 只是下限，`uniflo grep` 显示为 `20 of 23+`。
+  - 扫描最多 2 s。到时间就返回已找到的命中并带 `partial: true`，`uniflo grep` 会多打一行提示。罕见的短词可能因此找不全，加长成 ≥ 3 字符的词（`缓存击穿`）就能完整检索。
 - `snippet` 是命中附近的一段文本，高亮区间用 `\u0002` … `\u0003` 包起来；换行已替换为空格。用命中的 `event` 调 `GET /v1/sessions/{key}/events?around=<event>` 打开上下文。
 - 索引还在构建时结果不完整：响应带 `indexing: true` 和 `progress {done, total, events}`。
 

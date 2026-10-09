@@ -21,6 +21,15 @@ pub struct SearchResponse {
     pub indexing: bool,
     pub progress: IndexProgress,
     pub results: Vec<SearchSession>,
+    /// The substring scan of a short-term query ran out of time: `results` are the newest matches
+    /// it found, older ones may be missing.
+    #[serde(default, skip_serializing_if = "crate::is_false")]
+    pub partial: bool,
+    /// The substring scan stopped before the oldest sessions (enough results, or `partial`):
+    /// sessions last active at or before this time (Unix ms) may not have been searched, and
+    /// `total` is a lower bound.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scanned_until: Option<i64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -116,6 +125,8 @@ mod tests {
                     snippet: "修复\u{2}缓存击穿\u{3}问题".into(),
                 }],
             }],
+            partial: false,
+            scanned_until: None,
         };
         let v = serde_json::to_value(&r).unwrap();
         assert_eq!(
@@ -126,5 +137,9 @@ mod tests {
                     "hits":[{"event":"u1","kind":"user_message","ts":5,"snippet":"修复\u{2}缓存击穿\u{3}问题"}]}]})
         );
         assert_eq!(serde_json::from_value::<SearchResponse>(v).unwrap(), r);
+
+        let cut = SearchResponse { partial: true, scanned_until: Some(4), ..r };
+        let v = serde_json::to_value(&cut).unwrap();
+        assert_eq!((&v["partial"], &v["scanned_until"]), (&json!(true), &json!(4)));
     }
 }

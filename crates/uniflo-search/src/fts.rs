@@ -17,7 +17,8 @@ use crate::{Query as SessionQuery, search as filter_sessions};
 use anyhow::Result;
 use rusqlite::{Connection, params_from_iter, types::Value as Sql};
 use std::cell::Cell;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -38,6 +39,10 @@ const COMMIT_EVERY: Duration = Duration::from_millis(500);
 const HITS_PER_SESSION: usize = 3;
 /// Snippet window in trigram tokens (≈ characters).
 const SNIPPET_TOKENS: u32 = 40;
+/// Wall-clock budget of a short-term (`LIKE`) scan; past it the query answers with what it found.
+pub const LIKE_BUDGET: Duration = Duration::from_secs(2);
+/// Rows per `LIKE` statement, so the budget is checked inside large sessions too.
+const LIKE_CHUNK: i64 = 1024;
 const DAY_MS: f64 = 86_400_000.0;
 
 #[derive(Debug, Clone)]
@@ -52,6 +57,8 @@ pub struct FtsOptions {
     pub page: usize,
     /// Backfill throttle: after each page the writer sleeps `pause ×` the time the page took.
     pub pause: f32,
+    /// See [`LIKE_BUDGET`].
+    pub like_budget: Duration,
 }
 
 impl Default for FtsOptions {
@@ -62,6 +69,7 @@ impl Default for FtsOptions {
             reconcile: Duration::from_secs(30),
             page: 500,
             pause: 0.5,
+            like_budget: LIKE_BUDGET,
         }
     }
 }
@@ -298,44 +306,40 @@ impl Fts {
         let conn = pooled.unchecked_transaction()?;
         let kinds: Option<HashSet<i64>> =
             p.kinds.as_ref().map(|ks| ks.iter().filter_map(|k| store::kind_code(k.trim())).collect());
-        // Relevance reads the FTS index alone (session and kind are in the row id). `LIKE` terms
-        // need the stored text, so only those queries join `docs`; short terms also order by time.
-        let needs_text = !plan.like.is_empty() || !plan.not_like.is_empty();
-        let key = if plan.recent() { "d.ts" } else { "bm25(docs_fts)" };
-        let mut sql = match &plan.fts {
-            Some(_) if !needs_text => "SELECT rowid, bm25(docs_fts) FROM docs_fts WHERE docs_fts MATCH ?".to_owned(),
-            Some(_) => {
-                format!("SELECT d.id, {key} FROM docs_fts JOIN docs d ON d.id = docs_fts.rowid WHERE docs_fts MATCH ?")
-            }
-            None => "SELECT d.id, d.ts FROM docs d WHERE 1".to_owned(),
-        };
-        let mut args: Vec<Sql> = plan.fts.iter().map(|e| Sql::Text(e.clone())).collect();
-        for (pats, op) in [(&plan.like, "LIKE"), (&plan.not_like, "NOT LIKE")] {
-            for pat in pats {
-                sql.push_str(&format!(" AND d.text {op} ? ESCAPE '\\'"));
-                args.push(Sql::Text(pat.clone()));
-            }
-        }
-
         let mut groups: HashMap<i64, Vec<Cand>> = HashMap::new();
-        {
-            let mut st = conn.prepare_cached(&sql)?;
-            let mut rows = st.query(params_from_iter(args.iter()))?;
-            while let Some(r) = rows.next()? {
-                let id: i64 = r.get(0)?;
-                let sid = store::sid_of(id);
-                if kinds.as_ref().is_some_and(|k| !k.contains(&store::kind_of(id)))
-                    || allowed.as_ref().is_some_and(|a| !a.contains(&sid))
-                {
-                    continue;
+        let mut end = ScanEnd::default();
+        match &plan.fts {
+            Some(expr) => {
+                // Relevance reads the FTS index alone (session and kind are in the row id). `LIKE`
+                // terms need the stored text, so only those queries join `docs`; short terms also
+                // order by time.
+                let (cond, pats) = like_clauses(&plan);
+                let sql = if cond.is_empty() {
+                    "SELECT rowid, bm25(docs_fts) FROM docs_fts WHERE docs_fts MATCH ?".to_owned()
+                } else {
+                    let key = if plan.recent() { "d.ts" } else { "bm25(docs_fts)" };
+                    format!(
+                        "SELECT d.id, {key} FROM docs_fts JOIN docs d ON d.id = docs_fts.rowid \
+                         WHERE docs_fts MATCH ?{cond}"
+                    )
+                };
+                let args = std::iter::once(Sql::Text(expr.clone())).chain(pats);
+                let mut st = conn.prepare_cached(&sql)?;
+                let mut rows = st.query(params_from_iter(args))?;
+                while let Some(r) = rows.next()? {
+                    let id: i64 = r.get(0)?;
+                    if kinds.as_ref().is_some_and(|k| !k.contains(&store::kind_of(id)))
+                        || allowed.as_ref().is_some_and(|a| !a.contains(&store::sid_of(id)))
+                    {
+                        continue;
+                    }
+                    let v: f64 = r.get(1)?;
+                    push_hit(&mut groups, Cand { id, key: if plan.recent() { v } else { -v } });
                 }
-                let v: f64 = r.get(1)?;
-                let hits = groups.entry(sid).or_default();
-                hits.push(Cand { id, key: if plan.recent() { v } else { -v } });
-                if hits.len() > HITS_PER_SESSION * 4 {
-                    hits.sort_by(Cand::best_first);
-                    hits.truncate(HITS_PER_SESSION);
-                }
+            }
+            None => {
+                let need = p.offset + limit;
+                end = self.scan_like(&conn, &plan, kinds.as_ref(), allowed.as_ref(), need, &mut groups)?;
             }
         }
         let mut ranked: Vec<(Session, f64, Vec<Cand>)> = Vec::with_capacity(groups.len());
@@ -380,7 +384,84 @@ impl Fts {
             indexing,
             progress,
             results,
+            partial: end.partial,
+            scanned_until: end.scanned_until,
         })
+    }
+
+    /// Short terms only, so no trigram narrows the rows: `LIKE` over each session's rows, the most
+    /// recently active session first. A session's `updated_at` bounds its events' times, so the
+    /// scan stops once `need` sessions are found and the next session cannot hold a newer hit than
+    /// the `need`-th, or when the time budget runs out.
+    fn scan_like(
+        &self,
+        conn: &Connection,
+        plan: &query::Plan,
+        kinds: Option<&HashSet<i64>>,
+        allowed: Option<&HashSet<i64>>,
+        need: usize,
+        groups: &mut HashMap<i64, Vec<Cand>>,
+    ) -> Result<ScanEnd> {
+        let t0 = Instant::now();
+        let budget = self.inner.opts.like_budget;
+        let (cond, pats) = like_clauses(plan);
+        let mut st =
+            conn.prepare_cached(&format!("SELECT d.id, d.ts FROM docs d WHERE d.id >= ? AND d.id < ?{cond}"))?;
+        let mut last = conn.prepare_cached("SELECT max(id) FROM docs WHERE id >= ?1 AND id < ?2")?;
+        // Newest hit of each of the best `need` sessions so far; the smallest is the page's cut-off.
+        let mut best: BinaryHeap<Reverse<i64>> = BinaryHeap::new();
+        for (sid, upd) in self.by_recency(allowed) {
+            if best.len() >= need && best.peek().is_some_and(|Reverse(ts)| *ts >= upd) {
+                return Ok(ScanEnd { partial: false, scanned_until: Some(upd) });
+            }
+            let ids = store::id_range(sid);
+            let Some(max) = last.query_row([ids.start, ids.end], |r| r.get::<_, Option<i64>>(0))? else { continue };
+            let mut newest: Option<i64> = None;
+            let mut lo = ids.start;
+            while lo <= max {
+                if t0.elapsed() >= budget {
+                    return Ok(ScanEnd { partial: true, scanned_until: Some(upd) });
+                }
+                let hi = (lo + store::id_span(LIKE_CHUNK)).min(max + 1);
+                let args = [Sql::Integer(lo), Sql::Integer(hi)].into_iter().chain(pats.iter().cloned());
+                let mut rows = st.query(params_from_iter(args))?;
+                while let Some(r) = rows.next()? {
+                    let id: i64 = r.get(0)?;
+                    if kinds.is_some_and(|k| !k.contains(&store::kind_of(id))) {
+                        continue;
+                    }
+                    let ts: i64 = r.get(1)?;
+                    newest = newest.max(Some(ts));
+                    push_hit(groups, Cand { id, key: ts as f64 });
+                }
+                lo = hi;
+            }
+            if let Some(ts) = newest {
+                best.push(Reverse(ts));
+                if best.len() > need {
+                    best.pop();
+                }
+            }
+        }
+        Ok(ScanEnd::default())
+    }
+
+    /// Indexed sessions as `(sid, updated_at)`, most recently active first.
+    fn by_recency(&self, allowed: Option<&HashSet<i64>>) -> Vec<(i64, i64)> {
+        let live: HashMap<String, i64> =
+            self.inner.engine.sessions().into_iter().map(|s| (s.key, s.updated_at)).collect();
+        let sh = self.inner.shared.lock().unwrap();
+        let mut out: Vec<(i64, i64)> = sh
+            .sessions
+            .iter()
+            .filter(|(_, r)| allowed.is_none_or(|a| a.contains(&r.sid)))
+            .filter_map(|(k, r)| {
+                let pinned = r.meta.as_ref().filter(|_| r.pinned).map(|m| m.updated_at);
+                Some((r.sid, live.get(k).copied().or(pinned)?))
+            })
+            .collect();
+        out.sort_by(|a, b| b.1.cmp(&a.1).then(b.0.cmp(&a.0)));
+        out
     }
 
     /// Session ids passing a `uniflo ls`-syntax filter, through the same matcher as `/v1/sessions`.
@@ -469,6 +550,36 @@ impl Drop for Pooled<'_> {
 /// Ranking weight `1 + 1/(1 + age_days/30)`: ×2 today, ×1.5 a month ago, →1 for old sessions.
 fn recency(now: i64, t: i64) -> f64 {
     1.0 + 1.0 / (1.0 + (now - t).max(0) as f64 / DAY_MS / 30.0)
+}
+
+/// Where a short-term scan stopped (see [`SearchResponse::scanned_until`]).
+#[derive(Debug, Default)]
+struct ScanEnd {
+    partial: bool,
+    scanned_until: Option<i64>,
+}
+
+/// `AND d.text [NOT] LIKE ?` for the plan's short terms, and their patterns.
+fn like_clauses(plan: &query::Plan) -> (String, Vec<Sql>) {
+    let mut cond = String::new();
+    let mut args = Vec::new();
+    for (pats, op) in [(&plan.like, "LIKE"), (&plan.not_like, "NOT LIKE")] {
+        for pat in pats {
+            cond.push_str(&format!(" AND d.text {op} ? ESCAPE '\\'"));
+            args.push(Sql::Text(pat.clone()));
+        }
+    }
+    (cond, args)
+}
+
+/// Keep a session's candidates bounded while scanning; the best ones are picked at the end.
+fn push_hit(groups: &mut HashMap<i64, Vec<Cand>>, c: Cand) {
+    let hits = groups.entry(store::sid_of(c.id)).or_default();
+    hits.push(c);
+    if hits.len() > HITS_PER_SESSION * 4 {
+        hits.sort_by(Cand::best_first);
+        hits.truncate(HITS_PER_SESSION);
+    }
 }
 
 #[derive(Debug, Clone, Copy)]

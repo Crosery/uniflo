@@ -212,6 +212,50 @@ fn filter_exclusion_phrase_and_recency() {
     assert_eq!(page.results[0].session, r.results[1].session);
 }
 
+/// Short terms scan the newest sessions first, stop once the page is settled, and give up at the
+/// time budget with what they found.
+#[test]
+fn short_terms_stop_early_and_within_their_budget() {
+    let env = Env::new();
+    let now = now_ms();
+    // 30 sessions mention 缓存 three times each, c00 the most recent; only the oldest has 鳕鱼.
+    for s in 0..30i64 {
+        let t = now - (s + 1) * 600_000;
+        let body: String = (0..3).map(|i| user(&format!("u{i}"), t + i, &format!("第 {i} 次排查缓存"))).collect();
+        std::fs::write(env.path(&format!("claude/-w-demo/c{s:02}.jsonl")), body).unwrap();
+    }
+    std::fs::write(env.path("claude/-w-demo/old.jsonl"), user("o1", now - 30 * DAY, "晚饭吃鳕鱼")).unwrap();
+    let engine = env.engine();
+    let fts = env.fts(&engine, FtsOptions::default());
+    idle(&fts);
+
+    let page =
+        |offset: usize| search_with(&fts, SearchParams { q: "缓存".into(), limit: 5, offset, ..Default::default() });
+    let r = page(0);
+    assert_eq!(r.order, SearchOrder::Recent);
+    assert_eq!(sessions(&r), vec!["claude:c00", "claude:c01", "claude:c02", "claude:c03", "claude:c04"]);
+    let hits: Vec<&str> = r.results[0].hits.iter().map(|h| h.event.as_str()).collect();
+    assert_eq!(hits, vec!["u2", "u1", "u0"], "newest first");
+    assert!(!r.partial);
+    assert!(r.total < 30 && r.scanned_until.is_some(), "stopped early: {} sessions, {:?}", r.total, r.scanned_until);
+    assert_eq!(sessions(&page(5)), vec!["claude:c05", "claude:c06", "claude:c07", "claude:c08", "claude:c09"]);
+
+    // A rare term reads everything: complete, nothing cut.
+    let r = search(&fts, "鳕鱼");
+    assert_eq!(sessions(&r), vec!["claude:old"]);
+    assert!(r.total == 1 && !r.partial && r.scanned_until.is_none(), "{r:?}");
+    drop(fts);
+
+    // Out of time before reaching it: whatever was found, flagged as partial.
+    let fts = env.fts(&engine, FtsOptions { like_budget: Duration::ZERO, ..Default::default() });
+    idle(&fts);
+    let r = search(&fts, "鳕鱼");
+    assert!(r.partial && r.results.is_empty() && r.scanned_until.is_some(), "{r:?}");
+    // Terms of 3+ characters never take the budgeted scan.
+    let r = search(&fts, "排查缓存");
+    assert!(r.total == 30 && !r.partial && r.scanned_until.is_none(), "{r:?}");
+}
+
 /// Scenario: 增量更新与 partial 覆盖.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn live_appends_and_partial_overwrites() {

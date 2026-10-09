@@ -66,6 +66,16 @@ pub fn sid_of(id: i64) -> i64 {
     id >> 32
 }
 
+/// Row ids of one session: `sid << 32 ..`, in insertion order.
+pub fn id_range(sid: i64) -> std::ops::Range<i64> {
+    sid << 32..(sid + 1) << 32
+}
+
+/// Width of a row-id range covering `rows` consecutive rows.
+pub fn id_span(rows: i64) -> i64 {
+    rows << 3
+}
+
 pub fn kind_of(id: i64) -> i64 {
     id & 7
 }
