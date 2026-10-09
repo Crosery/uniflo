@@ -160,6 +160,14 @@ impl Adapter for CursorAgent {
         let (inner, ide) = split(cursor);
         self.transcripts.changed(src, &inner) || ide != Some(sig(&self.ide.db))
     }
+
+    /// CLI transcripts only; the IDE store is one database shared by every composer.
+    fn cleanup_targets(&self, src: &Path, id: &str) -> Option<Vec<PathBuf>> {
+        if self.is_ide(src) {
+            return None;
+        }
+        self.transcripts.cleanup_targets(src, id)
+    }
 }
 
 /// Cursor wraps the human's prompt in `<user_query>` tags.

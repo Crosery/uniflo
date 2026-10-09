@@ -57,6 +57,11 @@ impl LineDecoder for Kiro {
         Some(SourceId { id: p.file_stem()?.to_str()?.to_owned(), parent: None })
     }
 
+    /// `<uuid>.jsonl` and its `<uuid>.json` sidecar.
+    fn cleanup_targets(&self, src: &Path) -> Option<Vec<PathBuf>> {
+        uniflo_core::cleanup::targets::with_siblings(src, src.file_stem()?.to_str()?)
+    }
+
     fn max_depth(&self) -> usize {
         0
     }

@@ -118,6 +118,11 @@ impl LineDecoder for Grok {
         Some(SourceId { id: p.parent()?.file_name()?.to_str()?.to_owned(), parent: None })
     }
 
+    /// `<session uuid>/` holds this session's stream, sidecars and subagent notes only.
+    fn cleanup_targets(&self, src: &Path) -> Option<Vec<PathBuf>> {
+        uniflo_core::cleanup::targets::parent_dir(src)
+    }
+
     fn max_depth(&self) -> usize {
         2
     }

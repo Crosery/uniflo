@@ -164,6 +164,11 @@ impl LineDecoder for Kimi {
         Some(SourceId { id: p.ancestors().nth(3)?.file_name()?.to_str()?.to_owned(), parent: None })
     }
 
+    /// The session directory (`state.json`, every agent's wire); the shared index stays.
+    fn cleanup_targets(&self, src: &Path) -> Option<Vec<PathBuf>> {
+        Some(vec![Self::session_dir(src).to_path_buf()])
+    }
+
     fn max_depth(&self) -> usize {
         4
     }

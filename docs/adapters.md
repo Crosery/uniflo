@@ -91,9 +91,15 @@
 | `gemini` | 是 | `src`（`chats/` 目录与项目临时目录是共享的） |
 | `antigravity` | 是 | 只有 `transcript.jsonl`：`brain/<id>/` 其余内容是用户的产物与上传 |
 | `reasonix` | 是 | `<名字>.events.jsonl` + 同名快照 `<名字>.jsonl` 与 `<名字>.*` |
-| `cursor` | 是 | `agent-transcripts/<id>/`（只含该会话的转录） |
+| `cursor` | 是 | `agent-transcripts/<id>/`（只含该会话的转录）；只在 IDE 库里的会话不支持（`state.vscdb` 由所有对话共用） |
 | `dsh` | 是 | 会话目录 `<id>/`（转录与 `session.lock`） |
-| `opencode` / `kilo` / `zcode` / `mimocode` / `minimax` / `hermes` | 否 | SQLite，多会话共用一个库 |
+| `codebuddy` | 是 | 同 WorkBuddy |
+| `grok` | 是 | 会话目录 `<会话 uuid>/`（`updates.jsonl` 与 `summary.json`、`usage.json`、`events.jsonl`、`subagents/`）；子会话是各自独立的目录 |
+| `kiro` | 是 | `src` + 同名 `<uuid>.json` |
+| `kimi` | 是 | 会话目录 `session_<uuid>/`（`state.json` 与各 agent 的 `wire.jsonl`）；共享的会话索引不动 |
+| `opencode` / `kilo` / `zcode` / `mimocode` / `minimax` / `hermes` / `copilot` / `devin` | 否 | SQLite，多会话共用一个库 |
+| `openclaw` | 否 | 新版是多会话共用的库；旧版 JSONL 与之合并显示，不单独移走 |
+| `craft` | 否 | Craft 整份重写会话文件并自行管理会话目录，不单独移走 |
 | `cline` / `roo` / `kodu` | 否 | 任务目录由 VS Code 扩展管理（扩展另有任务历史），不单独移走 |
 
 新增 harness 时：一文件一会话的 JSONL/JSON，在 decoder 里加一行声明，用 `uniflo_core::cleanup::targets` 的 `file(src)`（只有主文件）、`with_siblings(src, stem)`（主文件 + 同目录 `<stem>/`、`<stem>.*`、`.<文件名>.*`）或 `parent_dir(src)`（会话独占的目录），并把 id 加进 `crates/uniflo-adapters/tests/cleanup.rs` 的 `SUPPORTED` / `UNSUPPORTED`。目录里若混有其他会话的源，计划会以 `shared_target` 拒绝；不确定目录是否独占时只声明 `file(src)`。

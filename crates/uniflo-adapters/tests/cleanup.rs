@@ -18,9 +18,16 @@ const SUPPORTED: &[&str] = &[
     "reasonix",
     "cursor",
     "dsh",
+    "codebuddy",
+    "grok",
+    "kiro",
+    "kimi",
 ];
 
-const UNSUPPORTED: &[&str] = &["opencode", "kilo", "zcode", "mimocode", "minimax", "hermes", "cline", "roo", "kodu"];
+const UNSUPPORTED: &[&str] = &[
+    "opencode", "kilo", "zcode", "mimocode", "minimax", "hermes", "cline", "roo", "kodu", "copilot", "devin",
+    "openclaw", "craft",
+];
 
 #[test]
 fn cleanup_support_matrix() {

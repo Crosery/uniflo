@@ -207,6 +207,10 @@ impl<D: Sidecar> Adapter for WithSidecars<D> {
         self.inner.history(src, session_id, q)
     }
 
+    fn cleanup_targets(&self, src: &Path, id: &str) -> Option<Vec<PathBuf>> {
+        self.inner.cleanup_targets(src, id)
+    }
+
     fn read_all(&self, src: &Path, sessions: &[String], sink: &mut dyn FnMut(&str, Record)) -> Result<Cursor> {
         let mut content = false;
         let mut held: Vec<(String, Record)> = Vec::new();
