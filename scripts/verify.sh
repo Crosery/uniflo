@@ -24,6 +24,9 @@ done
 step "branch invariants"
 node scripts/check-branch-invariants.mjs
 
+step "third-party notices"
+node scripts/third-party-notices.mjs --check
+
 step "tests"
 cargo test --workspace -q
 
