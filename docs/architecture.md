@@ -22,6 +22,7 @@ Engine（单写者循环）                  ← uniflo-core
    ▼
 Gateway（axum）                       ← uniflo-gateway
    REST 快照 · SSE / NDJSON / WebSocket 实时流 · /v1/search（只读 FTS 索引）
+   写接口（write::require_write）：/v1/cleanup/* → uniflo-core::cleanup
    ▼
 桌面端 / 网页端 / CLI（uniflo ls / tail / watch）
 ```
@@ -70,13 +71,33 @@ Session.usage（随 session envelope 推送）· /v1/usage 聚合 · /v1/session
 - **全量读**：`Adapter::read_all` 默认先取摘要元数据，再逐会话 `history()` 全量重放；JSONL 适配器按 4 MiB 分块顺序解码（单行更长时窗口翻倍），Hermes 覆盖它以追加会话级 usage。
 - **代价**（本机约 17 GB 会话数据、38 万步）：冷启动后台全量读约 12 s，缓存 36 MB，常驻内存比不建用量索引时多约 130 MB；有缓存时启动到 `/v1/health` 与改动前持平，账本恢复约 1 s。
 
+## 会话清理与归档
+
+用户确认后把会话源文件移入系统回收站，先写精简归档；决策与安全边界见 `docs/decisions/ADR-0006-会话清理与写接口.md`，接口见 `docs/api.md#会话清理`。代码在 `uniflo-core::cleanup`（计划与执行、`trash`、`targets`）、`uniflo-core::archive`（归档存储、墓碑、`compact` 精简与 zstd 编解码），引擎胶水在 `engine_archive.rs`。
+
+```text
+POST /v1/cleanup/plan ─► Cleanup::plan：Engine::cleanup_view() + Adapter::cleanup_targets → 判定、文件戳（只读）
+POST …/execute ─► Cleanup::execute（同一时间只跑一个），每个会话：
+   ├─ 重新判定、比对文件戳 → 读文件算 SHA-256
+   ├─ Engine::archive_material（全量读 + 去重 + 补 usage 模型）→ compact → archive/<harness>/<id>.jsonl.zst
+   ├─ 清单写 cleanup.log.jsonl（fsync）+ index.json → 再比一次文件戳
+   ├─ Engine::retire：先在内存立墓碑，再把源换成归档条目、用量账本换成归档账本（广播 session，archived: true）
+   └─ Trash::trash 逐个目标 → 持久化 tombstones.json；第一个就失败则 unretire 并撤销归档
+```
+
+- **归档会话**：`Entry.archive` 指向归档文件；`history()` 从归档解码分页，摘要、全文索引、用量都走这一条，全文索引不会因为源没了而删掉它（引擎不对归档会话发 `removed`）。启动时 `index()` 末尾 `load_archived` 把没有源的归档条目放回会话表；用量账本由归档重建，键是归档路径。
+- **墓碑**：`apply()` 丢弃墓碑下的源的读取结果（防止清理进行中的读取把会话写回）；`index()` / 新源接纳前调 `ArchiveStore::admit`：内容与清单一致（大小 + SHA-256）才撤销墓碑并作为源读取，不一致的按 (大小, mtime) 记住、不再重复哈希。文件监听命中墓碑下的路径时立即重扫，所以从回收站还原的源通常 1 s 内出现。
+- **还原**：源重新出现时 `apply()` 用源替换归档条目、移除归档用量账本（`unarchive`），不会重复计数；归档文件和 `index.json` 条目保留到 `DELETE /v1/archive/{key}`。
+- **回收站**：`Trash` trait；`SystemTrash`（`trash` crate，macOS 走 `NSFileManager`）、`DirTrash`（测试、`UNIFLO_TRASH_DIR`）、`NoTrash`（设了 `UNIFLO_HOME` 而没设 `UNIFLO_TRASH_DIR`）。
+- 依赖：`uniflo-core` 新增 `sha2`、`trash`，zstd 复用已有的 `ruzstd`；网关只持有 `Option<Arc<Cleanup>>`，为 `None` 时清理接口返回 503。
+
 ## 自有目录
 
 `uniflo-core::paths` 给出 Uniflo 自己的目录（不是 harness 的）：
 
 | 函数 | macOS 默认 | 覆盖 |
 |---|---|---|
-| `data_dir()` | `~/Library/Application Support/uniflo`（`pricing/` 在这里） | `UNIFLO_DATA_DIR` |
+| `data_dir()` | `~/Library/Application Support/uniflo`（`pricing/`、会话清理的 `archive/` 在这里） | `UNIFLO_DATA_DIR` |
 | `config_dir()` | `~/Library/Application Support/uniflo` | `UNIFLO_CONFIG_DIR` |
 | `cache_dir()` | `~/Library/Caches/uniflo` | `UNIFLO_CACHE_DIR` |
 
@@ -119,5 +140,6 @@ Session.usage（随 session envelope 推送）· /v1/usage 聚合 · /v1/session
 
 - 新 harness：实现 `LineDecoder`（一文件一会话的 JSONL）或 `Adapter`（其他），见 `docs/adapters.md`。
 - 新传输：基于 `uniflo_gateway::stream::envelopes()`，与 SSE/NDJSON/WS 共用过滤与截断。
+- 新写接口：挂在 `router_with` 的写路由上，经 `uniflo_gateway::write::require_write`，并登记到 `docs/api.md#写接口`。
 - 网页客户端：`examples/web/index.html` 是参考实现（快照 + `since` 续流、按 id upsert、工具结果并入调用卡片）；`crates/uniflo-gateway/src/index.html` 是内容相同的 cargo 包内副本，由网关编译进 `/demo`，修改时必须同步。
 - 嵌入式使用：直接依赖 `uniflo-core` + `uniflo-adapters`，`Engine::new(all(), opts)` → `index()` → `run()`，无需网关；不跑 `run()` 时用 `index_usage()` 一次性建好用量账本，再调 `usage_report()` / `session_usage()` / `models()`。`/v1/usage` 的参数解析与会话过滤在 `uniflo_gateway::usage::UsageParams`，CLI 本地模式复用它。要全文检索再加 `uniflo-search`，`Fts::start(engine, FtsOptions::default())` → `search()`。

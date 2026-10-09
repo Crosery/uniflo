@@ -59,6 +59,10 @@ pub trait LineDecoder: Send + Sync + 'static {
     fn live_roots(&self) -> Vec<PathBuf> {
         Vec::new()
     }
+    /// See [`Adapter::cleanup_targets`]; `None` (default) = cleanup unsupported.
+    fn cleanup_targets(&self, _src: &Path) -> Option<Vec<PathBuf>> {
+        None
+    }
 }
 
 /// Decode context handed to [`LineDecoder::decode`] for one record.
@@ -403,6 +407,10 @@ impl<D: LineDecoder> Adapter for JsonlAdapter<D> {
 
     fn live_roots(&self) -> Vec<PathBuf> {
         self.decoder.live_roots().into_iter().filter(|p| p.is_dir()).collect()
+    }
+
+    fn cleanup_targets(&self, src: &Path, _id: &str) -> Option<Vec<PathBuf>> {
+        self.decoder.cleanup_targets(src)
     }
 }
 

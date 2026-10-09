@@ -9,9 +9,13 @@
 //! - [`usage`]: per-step usage ledgers and their aggregations
 //! - [`paths`]: Uniflo's own data / config / cache directories
 //! - [`window`]: event windows centred on one event (search hit → transcript)
+//! - [`cleanup`]: user-confirmed session cleanup (plan → archive → trash); [`archive`] keeps
+//!   the compact transcripts of cleaned-up sessions
 
 pub mod adapter;
+pub mod archive;
 pub mod cache;
+pub mod cleanup;
 pub mod engine;
 pub mod jsonl;
 pub mod paths;

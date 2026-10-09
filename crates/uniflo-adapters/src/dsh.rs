@@ -279,6 +279,11 @@ impl Adapter for Dsh {
         None
     }
 
+    /// The session directory (`<id>/`: transcript and lock file).
+    fn cleanup_targets(&self, src: &Path, _id: &str) -> Option<Vec<PathBuf>> {
+        uniflo_core::cleanup::targets::parent_dir(src)
+    }
+
     fn discover(&self) -> Vec<PathBuf> {
         let mut out = Vec::new();
         if !self.root.is_dir() {

@@ -150,6 +150,14 @@ pub trait Adapter: Send + Sync + 'static {
     fn live_roots(&self) -> Vec<PathBuf> {
         Vec::new()
     }
+
+    /// What a user-confirmed cleanup of session `id` moves to the trash: its transcript plus
+    /// files only it owns (e.g. its sub-agent directory); missing paths are skipped. `None`:
+    /// the harness does not support cleanup (databases, files shared by sessions). Helpers in
+    /// [`crate::cleanup::targets`].
+    fn cleanup_targets(&self, _src: &Path, _id: &str) -> Option<Vec<PathBuf>> {
+        None
+    }
 }
 
 /// Recursively collect files under `root` (bounded depth) accepted by `keep`.

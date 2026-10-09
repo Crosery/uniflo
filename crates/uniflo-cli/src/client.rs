@@ -1,4 +1,4 @@
-//! Minimal HTTP/1.1 client for the local daemon (GET only, Content-Length or chunked).
+//! Minimal HTTP/1.1 client for the local daemon (GET, plus JSON writes; Content-Length or chunked).
 
 use anyhow::{Context, Result, anyhow, bail};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -34,16 +34,30 @@ impl Client {
     }
 
     pub fn get(&self, path: &str) -> Result<Resp<TcpStream>> {
+        self.request("GET", path, None)
+    }
+
+    fn request(&self, method: &str, path: &str, body: Option<&[u8]>) -> Result<Resp<TcpStream>> {
         let addr = format!("{}:{}", self.host, self.port);
         let sock = std::net::ToSocketAddrs::to_socket_addrs(&addr)?.next().ok_or_else(|| anyhow!("resolve {addr}"))?;
         let mut s = TcpStream::connect_timeout(&sock, Duration::from_millis(300))?;
         s.set_nodelay(true)?;
         let auth = self.token.as_ref().map(|t| format!("Authorization: Bearer {t}\r\n")).unwrap_or_default();
+        let extra = match (method, body) {
+            ("GET", _) => String::new(),
+            (_, Some(b)) => {
+                format!("X-Uniflo-Write: 1\r\nContent-Type: application/json\r\nContent-Length: {}\r\n", b.len())
+            }
+            (_, None) => "X-Uniflo-Write: 1\r\nContent-Length: 0\r\n".to_owned(),
+        };
         write!(
             s,
-            "GET {path} HTTP/1.1\r\nHost: {}:{}\r\n{auth}Accept: */*\r\nConnection: close\r\n\r\n",
+            "{method} {path} HTTP/1.1\r\nHost: {}:{}\r\n{auth}{extra}Accept: */*\r\nConnection: close\r\n\r\n",
             self.host, self.port
         )?;
+        if let Some(b) = body {
+            s.write_all(b)?;
+        }
         let mut reader = BufReader::new(s);
         let mut line = String::new();
         reader.read_line(&mut line)?;
@@ -65,6 +79,26 @@ impl Client {
             }
         }
         Ok(Resp { status, chunked, length, reader })
+    }
+
+    /// `POST` / `DELETE` to a write endpoint (sends `X-Uniflo-Write: 1`).
+    pub fn write_json<T: serde::de::DeserializeOwned>(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&serde_json::Value>,
+    ) -> Result<T> {
+        let body = body.map(serde_json::to_vec).transpose()?;
+        let mut r = self.request(method, path, body.as_deref())?;
+        let raw = r.body()?;
+        if r.status != 200 {
+            let msg = serde_json::from_slice::<serde_json::Value>(&raw)
+                .ok()
+                .and_then(|v| v["error"].as_str().map(str::to_owned))
+                .unwrap_or_else(|| String::from_utf8_lossy(&raw).into_owned());
+            bail!("HTTP {}: {msg}", r.status);
+        }
+        Ok(serde_json::from_slice(&raw)?)
     }
 
     pub fn get_json<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T> {

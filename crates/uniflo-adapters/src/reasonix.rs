@@ -47,6 +47,11 @@ impl LineDecoder for Reasonix {
             && under_any(p, &self.roots)
     }
 
+    /// <base>.events.jsonl and every <base>.* sibling (snapshot, meta, checkpoints).
+    fn cleanup_targets(&self, src: &Path) -> Option<Vec<PathBuf>> {
+        uniflo_core::cleanup::targets::with_siblings(src, src.file_name()?.to_str()?.strip_suffix(SUFFIX)?)
+    }
+
     fn identify(&self, p: &Path) -> Option<SourceId> {
         let id = p.file_name()?.to_str()?.strip_suffix(SUFFIX)?.to_owned();
         Some(SourceId { id, parent: None })

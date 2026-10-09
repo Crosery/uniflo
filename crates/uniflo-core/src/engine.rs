@@ -6,6 +6,7 @@
 //! touch disk except for `history`, which delegates to the adapter.
 
 use crate::adapter::{Adapter, Cursor, HistoryQuery, LiveSession, MetaPatch, ReadOutput, Record};
+use crate::archive::ArchiveStore;
 use crate::cache::{self, CacheFile, CachedSession, CachedSource};
 use crate::pricing::Pricing;
 use crate::status::{StatusTracker, Windows, effective};
@@ -25,6 +26,9 @@ use uniflo_schema::{Body, Envelope, Event, Harness, SCHEMA_VERSION, Session, Sta
 #[path = "engine_usage.rs"]
 mod usage_glue;
 pub use usage_glue::PriceSync;
+#[path = "engine_archive.rs"]
+mod archive_glue;
+pub(crate) use archive_glue::CleanupView;
 
 #[derive(Debug, Clone)]
 pub struct EngineOptions {
@@ -80,6 +84,8 @@ struct Entry {
     src: PathBuf,
     live_pid: Option<u32>,
     live_status: Option<Status>,
+    /// Archive file of a cleaned-up session (then `src` is that file too).
+    archive: Option<PathBuf>,
 }
 
 impl Entry {
@@ -102,6 +108,7 @@ impl Entry {
                 status_reason: None,
                 pid: None,
                 usage: None,
+                archived: false,
             },
             tracker: StatusTracker::default(),
             title_rank: 0,
@@ -109,6 +116,7 @@ impl Entry {
             src: src.to_path_buf(),
             live_pid: None,
             live_status: None,
+            archive: None,
         }
     }
 
@@ -263,6 +271,7 @@ pub struct Engine {
     pricing: Pricing,
     usage: RwLock<UsageIndex>,
     usage_tx: Mutex<Option<mpsc::UnboundedSender<usage_glue::UsageMsg>>>,
+    archive: Option<Arc<ArchiveStore>>,
 }
 
 impl Engine {
@@ -273,6 +282,7 @@ impl Engine {
         let probing = adapters.iter().map(|_| AtomicBool::new(false)).collect();
         let pricing = Pricing::new(opts.data_dir.as_ref().map(|d| d.join("pricing")));
         pricing.set_sync_enabled(opts.price_sync.is_some());
+        let archive = opts.data_dir.as_ref().map(|d| Arc::new(ArchiveStore::open(d.join("archive"))));
         Arc::new(Engine {
             probing,
             adapters,
@@ -289,6 +299,7 @@ impl Engine {
             pricing,
             usage: RwLock::new(UsageIndex::default()),
             usage_tx: Mutex::new(None),
+            archive,
         })
     }
 
@@ -314,11 +325,14 @@ impl Engine {
 
     /// Blocking: reads the transcript through the owning adapter.
     pub fn history(&self, key: &str, q: &HistoryQuery) -> Result<Vec<Event>> {
-        let (adapter, src, id) = {
+        let (adapter, src, id, archived) = {
             let st = self.state.read().unwrap();
             let e = st.sessions.get(key).ok_or_else(|| anyhow!("unknown session {key}"))?;
-            (self.adapters[e.adapter].clone(), e.src.clone(), e.session.id.clone())
+            (self.adapters[e.adapter].clone(), e.src.clone(), e.session.id.clone(), e.archive.is_some())
         };
+        if archived {
+            return Self::archived_history(&src, q);
+        }
         adapter.history(&src, &id, q)
     }
 
@@ -406,6 +420,10 @@ impl Engine {
     // ---------------------------------------------------------------- apply
 
     fn apply(&self, st: &mut State, adapter: usize, src: &Path, out: ReadOutput, live: bool, now: i64) -> Vec<Pending> {
+        // A read that raced a cleanup: the file is in the trash, its session in the archive.
+        if self.tombstoned(src) {
+            return Vec::new();
+        }
         let harness = self.adapters[adapter].info().id;
         let mut pending = Vec::new();
         {
@@ -439,6 +457,10 @@ impl Engine {
             let source = st.sources.get_mut(src).unwrap();
             if !source.keys.contains(&key) {
                 source.keys.push(key.clone());
+            }
+            if let Some(old) = st.sessions.get(&key).filter(|e| e.archive.is_some()) {
+                self.unarchive(old);
+                st.sessions.remove(&key);
             }
             let entry =
                 st.sessions.entry(key.clone()).or_insert_with(|| Entry::new(key.clone(), harness, &id, adapter, src));
@@ -493,7 +515,7 @@ impl Engine {
         let stale = self.windows();
         let mut st = self.state.write().unwrap();
         let mut pending = Vec::new();
-        for e in st.sessions.values_mut().filter(|e| e.adapter == adapter) {
+        for e in st.sessions.values_mut().filter(|e| e.adapter == adapter && e.archive.is_none()) {
             let next = by_key.get(&e.session.key);
             let (pid, status) = (next.map(|l| l.pid), next.and_then(|l| l.status));
             if pid == e.live_pid && status == e.live_status {
@@ -538,6 +560,7 @@ impl Engine {
                 .collect();
             hs.into_iter().flat_map(|h| h.join().unwrap_or_default()).collect()
         });
+        let discovered: Vec<(usize, PathBuf)> = discovered.into_iter().filter(|(_, p)| self.admit(p)).collect();
 
         let mut jobs: Vec<(usize, PathBuf, Option<Cursor>)> = Vec::new();
         let mut restored = 0;
@@ -591,6 +614,7 @@ impl Engine {
             }
         });
 
+        self.load_archived(&mut self.state.write().unwrap());
         for i in 0..self.adapters.len() {
             if let Some(list) = self.adapters[i].live() {
                 self.apply_live(i, list, now_ms());
@@ -630,6 +654,7 @@ impl Engine {
                     src: c.path.clone(),
                     live_pid: None,
                     live_status: None,
+                    archive: None,
                 },
             );
         }
@@ -781,6 +806,10 @@ impl Engine {
                             break;
                         }
                     }
+                    // A cleaned-up directory moved back from the trash: find its transcripts now.
+                    if me.tombstoned(&p) {
+                        let _ = tx.send(Msg::Rescan);
+                    }
                 }
                 watch::Change::Rescan => {
                     let _ = tx.send(Msg::Rescan);
@@ -847,6 +876,12 @@ impl Engine {
             };
             self.publish(pending);
             return;
+        }
+        if self.tombstoned(&src) {
+            let (me, p) = (self.clone(), src.clone());
+            if !tokio::task::spawn_blocking(move || me.admit(&p)).await.unwrap_or(false) {
+                return;
+            }
         }
         let known = {
             let st = self.state.read().unwrap();

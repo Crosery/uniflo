@@ -223,6 +223,11 @@ impl LineDecoder for PiFamily {
             && !p.iter().any(|c| c == "subagent-artifacts")
     }
 
+    /// <ts>_<id>.jsonl, its <ts>_<id>/ directory (sub-agents, forks, logs) and hidden lock files.
+    fn cleanup_targets(&self, src: &Path) -> Option<Vec<PathBuf>> {
+        uniflo_core::cleanup::targets::with_siblings(src, src.file_stem()?.to_str()?)
+    }
+
     fn identify(&self, p: &Path) -> Option<SourceId> {
         let stem = p.file_stem()?.to_str()?;
         let parent = p

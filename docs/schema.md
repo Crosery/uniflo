@@ -32,6 +32,7 @@
 | `status_reason` | string? | `user_message`、`tool_call`、`turn_end`、`stale`、`exited`、`live` 等 |
 | `pid` | u32? | 当前附着的进程（能探测到时） |
 | `usage` | object? | 会话合计，见下文 [Session.usage](#sessionusage)；后台用量索引读完该会话前不输出 |
+| `archived` | bool | 源文件已被清理（移入回收站），事件来自 Uniflo 的精简归档，`source` 指向归档文件、状态为 idle（`status_reason` 为 `archived`）；源文件从回收站还原后消失。缺省为 false，见 `docs/api.md#会话清理` |
 
 ### status
 
@@ -65,7 +66,7 @@
 | `ts` | i64 | 时间；个别 harness 不记录时间时为 0 |
 | `pos` | u64? | 分页游标，`GET …/events?before=<pos>` 取更早的 |
 | `partial` | bool | 仍在流式生成，之后会有同 id 的完整版本 |
-| `truncated` | bool | 文本被网关 `max_text` 截断 |
+| `truncated` | bool | 文本被截断：网关按 `max_text` 截断，或写入精简归档时被截短、去掉了内嵌二进制（见 [会话清理](#会话清理)） |
 | `kind` | string | 下表之一 |
 
 | kind | 字段 | 含义 |
@@ -149,6 +150,24 @@
 `SearchHit`：`event`（事件 id，传给 `events?around=`）、`kind`、`ts`、`snippet`（高亮区间以 `\u0002` 开始、`\u0003` 结束，常量 `HIGHLIGHT_START` / `HIGHLIGHT_END`）。
 
 `FtsStatus`（`GET /v1/stats` 的 `fts`）：`indexing`、`progress`、`path`（索引文件）、`bytes`（索引文件含 WAL 的磁盘占用）、`rebuilt`（本次启动因格式标签变化或文件损坏而重建）、`warming?`（启动后索引仍在合并成一个段、或在读进系统页缓存，期间某个词的第一次查询可能较慢；缺省为 false）、`build_ms?`（从空索引开始的最近一次全量构建耗时）、`errors`、`last_error?`。
+
+## 会话清理
+
+`/v1/cleanup/*`、`/v1/archive` 与 `uniflo clean --json`、`uniflo archive --json` 的类型，真源 `crates/uniflo-schema/src/cleanup.rs`。接口与 `reason` 取值见 `docs/api.md#会话清理`。
+
+| 类型 | 用途 | 要点 |
+|---|---|---|
+| `CleanupRequest` | `POST /v1/cleanup/plan` 请求体 | `sessions[]`（会话 key）、`q?`（会话搜索语法） |
+| `CleanupPlan` | 计划 | `plan_id`、`created_at`、`expires_at`、`sessions[]`（`CleanupCandidate`，按请求顺序）、`freed_bytes`、`archive_bytes`（预计） |
+| `CleanupCandidate` | 计划里的一个会话 | `key`、`harness`、`title?`、`eligible`、`reason?`、`message?`、`children[]`（随它一起清理的子代理）、`targets[]`、`bytes`、`archive_bytes`（预计） |
+| `CleanupTarget` | 一个要移走的文件或目录 | `path`、`dir`、`bytes`、`files`、`mtime_ms`（目录取最新的文件）、`file_id?`（inode） |
+| `CleanupReport` | 执行结果 | `plan_id`、`results[]`、`freed_bytes`、`archive_bytes`（实际） |
+| `CleanupResult` | 一个会话的结果 | `key`、`status`（`archived` / `failed` / `skipped`）、`reason?`、`message?`、`freed_bytes`、`archive_bytes`、`children[]` |
+| `ArchiveList` | `GET /v1/archive` | `archives[]`（`ArchiveEntry`）、`bytes` |
+| `ArchiveEntry` | 一个归档会话 | `key`、`harness`、`id`、`title?`、`cwd?`、`root?`（随哪个会话一起清理）、`path`（归档文件）、`bytes`、`source`（原位置）、`source_bytes`、`archived_at`、`restored`（源文件已还原） |
+| `ArchiveRemoved` | `DELETE /v1/archive/{key}` | `removed[]`、`bytes` |
+
+归档文件 `<数据目录>/archive/<harness>/<id>.jsonl.zst`：zstd 压缩的 JSONL，第一行是 `Session`（`archived: true`），之后每行一个 `Event`（同一 id 只留最新版本）。精简规则：user / assistant / reasoning / system 正文每条最多 16 KiB，tool_result 输出最多 2 KiB，tool_call 参数序列化后超过 2 KiB 时换成截短的 JSON 文本（字符串），连续 ≥ 256 个 base64 字符（同时含大写、小写和数字）换成 `[binary omitted: N bytes]`，被改动的事件标 `truncated: true`；usage 事件原样保留，缺 `model` 时补上用量账本解析出的模型。
 
 ## 示例
 
