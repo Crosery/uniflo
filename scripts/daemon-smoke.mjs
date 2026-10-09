@@ -21,7 +21,7 @@ if (!existsSync(binPath)) {
 
 console.log(`==> Starting ${binName} daemon smoke test on ${process.platform} (${process.arch}) at ${base}...`);
 
-const daemon = spawn(binPath, ["daemon", "--bind", bind, "--no-cache"], {
+const daemon = spawn(binPath, ["daemon", "--bind", bind, "--no-cache", "--no-price-sync"], {
   stdio: ["ignore", "pipe", "pipe"],
 });
 

@@ -15,6 +15,7 @@ Uniflo 只做这一层：
 - **实时**：文件追加到客户端收到事件通常在 10–50 ms；SSE、NDJSON、WebSocket 三种传输，带全局 `seq` 断线续传。
 - **毫秒级查询**：头尾摘要 + 游标跟随 + 索引缓存；本机 5600+ 会话、1.8 GB 数据，有缓存时启动约 0.2 s，REST 请求个位数毫秒。
 - **fd / fzf 式搜索**：`s:work h:claude in:uniflo since:2h 'gateway`。见 [`docs/search.md`](docs/search.md)。
+- **用量与费用**：每次模型调用的 token 统一口径（input 不含缓存、output 含思考），按 harness / 模型 / 项目 / 目录 / 日期 / 会话聚合，按事件时间的价格段计算 API 等价成本；未知模型单独计数，不按 0 计。见 [`docs/api.md`](docs/api.md#v1usage-参数)、[ADR-0010](docs/decisions/ADR-0010-价格目录同步与费用口径.md)。
 - **只读、只听本机**：从不写 harness 数据；网关校验 Host / Origin，可选 token。
 
 ## 已支持的 harness
@@ -60,6 +61,18 @@ uniflo daemon --no-update-check           # 关闭后台检查
 
 Windows 上运行中的 exe 无法被覆盖：先停掉 daemon 再执行 `uniflo update`。
 
+### 价格目录
+
+费用按内置价格快照计算；守护进程启动约 1 分钟后、之后每 6 小时用系统 `curl` 拉一次 [models.dev](https://models.dev) 价格目录（LiteLLM 补缺），写到数据目录（macOS `~/Library/Application Support/uniflo/pricing/`）。请求不含任何会话数据。调价只对之后的用量生效；单项变化超过 50% 要连续两次读到才采用。
+
+```sh
+uniflo pricing                            # 同步状态：来源、时间、是否过期、条目数
+uniflo pricing sync                       # 立即同步
+uniflo daemon --no-price-sync             # 完全不联网，只用内置快照与本地文件
+```
+
+自定义价格写 `pricing/overrides.json`（`[{"id":"my-model","prices":[{"from":0,"input":3,"output":15,"cache_read":0.3}],"context_limit":200000}]`，单位 USD / 百万 token），优先于目录，同步不会改它。
+
 CLI（有守护进程时连它，否则 `--local` 进程内索引）：
 
 ```sh
@@ -70,6 +83,9 @@ uniflo show claude:4f1c                   # 会话详情（key 前缀即可）
 uniflo tail claude:4f1c -f                # 跟随一个会话的事件
 uniflo watch --kinds tool_call            # 全局实时事件流
 uniflo ls --tsv -n 500 | fzf              # 接 fzf
+uniflo usage --by model --since 7d        # 按模型的 token 与费用（另有 harness/project/cwd/dir/day/hour/weekday/session）
+uniflo usage --by dir --under ~/work      # 目录树下钻
+uniflo usage claude:4f1c                  # 一个会话每一步的用量、费用与上下文占用
 ```
 
 ## 接入自己的应用
@@ -111,7 +127,7 @@ harness 下拉使用 [Tom Select](https://tom-select.js.org/) 2.6.2：脚本、�
 ```text
 crates/
   uniflo-schema    wire 类型（唯一对外契约）
-  uniflo-core      适配器 trait、JSONL 驱动、状态机、引擎、缓存、监听、进程探测
+  uniflo-core      适配器 trait、JSONL 驱动、状态机、引擎、缓存、监听、进程探测、用量账本与价格目录
   uniflo-search    查询语法 + 模糊排序
   uniflo-adapters  每个 harness 一个模块 / 一个 cargo feature
   uniflo-gateway   REST / SSE / NDJSON / WebSocket + Host/Origin/token 守卫

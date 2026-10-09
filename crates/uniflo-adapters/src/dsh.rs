@@ -289,56 +289,17 @@ impl Adapter for Dsh {
     }
 
     fn read(&self, src: &Path, cursor: Option<&SrcCursor>) -> Result<ReadOutput> {
-        let md = std::fs::metadata(src)?;
-        let (size, mtime) = (md.len(), file_mtime_ms(&md));
-        let mut st: State = cursor.and_then(|c| serde_json::from_value(c.state.clone()).ok()).unwrap_or_default();
-        let mut out = ReadOutput::default();
-        let (bytes, start): (Vec<u8>, usize) = match cursor {
-            Some(c) if size < c.offset => {
-                out.reset = true;
-                (std::fs::read(src)?, 0)
-            }
-            Some(c) => {
-                let mut f = std::fs::File::open(src)?;
-                f.seek(std::io::SeekFrom::Start(c.offset))?;
-                let mut tail = Vec::new();
-                f.read_to_end(&mut tail)?;
-                if tail.len() as u64 > CATCHUP_MAX { (std::fs::read(src)?, 0) } else { (tail, c.offset as usize) }
-            }
-            None => (std::fs::read(src)?, 0),
-        };
-        out.summary = start == 0;
-        let mut batch = Batch::default();
-        let consumed = if start == 0 && bytes.len() > HEAD_BYTES + TAIL_BYTES {
-            // Head sample, then the tail window; the middle is never replayed (history
-            // decodes it from disk on demand).
-            let head_end =
-                forward_frames(&bytes[..HEAD_BYTES], 0, |r, p, i| batch_record(&mut st, &mut batch, r, p, i));
-            let floor = align_frames(&bytes, head_end.max(bytes.len() - TAIL_BYTES));
-            floor + forward_frames(&bytes[floor..], 0, |r, p, i| batch_record(&mut st, &mut batch, r, floor + p, i))
-        } else {
-            forward_frames(&bytes, 0, |r, p, i| batch_record(&mut st, &mut batch, r, start + p, i))
-        };
-        batch.bytes = consumed as u64;
-        // The header record is the first line; back-fill the session id slot and stamp
-        // every event so forwarded events carry their session key.
-        if let Some(id) = st.id.clone().or_else(|| dir_id(src)) {
-            let key = session_key(ID, &id);
-            for (slot, rec) in &mut batch.items {
-                *slot = id.clone();
-                if let Record::Event(e) = rec {
-                    e.session = key.clone();
-                }
-            }
+        decode_file(src, cursor, false)
+    }
+
+    /// Every record in file order with the metadata inline: `request/context` carries the
+    /// model, which a replay through `history()` (events only) would lose for each step.
+    fn read_all(&self, src: &Path, _sessions: &[String], sink: &mut dyn FnMut(&str, Record)) -> Result<SrcCursor> {
+        let out = decode_file(src, None, true)?;
+        for (id, r) in out.batch.items {
+            sink(&id, r);
         }
-        out.batch = batch;
-        out.cursor = SrcCursor {
-            offset: (start + consumed).min(size as usize) as u64,
-            size,
-            mtime_ms: mtime,
-            state: serde_json::to_value(&st).unwrap_or_default(),
-        };
-        Ok(out)
+        Ok(out.cursor)
     }
 
     fn history(&self, src: &Path, session_id: &str, q: &HistoryQuery) -> Result<Vec<Event>> {
@@ -396,6 +357,59 @@ impl Adapter for Dsh {
 
 /// `<root>/<slug>/<id>/session.jsonl.zstd` → `id`, the fallback session id before a
 /// header is decoded (dsh names session dirs after the id; verified against the store).
+/// Read from `cursor` (or the whole file). A first read samples head + tail unless `whole`.
+fn decode_file(src: &Path, cursor: Option<&SrcCursor>, whole: bool) -> Result<ReadOutput> {
+    let md = std::fs::metadata(src)?;
+    let (size, mtime) = (md.len(), file_mtime_ms(&md));
+    let mut st: State = cursor.and_then(|c| serde_json::from_value(c.state.clone()).ok()).unwrap_or_default();
+    let mut out = ReadOutput::default();
+    let (bytes, start): (Vec<u8>, usize) = match cursor {
+        Some(c) if size < c.offset => {
+            out.reset = true;
+            (std::fs::read(src)?, 0)
+        }
+        Some(c) => {
+            let mut f = std::fs::File::open(src)?;
+            f.seek(std::io::SeekFrom::Start(c.offset))?;
+            let mut tail = Vec::new();
+            f.read_to_end(&mut tail)?;
+            if tail.len() as u64 > CATCHUP_MAX { (std::fs::read(src)?, 0) } else { (tail, c.offset as usize) }
+        }
+        None => (std::fs::read(src)?, 0),
+    };
+    out.summary = start == 0;
+    let mut batch = Batch::default();
+    let consumed = if start == 0 && !whole && bytes.len() > HEAD_BYTES + TAIL_BYTES {
+        // Head sample, then the tail window; the middle is never replayed (history
+        // decodes it from disk on demand).
+        let head_end = forward_frames(&bytes[..HEAD_BYTES], 0, |r, p, i| batch_record(&mut st, &mut batch, r, p, i));
+        let floor = align_frames(&bytes, head_end.max(bytes.len() - TAIL_BYTES));
+        floor + forward_frames(&bytes[floor..], 0, |r, p, i| batch_record(&mut st, &mut batch, r, floor + p, i))
+    } else {
+        forward_frames(&bytes, 0, |r, p, i| batch_record(&mut st, &mut batch, r, start + p, i))
+    };
+    batch.bytes = consumed as u64;
+    // The header record is the first line; back-fill the session id slot and stamp
+    // every event so forwarded events carry their session key.
+    if let Some(id) = st.id.clone().or_else(|| dir_id(src)) {
+        let key = session_key(ID, &id);
+        for (slot, rec) in &mut batch.items {
+            *slot = id.clone();
+            if let Record::Event(e) = rec {
+                e.session = key.clone();
+            }
+        }
+    }
+    out.batch = batch;
+    out.cursor = SrcCursor {
+        offset: (start + consumed).min(size as usize) as u64,
+        size,
+        mtime_ms: mtime,
+        state: serde_json::to_value(&st).unwrap_or_default(),
+    };
+    Ok(out)
+}
+
 fn dir_id(src: &Path) -> Option<String> {
     src.parent()?.file_name().map(|n| n.to_string_lossy().into_owned())
 }
@@ -670,7 +684,7 @@ fn usage(u: &Value) -> Option<Body> {
     if input + output + cache_read + cache_write + reasoning == 0 {
         return None;
     }
-    Some(Body::Usage(Usage { input, output, cache_read, cache_write, reasoning }))
+    Some(Body::Usage(Usage { input, output, cache_read, cache_write, reasoning, ..Default::default() }))
 }
 
 /// Keep one event per id, first position, latest content (mirrors the JSONL driver).
@@ -731,6 +745,62 @@ mod tests {
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
         std::fs::write(&p, bytes).unwrap();
         p
+    }
+
+    /// ~400 KB that zstd cannot shrink much (keeps a record out of the head / tail sample).
+    fn noise(seed: u64) -> String {
+        const A: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut x = seed;
+        (0..400_000)
+            .map(|_| {
+                x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                A[(x >> 58) as usize] as char
+            })
+            .collect()
+    }
+
+    #[test]
+    fn read_all_keeps_mid_file_model_for_usage() {
+        let fx = Fixture::new();
+        let pad = |seed| {
+            rec(
+                "system/message",
+                1,
+                json!({"message":{"role":"system","content":[{"type":"text","text":noise(seed)}]}}),
+            )
+        };
+        let lines = vec![
+            header("s1"),
+            pad(1),
+            rec("request/context", 2, json!({"provider":"p","model":"m-mid","contextWindow":1000})),
+            rec(
+                "assistant/message",
+                3,
+                json!({"turn":1,"step":1,"message":{"role":"assistant","id":"a1","content":[]},
+                "usage":{"inputTokens":7,"outputTokens":3,"cacheReadTokens":0,"cacheWriteTokens":0,"reasoningTokens":0}}),
+            ),
+            pad(2),
+        ];
+        let p = session(&fx, "session.jsonl.zstd", &frames(&lines));
+        let d = dsh(&fx);
+        assert!(std::fs::metadata(&p).unwrap().len() as usize > HEAD_BYTES + TAIL_BYTES + 100_000);
+        let summary = d.read(&p, None).unwrap();
+        let sampled_model = summary.batch.items.iter().any(|(_, r)| matches!(r, Record::Meta(m) if m.model.is_some()));
+        assert!(!sampled_model, "fixture keeps request/context out of the head + tail sample");
+
+        let mut seen = Vec::new();
+        let cursor = d
+            .read_all(&p, &["s1".into()], &mut |id, r| {
+                assert_eq!(id, "s1");
+                match r {
+                    Record::Meta(m) if m.model.is_some() => seen.push(format!("model={}", m.model.unwrap())),
+                    Record::Event(e) if matches!(e.body, Body::Usage(_)) => seen.push("usage".into()),
+                    _ => {}
+                }
+            })
+            .unwrap();
+        assert_eq!(seen, ["model=m-mid", "usage"]);
+        assert_eq!(cursor.offset, std::fs::metadata(&p).unwrap().len());
     }
 
     fn full_turn() -> Vec<Value> {

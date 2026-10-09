@@ -397,7 +397,8 @@ fn expand(m: Msg, open: bool, out: &mut Vec<Pending>, models: &mut Vec<(String, 
                     output: num(u, "output_tokens"),
                     cache_read: num(u, "cache_read"),
                     cache_write: num(u, "cache_write"),
-                    reasoning: 0,
+                    model: telemetry_model(&v),
+                    ..Default::default()
                 };
                 if usage != Usage::default() {
                     out.push(stream(Pending::new(&m.sid, m.ts, slot, format!("{base}:u"), Body::Usage(usage))));

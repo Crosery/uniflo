@@ -9,6 +9,7 @@
 //! pages by part rowid. Follow mode reads new rows by rowid and re-reads only parts and
 //! messages that were still open, by primary key — no scans of large tables.
 
+use crate::common::{output_with_reasoning, reported_cost};
 use crate::sqlite::{col, columns, int, nonempty, open_ro, source_for_db, text, wal_sig};
 use anyhow::Result;
 use rusqlite::{Connection, Row};
@@ -178,12 +179,23 @@ impl Emitter<'_> {
             "step-finish" => {
                 let t = p.part.get("tokens").unwrap_or(&Value::Null);
                 let n = |ptr: &str| t.pointer(ptr).and_then(Value::as_u64).unwrap_or(0);
+                let (input, output, reasoning) = (n("/input"), n("/output"), n("/reasoning"));
+                let (cache_read, cache_write) = (n("/cache/read"), n("/cache/write"));
+                // Versions differ on whether `output` already holds reasoning; `total` tells.
+                let total = t.get("total").and_then(Value::as_u64);
+                let output = match total {
+                    Some(x) if x == input + output + cache_read + cache_write => output,
+                    Some(x) if x == input + output + reasoning + cache_read + cache_write => output + reasoning,
+                    _ => output_with_reasoning(output, reasoning),
+                };
                 let usage = Usage {
-                    input: n("/input"),
-                    output: n("/output"),
-                    cache_read: n("/cache/read"),
-                    cache_write: n("/cache/write"),
-                    reasoning: n("/reasoning"),
+                    input,
+                    output,
+                    cache_read,
+                    cache_write,
+                    reasoning,
+                    model,
+                    cost_usd: reported_cost(p.part.get("cost")),
                 };
                 self.push(&p.sid, p.id.clone(), ts, base, false, Body::Usage(usage));
             }
@@ -658,7 +670,7 @@ mod tests {
         let first = d.ad.read(&d.path, None).unwrap();
         assert!(!d.ad.changed(&d.path, &first.cursor));
         d.update_part("prt_3", json!({"type":"tool","callID":"call_1","tool":"bash","state":{"status":"completed","input":{"command":"ls"},"output":"a.rs","time":{"start":1,"end":2}}}));
-        d.part("prt_4", "msg_a", "ses_1", json!({"type":"step-finish","reason":"tool-calls","tokens":{"input":9,"output":3,"reasoning":1,"cache":{"read":4,"write":0}}}));
+        d.part("prt_4", "msg_a", "ses_1", json!({"type":"step-finish","reason":"tool-calls","cost":0.002,"tokens":{"total":17,"input":9,"output":3,"reasoning":1,"cache":{"read":4,"write":0}}}));
         let t = now_ms();
         d.w.execute(
             "UPDATE message SET data=?2 WHERE id=?1",
@@ -690,7 +702,10 @@ mod tests {
         assert!(
             matches!(&s.events[1].body, Body::ToolResult { output, call_id, .. } if output == "a.rs" && call_id == "call_1")
         );
-        assert!(matches!(&s.events[2].body, Body::Usage(u) if u.input == 9 && u.cache_read == 4));
+        // `total` counts reasoning apart from `output`, so it is added back; `cost` is the harness amount.
+        assert!(matches!(&s.events[2].body, Body::Usage(u)
+            if (u.input, u.cache_read, u.output, u.reasoning) == (9, 4, 4, 1)
+                && u.cost_usd == Some(0.002) && u.model.as_deref() == Some("glm")));
         assert!(matches!(&s.events[4].body, Body::TurnEnd { reason: Some(r) } if r == "stop"));
         let st: State = serde_json::from_value(out.cursor.state.clone()).unwrap();
         assert!(st.open_parts.is_empty() && st.open_msgs.is_empty());

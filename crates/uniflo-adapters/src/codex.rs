@@ -3,7 +3,15 @@
 //! `response_item` lines are the transcript (Responses API items); `event_msg`
 //! lines carry turn boundaries (`task_started` / `task_complete` / `turn_aborted`)
 //! and token counts. Other `event_msg` kinds duplicate response items and are skipped.
+//!
+//! Usage: newer rollouts write a `token_usage_record` per response (authoritative, keyed
+//! by `response_id`); once one appears, `token_count` lines only repeat them and are
+//! skipped. Older rollouts only have `token_count`; a repeat whose `total_token_usage` did
+//! not move reports no new call (rate-limit refreshes) and is skipped too. OpenAI counts
+//! cached prompt tokens inside `input_tokens` and reasoning inside `output_tokens`.
 
+use crate::common::output_with_reasoning;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use uniflo_core::util::{home, json_arg, str_of, string_of, text_of, ts};
@@ -23,7 +31,20 @@ pub fn codex() -> JsonlAdapter<Codex> {
     JsonlAdapter::new(Codex { roots: vec![h.join(".codex/sessions"), h.join(".codex/archived_sessions")] })
 }
 
-const IGNORED: &[&str] = &["token_usage_record", "world_state", "inter_agent_communication_metadata"];
+const IGNORED: &[&str] = &["world_state", "inter_agent_communication_metadata"];
+
+/// Usage dedupe and model state carried across lines.
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct State {
+    #[serde(default)]
+    model: Option<String>,
+    /// This rollout writes `token_usage_record`s; its `token_count`s repeat them.
+    #[serde(default)]
+    records: bool,
+    /// `total_token_usage` of the last `token_count`.
+    #[serde(default)]
+    last_total: Option<[u64; 5]>,
+}
 
 /// Leading markers of user-role items the CLI injects (environment, instructions).
 const INJECTED: &[&str] = &[
@@ -38,7 +59,7 @@ const INJECTED: &[&str] = &[
 ];
 
 impl LineDecoder for Codex {
-    type State = ();
+    type State = State;
 
     fn info(&self) -> HarnessInfo {
         HarnessInfo { id: "codex", name: "Codex" }
@@ -61,7 +82,7 @@ impl LineDecoder for Codex {
         Some(SourceId { id: id.to_owned(), parent: None })
     }
 
-    fn decode(&self, v: &Value, cx: &mut Cx<'_, ()>) {
+    fn decode(&self, v: &Value, cx: &mut Cx<'_, State>) {
         let t = v.get("timestamp").and_then(ts).unwrap_or(0);
         let p = v.get("payload").unwrap_or(&Value::Null);
         match str_of(v, "type").unwrap_or("") {
@@ -76,6 +97,7 @@ impl LineDecoder for Codex {
             }
             "turn_context" => {
                 if let Some(model) = string_of(p, "model") {
+                    cx.state.model = Some(model.clone());
                     cx.meta().model = Some(model);
                 }
                 if let Some(cwd) = string_of(p, "cwd") {
@@ -84,6 +106,15 @@ impl LineDecoder for Codex {
             }
             "response_item" => response_item(p, t, cx),
             "event_msg" => event_msg(p, t, cx),
+            "token_usage_record" => {
+                let Some(u) = p.get("usage").filter(|u| u.is_object()) else { return };
+                let usage = openai_usage(u, cx.state.model.clone());
+                cx.state.records = true;
+                match string_of(p, "response_id") {
+                    Some(r) => cx.emit(format!("{r}:usage"), t, Body::Usage(usage)),
+                    None => cx.emit_at(t, Body::Usage(usage)),
+                };
+            }
             "compacted" => {
                 cx.emit_at(
                     t,
@@ -100,14 +131,14 @@ fn item_id(p: &Value) -> Option<String> {
     string_of(p, "id")
 }
 
-fn emit(cx: &mut Cx<'_, ()>, id: Option<String>, t: i64, body: Body) {
+fn emit(cx: &mut Cx<'_, State>, id: Option<String>, t: i64, body: Body) {
     match id {
         Some(id) => cx.emit(id, t, body),
         None => cx.emit_at(t, body),
     };
 }
 
-fn response_item(p: &Value, t: i64, cx: &mut Cx<'_, ()>) {
+fn response_item(p: &Value, t: i64, cx: &mut Cx<'_, State>) {
     let id = item_id(p);
     let call_id = || str_of(p, "call_id").or_else(|| str_of(p, "id")).unwrap_or("").to_owned();
     let body = match str_of(p, "type").unwrap_or("") {
@@ -232,7 +263,24 @@ fn tool_output(v: &Value) -> (String, bool) {
     (s, failed)
 }
 
-fn event_msg(p: &Value, t: i64, cx: &mut Cx<'_, ()>) {
+/// Responses-API token counts → the usage contract (cached and cache-write prompt tokens
+/// are inside `input_tokens`; reasoning inside `output_tokens`).
+fn openai_usage(u: &Value, model: Option<String>) -> Usage {
+    let n = |k: &str| u.get(k).and_then(Value::as_u64).unwrap_or(0);
+    let (cached, written) = (n("cached_input_tokens"), n("cache_write_input_tokens"));
+    let reasoning = n("reasoning_output_tokens");
+    Usage {
+        input: n("input_tokens").saturating_sub(cached + written),
+        output: output_with_reasoning(n("output_tokens"), reasoning),
+        cache_read: cached,
+        cache_write: written,
+        reasoning,
+        model,
+        cost_usd: None,
+    }
+}
+
+fn event_msg(p: &Value, t: i64, cx: &mut Cx<'_, State>) {
     let turn = str_of(p, "turn_id").unwrap_or("");
     match str_of(p, "type").unwrap_or("") {
         "task_started" => {
@@ -247,19 +295,25 @@ fn event_msg(p: &Value, t: i64, cx: &mut Cx<'_, ()>) {
         }
         "token_count" => {
             let Some(u) = p.pointer("/info/last_token_usage").filter(|u| u.is_object()) else { return };
-            let n = |k: &str| u.get(k).and_then(Value::as_u64).unwrap_or(0);
-            let input = n("input_tokens");
-            let cached = n("cached_input_tokens");
-            cx.emit_at(
-                t,
-                Body::Usage(Usage {
-                    input: input.saturating_sub(cached),
-                    output: n("output_tokens"),
-                    cache_read: cached,
-                    cache_write: n("cache_write_input_tokens"),
-                    reasoning: n("reasoning_output_tokens"),
-                }),
-            );
+            let total = p.pointer("/info/total_token_usage").map(|x| {
+                let n = |k: &str| x.get(k).and_then(Value::as_u64).unwrap_or(0);
+                [
+                    n("input_tokens"),
+                    n("cached_input_tokens"),
+                    n("output_tokens"),
+                    n("reasoning_output_tokens"),
+                    n("total_tokens"),
+                ]
+            });
+            let repeat = total.is_some() && total == cx.state.last_total;
+            if total.is_some() {
+                cx.state.last_total = total;
+            }
+            if cx.state.records || repeat {
+                return;
+            }
+            let usage = openai_usage(u, cx.state.model.clone());
+            cx.emit_at(t, Body::Usage(usage));
         }
         "error" | "stream_error" => {
             cx.emit_at(t, Body::System { subtype: "error".into(), text: string_of(p, "message").unwrap_or_default() });
@@ -365,11 +419,55 @@ mod tests {
         assert!(matches!(&r.events[5].body, Body::ToolCall { input, .. } if input["cmd"] == "cargo test"));
         assert!(matches!(&r.events[6].body, Body::ToolResult { is_error: true, call_id, .. } if call_id == "call_1"));
         assert!(matches!(&r.events[8].body, Body::ToolResult { is_error: false, output, .. } if output == "Success"));
-        assert!(matches!(&r.events[9].body, Body::Usage(u) if u.input == 60 && u.cache_read == 40 && u.reasoning == 3));
+        assert!(matches!(&r.events[9].body, Body::Usage(u)
+            if (u.input, u.cache_read, u.output, u.reasoning) == (60, 40, 7, 3) && u.model.as_deref() == Some("gpt-x")));
         assert_eq!(r.status(), Status::Idle);
         assert_eq!(r.meta.cwd.as_deref(), Some("/repo"));
         assert_eq!(r.meta.model.as_deref(), Some("gpt-x"));
         assert_eq!(r.preview.as_deref(), Some("run tests"));
+        assert!(r.unknown.is_empty(), "{:?}", r.unknown);
+    }
+
+    #[test]
+    fn usage_record_wins_and_repeated_token_counts_are_skipped() {
+        let fx = Fixture::new();
+        let a = adapter(&fx);
+        let tc = |last: Value, total: Value| {
+            l("event_msg", json!({"type":"token_count","info":{"last_token_usage":last,"total_token_usage":total}}))
+        };
+        let u1 = json!({"input_tokens":100,"cached_input_tokens":40,"output_tokens":10,"reasoning_output_tokens":4,"total_tokens":110});
+        let u2 = json!({"input_tokens":200,"cached_input_tokens":150,"output_tokens":5,"reasoning_output_tokens":0,"total_tokens":205});
+        let t1 = json!({"input_tokens":100,"total_tokens":110});
+        let t2 = json!({"input_tokens":300,"total_tokens":315});
+
+        // Older rollout: token_count only; a refresh with an unchanged total is no new call.
+        let mut s = l("session_meta", json!({"id":ID,"cwd":"/r"}));
+        s += &l("turn_context", json!({"model":"gpt-x"}));
+        s += &tc(u1.clone(), t1.clone());
+        s += &tc(u1.clone(), t1.clone());
+        s += &tc(u2.clone(), t2.clone());
+        let p = fx.write(&format!("old/rollout-2026-10-02T18-11-56-{ID}.jsonl"), &s);
+        let r = fx.index(&a, &p);
+        let usage: Vec<_> =
+            r.events.iter().filter_map(|e| if let Body::Usage(u) = &e.body { Some(u) } else { None }).collect();
+        assert_eq!(usage.len(), 2);
+        assert_eq!((usage[1].input, usage[1].cache_read, usage[1].output), (50, 150, 5));
+
+        // Newer rollout: token_usage_record is authoritative, every token_count repeats it.
+        let mut s = l("session_meta", json!({"id":ID,"cwd":"/r"}));
+        s += &l("turn_context", json!({"model":"gpt-y"}));
+        s += &l("token_usage_record", json!({"response_id":"resp_1","usage":u1}));
+        s += &l("response_item", json!({"type":"function_call_output","call_id":"c","output":"ok"}));
+        s += &tc(json!({"input_tokens":1}), t1.clone());
+        s += &tc(json!({"input_tokens":1}), t1);
+        s += &l("token_usage_record", json!({"response_id":"resp_2","usage":u2}));
+        s += &tc(json!({"input_tokens":2}), t2);
+        let p = fx.write(&format!("new/rollout-2026-10-02T18-11-56-{ID}.jsonl"), &s);
+        let r = fx.index(&a, &p);
+        let usage: Vec<_> = r.events.iter().filter(|e| matches!(e.body, Body::Usage(_))).collect();
+        assert_eq!(usage.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(), vec!["resp_1:usage", "resp_2:usage"]);
+        assert!(matches!(&usage[0].body, Body::Usage(u)
+            if (u.input, u.cache_read, u.output, u.reasoning) == (60, 40, 10, 4) && u.model.as_deref() == Some("gpt-y")));
         assert!(r.unknown.is_empty(), "{:?}", r.unknown);
     }
 

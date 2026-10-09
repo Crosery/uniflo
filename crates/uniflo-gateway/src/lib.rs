@@ -9,6 +9,9 @@
 //! | `GET /v1/sessions/{key}/events?limit=&before=&max_text=&format=ndjson` | transcript, newest page first |
 //! | `GET /v1/stream` (SSE) · `/v1/stream.ndjson` · `/v1/ws` | live envelopes; `since`, `session`, `harness`, `types`, `kinds`, `max_text` |
 //! | `GET /v1/stats` | engine counters, unknown discriminators |
+//! | `GET /v1/usage?group_by=&q=&since=&until=&tz=&under=&depth=&limit=&sort=` | token / cost aggregation |
+//! | `GET /v1/sessions/{key}/usage` | per-step usage, per-turn totals |
+//! | `GET /v1/models?q=` · `GET /v1/pricing` | models seen with prices · catalog sync status |
 //! | `GET /demo` | bundled single-page demo client (`examples/web/index.html`) |
 //!
 //! Snapshots carry `x-uniflo-seq`; subscribe with `since=<that>` for a gap-free view.
@@ -17,6 +20,7 @@
 
 mod guard;
 mod stream;
+pub mod usage;
 
 pub use guard::GuardOptions;
 
@@ -54,6 +58,10 @@ pub fn router(engine: Arc<Engine>, guard: GuardOptions) -> Router {
         .route("/v1/sessions", get(sessions))
         .route("/v1/sessions/{key}", get(session))
         .route("/v1/sessions/{key}/events", get(events))
+        .route("/v1/sessions/{key}/usage", get(usage::session_usage))
+        .route("/v1/usage", get(usage::usage))
+        .route("/v1/models", get(usage::models))
+        .route("/v1/pricing", get(usage::pricing))
         .route("/v1/stream", get(sse))
         .route("/v1/stream.ndjson", get(ndjson))
         .route("/v1/ws", get(ws))
@@ -101,7 +109,7 @@ async fn index() -> impl IntoResponse {
         "name": "uniflo",
         "version": env!("CARGO_PKG_VERSION"),
         "schema": SCHEMA_VERSION,
-        "endpoints": ["/demo", "/v1/health", "/v1/harnesses", "/v1/sessions", "/v1/sessions/{key}", "/v1/sessions/{key}/events", "/v1/stream", "/v1/stream.ndjson", "/v1/ws", "/v1/stats"],
+        "endpoints": ["/demo", "/v1/health", "/v1/harnesses", "/v1/sessions", "/v1/sessions/{key}", "/v1/sessions/{key}/events", "/v1/stream", "/v1/stream.ndjson", "/v1/ws", "/v1/stats", "/v1/usage", "/v1/sessions/{key}/usage", "/v1/models", "/v1/pricing"],
     }))
 }
 

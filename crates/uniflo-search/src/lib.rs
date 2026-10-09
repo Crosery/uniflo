@@ -77,6 +77,25 @@ impl Query {
     pub fn is_empty(&self) -> bool {
         self.filters.is_empty() && self.text.is_empty()
     }
+
+    /// Remove the plain `since:` / `before:` filters and return them as a `[since, before)`
+    /// window, for callers that filter on event time rather than session `updated_at`.
+    /// The latest `since` and the earliest `before` win; negated ones stay filters.
+    pub fn take_window(&mut self) -> (Option<i64>, Option<i64>) {
+        let (mut since, mut before) = (None::<i64>, None::<i64>);
+        self.filters.retain(|f| match f {
+            Filter::Since(t) => {
+                since = Some(since.map_or(*t, |s| s.max(*t)));
+                false
+            }
+            Filter::Before(t) => {
+                before = Some(before.map_or(*t, |b| b.min(*t)));
+                false
+            }
+            _ => true,
+        });
+        (since, before)
+    }
 }
 
 fn parse_filter(tok: &str, now: i64) -> Option<Filter> {
@@ -203,6 +222,7 @@ mod tests {
             status_since: 0,
             status_reason: None,
             pid: None,
+            usage: None,
         }
     }
 
@@ -240,6 +260,14 @@ mod tests {
     fn absolute_dates() {
         let q = Query::parse("since:2026-10-02", NOW);
         assert_eq!(q.filters[0], Filter::Since(1_790_899_200_000));
+    }
+
+    #[test]
+    fn window_is_lifted_out_of_the_filters() {
+        let mut q = Query::parse("h:claude since:2d since:1d before:1h !since:3d foo", NOW);
+        assert_eq!(q.take_window(), (Some(NOW - 86_400_000), Some(NOW - 3_600_000)));
+        assert_eq!(q.filters.len(), 2, "harness and the negated since stay");
+        assert_eq!(q.text, "foo");
     }
 
     #[test]

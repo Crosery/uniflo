@@ -5,18 +5,24 @@
 //! - [`status`]: the shared work/idle state machine
 //! - [`engine`]: live index, change detection and event fan-out
 //! - [`update`]: crates.io version check via the system curl
+//! - [`pricing`]: model price catalog (snapshot + sync + overrides) and per-step cost
+//! - [`usage`]: per-step usage ledgers and their aggregations
+//! - [`paths`]: Uniflo's own data / config / cache directories
 
 pub mod adapter;
 pub mod cache;
 pub mod engine;
 pub mod jsonl;
+pub mod paths;
+pub mod pricing;
 pub mod procs;
 pub mod status;
 pub mod update;
+pub mod usage;
 pub mod util;
 mod watch;
 
 pub use adapter::{Adapter, Cursor, HarnessInfo, HistoryQuery, LiveSession, MetaPatch, ReadOutput, Record};
-pub use engine::{Engine, EngineOptions, IndexReport, Stats};
+pub use engine::{Engine, EngineOptions, IndexReport, PriceSync, Stats};
 pub use jsonl::{Cx, JsonlAdapter, LineDecoder, SourceId};
 pub use update::UpdateInfo;

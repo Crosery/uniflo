@@ -26,6 +26,8 @@ pub const TAIL_BYTES: u64 = 256 * 1024;
 pub const CATCHUP_MAX: u64 = 16 * 1024 * 1024;
 const MAX_WINDOW: u64 = 64 * 1024 * 1024;
 const REV_CHUNK: u64 = 128 * 1024;
+/// Window of one [`Adapter::read_all`] step.
+const SCAN_CHUNK: u64 = 4 * 1024 * 1024;
 
 /// Native identity of the session a file holds.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -346,6 +348,53 @@ impl<D: LineDecoder> Adapter for JsonlAdapter<D> {
             self.decode_line(line, *pos, At { src, key: &key }, &mut state, &mut sink);
         }
         Ok(dedupe_events(sink.records))
+    }
+
+    fn read_all(&self, src: &Path, _sessions: &[String], sink: &mut dyn FnMut(&str, Record)) -> Result<Cursor> {
+        let md = std::fs::metadata(src).with_context(|| format!("stat {}", src.display()))?;
+        let (size, mtime) = (md.len(), file_mtime_ms(&md));
+        let sid =
+            self.decoder.identify(src).ok_or_else(|| anyhow!("not a {} source: {}", self.info().id, src.display()))?;
+        let key = session_key(self.info().id, &sid.id);
+        if self.decoder.whole_file(src) {
+            let mut out = self.read_whole(src, None, &key, &sid.id, size, mtime)?;
+            prepend_parent(&mut out.batch, &sid);
+            for (id, r) in out.batch.items {
+                sink(&id, r);
+            }
+            return Ok(out.cursor);
+        }
+        if let Some(p) = &sid.parent {
+            sink(&sid.id, Record::Meta(MetaPatch { parent: Some(p.clone()), ..Default::default() }));
+        }
+        // Bounded windows keep memory flat on multi-GB transcripts; a window grows only when a
+        // single line does not fit.
+        let mut f = File::open(src)?;
+        let mut state = D::State::default();
+        let (mut offset, mut want) = (0u64, SCAN_CHUNK);
+        while offset < size {
+            let end = (offset + want).min(size);
+            let buf = read_range(&mut f, offset, end)?;
+            let eof = end >= size;
+            let mut part = Sink::default();
+            let used = self.decode_lines(&buf, offset, At { src, key: &key }, &mut state, &mut part, eof);
+            for r in part.records {
+                sink(&sid.id, r);
+            }
+            if used == 0 {
+                if eof {
+                    break;
+                }
+                want = want.saturating_mul(2);
+                continue;
+            }
+            offset += used;
+            want = SCAN_CHUNK;
+            if eof {
+                break;
+            }
+        }
+        Ok(Cursor { offset, size, mtime_ms: mtime, state: to_state(&state) })
     }
 
     fn live(&self) -> Option<Vec<LiveSession>> {
@@ -762,6 +811,37 @@ mod tests {
         let out = a.read(&p, None).unwrap();
         assert_eq!(out.batch.bad_lines, 1);
         assert_eq!(out.batch.unknown, vec!["t=Some(\"zzz\")".to_string()]);
+    }
+
+    #[test]
+    fn read_all_streams_every_line_and_resumes() {
+        let (_d, a, p) = setup();
+        let mut s = line("meta", "/w", 0);
+        let long = "z".repeat((SCAN_CHUNK + 10) as usize);
+        s.push_str(&line("u", &long, 1));
+        for i in 0..2000 {
+            s.push_str(&line("a", &"x".repeat(5000), 10 + i));
+        }
+        std::fs::write(&p, &s).unwrap();
+        std::fs::OpenOptions::new().append(true).open(&p).unwrap().write_all(b"{\"t\":\"u\",\"x\":\"ha").unwrap();
+        let mut n = 0;
+        let mut metas = 0;
+        let c = a
+            .read_all(&p, &[], &mut |id, r| {
+                assert_eq!(id, "s1");
+                match r {
+                    Record::Event(_) => n += 1,
+                    Record::Meta(_) => metas += 1,
+                }
+            })
+            .unwrap();
+        assert_eq!((n, metas), (2001, 1), "middle of a big file is read, not sampled");
+        assert_eq!(c.offset, s.len() as u64, "torn last line left for the next read");
+        assert_eq!(c.state, serde_json::json!(2002));
+        std::fs::OpenOptions::new().append(true).open(&p).unwrap().write_all(b"llo\",\"ts\":9}\n").unwrap();
+        let out = a.read(&p, Some(&c)).unwrap();
+        assert!(!out.summary);
+        assert_eq!(events(&out).len(), 1);
     }
 
     #[test]

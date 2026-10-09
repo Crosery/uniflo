@@ -7,7 +7,9 @@
 
 use crate::adapter::{Adapter, Cursor, HistoryQuery, LiveSession, MetaPatch, ReadOutput, Record};
 use crate::cache::{self, CacheFile, CachedSession, CachedSource};
+use crate::pricing::Pricing;
 use crate::status::{StatusTracker, Windows, effective};
+use crate::usage::UsageIndex;
 use crate::util::{now_ms, preview};
 use crate::watch;
 use anyhow::{Result, anyhow};
@@ -18,7 +20,11 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, mpsc};
-use uniflo_schema::{Body, Envelope, Event, Harness, SCHEMA_VERSION, Session, Status, session_key};
+use uniflo_schema::{Body, Envelope, Event, Harness, SCHEMA_VERSION, Session, Status, UsageProgress, session_key};
+
+#[path = "engine_usage.rs"]
+mod usage_glue;
+pub use usage_glue::PriceSync;
 
 #[derive(Debug, Clone)]
 pub struct EngineOptions {
@@ -35,6 +41,12 @@ pub struct EngineOptions {
     pub threads: usize,
     /// Periodic crates.io update check (daemon opt-in); `None` disables it.
     pub update_check: Option<Duration>,
+    /// Build per-step usage ledgers in the background after indexing.
+    pub usage: bool,
+    /// Uniflo's own data directory (`pricing/` lives here); `None` = embedded prices only.
+    pub data_dir: Option<PathBuf>,
+    /// Periodic price catalog sync (daemon opt-in); `None` never touches the network.
+    pub price_sync: Option<PriceSync>,
 }
 
 impl Default for EngineOptions {
@@ -49,6 +61,9 @@ impl Default for EngineOptions {
             rescan: Duration::from_secs(30),
             threads: std::thread::available_parallelism().map_or(4, |n| n.get()),
             update_check: None,
+            usage: true,
+            data_dir: Some(crate::paths::data_dir()),
+            price_sync: None,
         }
     }
 }
@@ -86,6 +101,7 @@ impl Entry {
                 status_since: 0,
                 status_reason: None,
                 pid: None,
+                usage: None,
             },
             tracker: StatusTracker::default(),
             title_rank: 0,
@@ -198,6 +214,8 @@ pub struct Stats {
     pub unknown: BTreeMap<String, u64>,
     /// Last crates.io update check (daemon background task); `None` until it lands.
     pub update: Option<crate::update::UpdateInfo>,
+    /// Background usage ledger progress; totals are partial until `ready`.
+    pub usage: Option<UsageProgress>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -242,6 +260,9 @@ pub struct Engine {
     /// One in-flight crates.io fetch.
     updating: AtomicBool,
     started: i64,
+    pricing: Pricing,
+    usage: RwLock<UsageIndex>,
+    usage_tx: Mutex<Option<mpsc::UnboundedSender<usage_glue::UsageMsg>>>,
 }
 
 impl Engine {
@@ -250,6 +271,8 @@ impl Engine {
         let tag = format!("uniflo-core/{}/schema{}/{}", env!("CARGO_PKG_VERSION"), SCHEMA_VERSION, ids.join(","));
         let (tx, _) = broadcast::channel(opts.replay.max(1024));
         let probing = adapters.iter().map(|_| AtomicBool::new(false)).collect();
+        let pricing = Pricing::new(opts.data_dir.as_ref().map(|d| d.join("pricing")));
+        pricing.set_sync_enabled(opts.price_sync.is_some());
         Arc::new(Engine {
             probing,
             adapters,
@@ -263,6 +286,9 @@ impl Engine {
             dirty: AtomicBool::new(false),
             updating: AtomicBool::new(false),
             started: now_ms(),
+            pricing,
+            usage: RwLock::new(UsageIndex::default()),
+            usage_tx: Mutex::new(None),
         })
     }
 
@@ -329,6 +355,8 @@ impl Engine {
         s.sessions = st.sessions.len();
         s.working = st.sessions.values().filter(|e| e.session.status == Status::Work).count();
         s.subscribers = self.tx.receiver_count();
+        drop(st);
+        s.usage = self.opts.usage.then(|| self.usage_progress());
         s
     }
 
@@ -448,6 +476,7 @@ impl Engine {
     fn remove_source(&self, st: &mut State, src: &Path) -> Vec<Pending> {
         let Some(s) = st.sources.remove(src) else { return Vec::new() };
         self.dirty.store(true, Ordering::Relaxed);
+        self.usage_gone(src);
         let mut out = Vec::new();
         for k in s.keys {
             if st.sessions.get(&k).is_some_and(|e| e.src == src) {
@@ -655,6 +684,7 @@ impl Engine {
         let _ = tx.send(Msg::Rescan);
 
         spawn_ticker(tx.clone(), self.opts.rescan, || Msg::Rescan);
+        tokio::spawn(self.clone().usage_loop());
         if let Some(every) = self.opts.update_check {
             // Check once at start, then periodically; the fetch itself runs blocking.
             let _ = tx.send(Msg::UpdateTick);
@@ -841,6 +871,7 @@ impl Engine {
                     self.apply(&mut st, adapter, &src, out, true, now_ms())
                 };
                 self.publish(pending);
+                self.usage_touch(&src);
             }
             Ok(Err(err)) => self.note_error(&format!("{}: {err:#}", src.display())),
             Err(err) => self.note_error(&format!("{}: {err}", src.display())),

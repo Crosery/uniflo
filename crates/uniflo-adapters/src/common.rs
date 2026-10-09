@@ -11,6 +11,18 @@ pub fn ends_turn_reason(r: &str) -> bool {
     matches!(r, "end_turn" | "stop_sequence" | "stop" | "length" | "refusal")
 }
 
+/// A harness-reported step amount. Only a positive finite number counts: subscription and
+/// free channels write 0, which says nothing about the API-equivalent cost.
+pub fn reported_cost(v: Option<&serde_json::Value>) -> Option<f64> {
+    v.and_then(serde_json::Value::as_f64).filter(|c| c.is_finite() && *c > 0.0)
+}
+
+/// `output` per the usage contract includes thinking. A harness whose `output` excludes it
+/// shows `reasoning > output` (impossible when included), so it is added back then.
+pub fn output_with_reasoning(output: u64, reasoning: u64) -> u64 {
+    if reasoning > output { output + reasoning } else { output }
+}
+
 /// `2026-08-29T15-54-05-510Z_<id>` → `<id>` (Pi-style file stems).
 pub fn after_ts_prefix(stem: &str) -> Option<&str> {
     let (ts, id) = stem.split_once('_')?;
@@ -146,6 +158,17 @@ pub mod testkit {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn usage_helpers() {
+        use serde_json::json;
+        assert_eq!(reported_cost(Some(&json!(0.25))), Some(0.25));
+        assert_eq!(reported_cost(Some(&json!(0))), None, "0 = not reported");
+        assert_eq!(reported_cost(Some(&json!("1"))), None);
+        assert_eq!(reported_cost(None), None);
+        assert_eq!(output_with_reasoning(100, 40), 100, "already included");
+        assert_eq!(output_with_reasoning(10, 40), 50, "provably excluded");
+    }
 
     #[test]
     fn ts_prefixed_stems() {

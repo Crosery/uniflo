@@ -5,7 +5,7 @@
 //! Messages use `toolCall` blocks + `toolResult` role (Pi) or Anthropic
 //! `tool_use`/`tool_result` blocks (Command Code); both are accepted.
 
-use crate::common::{after_ts_prefix, ends_turn_reason, under_any};
+use crate::common::{after_ts_prefix, ends_turn_reason, output_with_reasoning, reported_cost, under_any};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, Read};
@@ -280,19 +280,8 @@ impl LineDecoder for PiFamily {
                 let sub = string_of(v, "customType").unwrap_or_else(|| "custom".into());
                 cx.emit(lid, t, Body::System { subtype: sub, text: text_of(v.get("content").unwrap_or(&Value::Null)) });
             }
-            "child_usage_attributed" => {
-                if let Some(u) = v.get("childUsage").filter(|u| u.is_object()) {
-                    let n = |a: &str| u.get(a).and_then(Value::as_u64).unwrap_or(0);
-                    let usage = Usage {
-                        input: n("input"),
-                        output: n("output"),
-                        cache_read: n("cacheRead"),
-                        cache_write: n("cacheWrite"),
-                        reasoning: 0,
-                    };
-                    cx.emit(format!("{lid}:usage"), t, Body::Usage(usage));
-                }
-            }
+            // Sums the subagent transcript's own usage, which is indexed as its own session.
+            "child_usage_attributed" => {}
             "agent_status" => {
                 if let Some(s) = v.get("status").and_then(|s| string_of(s, "summary")) {
                     cx.emit(lid, t, Body::System { subtype: "agent_status".into(), text: s });
@@ -405,12 +394,15 @@ fn assistant(m: &Value, content: &Value, lid: &str, t: i64, cx: &mut Cx<'_, ()>)
     }
     if let Some(u) = m.get("usage").filter(|u| u.is_object()) {
         let n = |a: &str, b: &str| u.get(a).or_else(|| u.get(b)).and_then(Value::as_u64).unwrap_or(0);
+        let reasoning = n("reasoning", "reasoningTokens");
         let usage = Usage {
             input: n("input", "inputTokens"),
-            output: n("output", "outputTokens"),
+            output: output_with_reasoning(n("output", "outputTokens"), reasoning),
             cache_read: n("cacheRead", "cacheReadTokens"),
             cache_write: n("cacheWrite", "cacheWriteTokens"),
-            reasoning: n("reasoning", "reasoningTokens"),
+            reasoning,
+            model: model.clone(),
+            cost_usd: reported_cost(u.pointer("/cost/total").or_else(|| u.get("cost"))),
         };
         cx.emit(format!("{lid}:usage"), t, Body::Usage(usage));
     }
@@ -458,7 +450,7 @@ mod tests {
             json!({"type":"message","id":"u1","timestamp":"2026-10-02T11:40:00Z","message":{"role":"user","content":[{"type":"text","text":"build it"}]}}),
         );
         s += &l(
-            json!({"type":"message","id":"a1","timestamp":"2026-10-02T11:40:01Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"ok"},{"type":"toolCall","id":"call_1","name":"bash","arguments":{"command":"make"}}],"model":"glm-5","usage":{"input":10,"output":2,"cacheRead":0,"cacheWrite":0},"stopReason":"toolUse"}}),
+            json!({"type":"message","id":"a1","timestamp":"2026-10-02T11:40:01Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"ok"},{"type":"toolCall","id":"call_1","name":"bash","arguments":{"command":"make"}}],"model":"glm-5","usage":{"input":10,"output":2,"reasoning":5,"cacheRead":0,"cacheWrite":0,"cost":{"total":0.0125}},"stopReason":"toolUse"}}),
         );
         s += &l(
             json!({"type":"message","id":"r1","timestamp":"2026-10-02T11:40:02Z","message":{"role":"toolResult","toolCallId":"call_1","toolName":"bash","content":[{"type":"text","text":"ok"}],"isError":false}}),
@@ -484,6 +476,9 @@ mod tests {
         assert_eq!(r.meta.title.as_deref(), Some("Build project"));
         assert_eq!(r.meta.model.as_deref(), Some("glm-5"));
         assert_eq!(r.meta.cwd.as_deref(), Some("/proj"));
+        // reasoning > output means `output` left it out: added back per the usage contract.
+        assert!(matches!(&r.events[3].body, Body::Usage(u)
+            if (u.output, u.reasoning) == (7, 5) && u.cost_usd == Some(0.0125) && u.model.as_deref() == Some("glm-5")));
         assert!(r.unknown.is_empty(), "{:?}", r.unknown);
     }
 

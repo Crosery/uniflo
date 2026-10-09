@@ -2,14 +2,14 @@
 
 > 模块边界、代码风格、性能预算和隐私红线；改任何 crate 前读。
 
-状态：`current` · 更新：2026-10-08
+状态：`current` · 更新：2026-10-09
 
 ## 模块边界
 
 | crate | 职责 | 允许依赖 |
 |---|---|---|
 | `uniflo-schema` | wire 类型（`Session`/`Event`/`Envelope`），唯一对外契约 | serde、serde_json |
-| `uniflo-core` | 适配器 trait、JSONL 驱动、状态机、引擎、缓存、文件监听、进程探测 | schema |
+| `uniflo-core` | 适配器 trait、JSONL 驱动、状态机、引擎、缓存、文件监听、进程探测、用量账本与价格目录（`usage/`、`pricing/`）、自有目录（`paths`） | schema |
 | `uniflo-search` | 查询语法解析 + 模糊排序 | schema |
 | `uniflo-adapters` | 每个 harness 一个模块，每个模块一个 cargo feature | core、schema |
 | `uniflo-gateway` | HTTP/SSE/NDJSON/WS 网关、Host/Origin/token 守卫 | core、search、schema |
@@ -36,6 +36,9 @@
 | 全量模糊搜索（fzf 语法扫全部会话） | < 50 ms | 同上，`/v1/sessions?q=<词>` |
 | 追加一行到客户端收到事件 | < 50 ms（监听命中时个位数毫秒） | `crates/uniflo-core/tests/engine.rs`、`crates/uniflo-gateway/tests/gateway.rs` |
 | 冷启动全量索引 | 本机全部会话 < 2 s；有缓存 < 300 ms | `uniflo scan --no-cache` / `uniflo scan` |
+| 守护进程启动到 `/v1/health` | 用量索引不得拖慢：有缓存时不超过改动前 +50% | release 二进制 `uniflo daemon --bind 127.0.0.1:74xx`，隔离 `HOME` 与 `UNIFLO_DATA_DIR`，轮询 `/v1/health` |
+| `/v1/usage` 聚合（索引就绪后） | 单次 < 100 ms（`project` 首次 stat 各 cwd 除外） | `curl -w '%{time_total}' '…/v1/usage?group_by=…'` |
+| 追加 usage 到 `session` envelope 带新合计 | < 2 s（热会话通常 < 100 ms） | `crates/uniflo-gateway/tests/usage.rs` |
 
 引擎循环里不得做阻塞 IO：读文件、`ps`/`lsof`、SQLite 都走 `spawn_blocking`，结果回到单写者循环再写状态。
 
@@ -45,6 +48,8 @@
 - 测试夹具一律手写合成数据（见各适配器 `tests` 模块与 `common::testkit`）；不提交真实会话片段，哪怕脱敏。
 - 调试真实数据只输出计数、键名、类型分布；日志里不打印会话正文。
 - 凭据只走环境变量（`UNIFLO_TOKEN`）或钥匙串；不进源码、日志、产物。
+- Uniflo 自己的文件只写到 `uniflo_core::paths` 给出的目录（数据、配置、缓存）；测试用 `UNIFLO_HOME` / `UNIFLO_DATA_DIR` 指到临时目录。
+- 联网只用系统 `curl`，且只在规范写明的地方（更新检查、价格同步），都可关闭（`--no-update-check`、`--no-price-sync`），请求里不带任何会话数据。测试用本地 HTTP 服务（`UNIFLO_PRICING_URL`），不访问互联网。
 
 ## 测试
 

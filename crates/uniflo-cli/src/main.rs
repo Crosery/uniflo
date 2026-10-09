@@ -2,6 +2,7 @@
 
 mod client;
 mod render;
+mod usage;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
@@ -10,7 +11,7 @@ use render::Style;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use uniflo_core::util::now_ms;
-use uniflo_core::{Engine, EngineOptions, HistoryQuery};
+use uniflo_core::{Engine, EngineOptions, HistoryQuery, PriceSync};
 use uniflo_gateway::GuardOptions;
 use uniflo_schema::{Envelope, Event, Harness, Session, Status};
 use uniflo_search::{Query, search};
@@ -54,6 +55,12 @@ enum Cmd {
         /// Skip the periodic crates.io update check (checks are opt-out; one HTTPS GET per interval).
         #[arg(long)]
         no_update_check: bool,
+        /// Never fetch the price catalog (embedded snapshot + local files only).
+        #[arg(long)]
+        no_price_sync: bool,
+        /// Seconds after startup before the first price sync (tests).
+        #[arg(long, default_value_t = 60, hide = true)]
+        price_sync_delay: u64,
     },
     /// Check crates.io for a newer stable release, or install it (`cargo install uniflo --force`).
     Update {
@@ -125,12 +132,26 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Token usage and API-equivalent cost by harness / model / project / day …, or per step
+    /// of one session (`uniflo usage <key>`).
+    Usage(usage::UsageArgs),
+    /// Price catalog status; `uniflo pricing sync` fetches it now.
+    Pricing(usage::PricingArgs),
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Daemon { ref bind, ref cors_origins, ref allow_hosts, stale_after, no_cache, no_update_check } => {
+        Cmd::Daemon {
+            ref bind,
+            ref cors_origins,
+            ref allow_hosts,
+            stale_after,
+            no_cache,
+            no_update_check,
+            no_price_sync,
+            price_sync_delay,
+        } => {
             let guard = GuardOptions {
                 token: cli.token.clone(),
                 cors_origins: cors_origins.clone(),
@@ -139,10 +160,13 @@ fn main() -> Result<()> {
             if !allow_hosts.is_empty() && guard.token.is_none() {
                 bail!("--allow-host exposes transcripts beyond loopback; set --token as well");
             }
-            daemon(bind, guard, stale_after, no_cache, !no_update_check)
+            let price_sync = (!no_price_sync)
+                .then(|| PriceSync { delay: Duration::from_secs(price_sync_delay), ..Default::default() });
+            daemon(bind, guard, stale_after, no_cache, !no_update_check, price_sync)
         }
         Cmd::Scan { json, no_cache } => scan(json, no_cache),
         Cmd::Update { check, prerelease, json } => update(check, prerelease, json),
+        Cmd::Pricing(ref a) => usage::pricing(&cli, a),
         ref cmd => Source::open(&cli)?.run(cmd),
     }
 }
@@ -155,7 +179,14 @@ fn engine_opts(no_cache: bool, stale_after: u64) -> EngineOptions {
     }
 }
 
-fn daemon(bind: &str, guard: GuardOptions, stale_after: u64, no_cache: bool, update_check: bool) -> Result<()> {
+fn daemon(
+    bind: &str,
+    guard: GuardOptions,
+    stale_after: u64,
+    no_cache: bool,
+    update_check: bool,
+    price_sync: Option<PriceSync>,
+) -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "uniflo=info,warn".into()),
@@ -165,6 +196,7 @@ fn daemon(bind: &str, guard: GuardOptions, stale_after: u64, no_cache: bool, upd
     let mut opts = engine_opts(no_cache, stale_after);
     // Background crates.io check: hourly; the first one fires right after startup.
     opts.update_check = update_check.then(|| Duration::from_secs(3600));
+    opts.price_sync = price_sync;
     let engine = Engine::new(uniflo_adapters::all(), opts);
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     rt.block_on(async move {
@@ -186,6 +218,7 @@ fn daemon(bind: &str, guard: GuardOptions, stale_after: u64, no_cache: bool, upd
         .await?;
         runner.abort();
         engine.save_cache()?;
+        engine.save_usage_cache()?;
         eprintln!("uniflo: index cache saved, bye");
         Ok(())
     })
@@ -471,7 +504,8 @@ impl Source {
                 }
                 Ok(())
             }
-            Cmd::Daemon { .. } | Cmd::Scan { .. } | Cmd::Update { .. } => unreachable!(),
+            Cmd::Usage(a) => usage::usage(self, a),
+            Cmd::Daemon { .. } | Cmd::Scan { .. } | Cmd::Update { .. } | Cmd::Pricing(_) => unreachable!(),
         }
     }
 }

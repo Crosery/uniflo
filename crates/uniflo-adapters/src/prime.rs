@@ -11,7 +11,7 @@
 //! - Live workers register in `~/.prime/agent/daemon-workers/<worker-id>/<id>.json` with PID,
 //!   root session ID, and active worker socket.
 
-use crate::common::{ends_turn_reason, under_any};
+use crate::common::{ends_turn_reason, reported_cost, under_any};
 use serde_json::Value;
 use std::collections::HashSet;
 use std::io::{BufRead, Read};
@@ -244,19 +244,8 @@ impl LineDecoder for PrimeDecoder {
                     cx.emit(lid, t, Body::System { subtype: sub, text });
                 }
             }
-            "child_usage_attributed" => {
-                if let Some(u) = v.get("childUsage").filter(|u| u.is_object()) {
-                    let n = |a: &str| u.get(a).and_then(Value::as_u64).unwrap_or(0);
-                    let usage = Usage {
-                        input: n("input"),
-                        output: n("output"),
-                        cache_read: n("cacheRead"),
-                        cache_write: n("cacheWrite"),
-                        reasoning: 0,
-                    };
-                    cx.emit(format!("{lid}:usage"), t, Body::Usage(usage));
-                }
-            }
+            // Sums the subagent transcript's own usage, which is indexed as its own session.
+            "child_usage_attributed" => {}
             "agent_status" => {
                 if let Some(s) = v.get("status").and_then(|s| string_of(s, "summary")) {
                     cx.emit(lid, t, Body::System { subtype: "status".into(), text: s });
@@ -373,6 +362,8 @@ fn assistant(m: &Value, content: &Value, lid: &str, t: i64, cx: &mut Cx<'_, ()>)
             cache_read: n("cacheRead"),
             cache_write: n("cacheWrite"),
             reasoning: 0,
+            model: model.clone(),
+            cost_usd: reported_cost(u.pointer("/cost/total").or_else(|| u.get("cost"))),
         };
         cx.emit(format!("{lid}:usage"), t, Body::Usage(usage));
     }

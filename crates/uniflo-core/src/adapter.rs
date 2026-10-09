@@ -110,6 +110,29 @@ pub trait Adapter: Send + Sync + 'static {
     /// Newest events of one session (chronological order), paging backwards with `before`.
     fn history(&self, src: &Path, session_id: &str, q: &HistoryQuery) -> Result<Vec<Event>>;
 
+    /// Every record of `src` from its very beginning, in source order, fed to `sink` with its
+    /// native session id; returns a cursor [`Adapter::read`] continues from. For consumers
+    /// that need complete history (the usage ledger), never the head+tail sample.
+    /// `sessions` are the native ids the engine knows in `src`.
+    ///
+    /// The default takes a summary cursor first, then replays each session's full
+    /// [`Adapter::history`]: events after the cursor arrive again on the next read with the
+    /// same ids, which consumers treat as replacements.
+    fn read_all(&self, src: &Path, sessions: &[String], sink: &mut dyn FnMut(&str, Record)) -> Result<Cursor> {
+        let out = self.read(src, None)?;
+        for (id, r) in out.batch.items {
+            if let Record::Meta(m) = r {
+                sink(&id, Record::Meta(m));
+            }
+        }
+        for id in sessions {
+            for e in self.history(src, id, &HistoryQuery { before: None, limit: usize::MAX / 2 })? {
+                sink(id, Record::Event(e));
+            }
+        }
+        Ok(out.cursor)
+    }
+
     /// Cheap check whether `src` moved past `cursor` (hot polling, warm restarts).
     fn changed(&self, src: &Path, cursor: &Cursor) -> bool {
         match std::fs::metadata(src) {
