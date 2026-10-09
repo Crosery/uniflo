@@ -36,6 +36,7 @@ Gateway（axum）                       ← uniflo-gateway
 - **旁路文件**：会话目录里原地重写的 JSON（标题、cwd、模型、父会话、逐回合用量）由 `uniflo-adapters::common::WithSidecars` 包装的 `Sidecar` 读取：摘要 / 重置、会话首次出现内容、或旁路文件签名（mtime + 大小）变化时才补发；只有元数据、没有任何事件的会话不列出（grok、kiro、kimi）。
 - **整文件重写**：Craft 以「临时文件 → 删除 → 改名」重写 `session.jsonl`，所以源是会话目录，每次读取整源重读并 `reset`；文件短暂缺失时保留上次结果，不计读错误。
 - **库内会话树**：Devin、OpenClaw 的消息是一棵树，只展示当前可见分支；分支延长按行跟随，切换到别的分支时整库重读（`reset`）。OpenClaw 库里的条目是 Pi 条目，经 `uniflo_core::decode_record` 交给 Pi 的 `LineDecoder` 解码，不重复实现。
+- **Cursor IDE 库**：`state.vscdb` 可达 GB 级，只按键前缀区间枚举、按主键取单值，不对每个值 `json_extract`；结果按库文件与 WAL 的签名缓存，签名不变不重读。
 - **缓存**：索引完成后、每 30 s（有变化时）和退出时把会话快照和游标写到 `~/Library/Caches/uniflo/index-v1.json`；启动时未变的源直接恢复，只读新增字节。
 
 ## 用量与费用

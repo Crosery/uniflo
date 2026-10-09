@@ -31,7 +31,7 @@
 | `hermes` | Hermes | `~/.hermes/state.db` | SQLite | 终止型 `finish_reason` | — | `hermes --resume <id>` |
 | `factory` | Factory Droid | `~/.factory/sessions/<slug>/<id>.jsonl` | JSONL | 纯文本回复 | — | — |
 | `reasonix` | Reasonix | `~/.reasonix/projects/<slug>/sessions/*.events.jsonl` | 追加 / 替换日志 | 纯文本回复 | — | — |
-| `cursor` | Cursor Agent | `~/.cursor/projects/**/agent-transcripts/<id>/<id>.jsonl` | JSONL（无 id、无时间） | 纯文本回复 | — | `cursor-agent --resume <id>` |
+| `cursor` | Cursor Agent | `~/.cursor/projects/**/agent-transcripts/<id>/<id>.jsonl`；IDE 全局库 `state.vscdb`（macOS `~/Library/Application Support/Cursor/User/globalStorage/`，Linux `$XDG_CONFIG_HOME`（默认 `~/.config`）`/Cursor/User/globalStorage/`，Windows `%APPDATA%\Cursor\User\globalStorage\`） | JSONL（无 id、无时间）；IDE 库是 SQLite 键值表，补标题、cwd、模型、时间、父会话，并列出消息只存在库里的旧版 IDE 会话 | 纯文本回复 | — `cursor-agent --resume <id>` |
 | `dsh` | DeepSeek Harness | `~/.dsh/sessions/<cwd-slug>/<id>/session[.v4].jsonl.zstd` | zstd 帧批量 JSONL（帧 = 一次 flush 的若干整行；行永不跨帧） | `turn/end` reason completed/aborted/interrupted/error | `session.lock` 被 harness 进程持有 → `lsof`（Win 无 lsof，退化为事件规则） | — |
 | `grok` | Grok CLI | `~/.grok/sessions/<百分号编码的 cwd>/<uuid>/`：`updates.jsonl`，旁路 `summary.json`、`usage.json`、`events.jsonl`，子代理 `<父会话>/subagents/*/meta.json`（三平台同一相对路径） | ACP 风格 JSONL（消息与思考是流式片段，合并不 trim）+ 原地重写的 JSON 旁路文件；只有 hook 行的空壳会话不列出 | `turn_completed`（`stop_reason`）；没有它的版本用 `events.jsonl` 的 `turn_ended` | — | `grok --resume <id>` |
 | `kiro` | Kiro CLI | `~/.kiro/sessions/cli/<uuid>.jsonl` + 同名 `.json` 旁路（三平台同一相对路径） | JSONL（无 id，位置 id）+ JSON 旁路（cwd、标题、模型、时间） | 助手文本消息 | — | — |
@@ -42,7 +42,7 @@
 | `craft` | Craft Agents | `~/.craft-agent/workspaces/<工作区>/sessions/<会话>/session.jsonl`，id 为 `<工作区>/<会话>`；不读工作区 `config.json`（含 token） | JSONL，首行 SessionHeader；整文件重写（临时文件 → 删除 → 改名），每次整源重读 | 末条助手文本之后没有工具行 | — | — |
 | `devin` | Devin CLI | `cli/sessions.db`，数据根依次 `$XDG_DATA_HOME/devin`、`~/.local/share/devin`、`~/Library/Application Support/devin`、`%APPDATA%\devin`，取第一个有库的 | SQLite（消息树，展示 `main_chain_id` 主链；`hidden = 1` 不列出） | 无工具调用的助手消息 | — | `devin --resume <id>`（需 cwd） |
 
-- **未经真机验证**：`kiro`、`copilot`、`openclaw`、`codebuddy`、`craft`、`devin` 本机没有数据；`kimi` 本机只有不含对话的空壳会话（不列出），对话映射同样未经真机验证。这些映射只由合成夹具测试覆盖。
+- **未经真机验证**：`kiro`、`copilot`、`openclaw`、`codebuddy`、`craft`、`devin` 本机没有数据；`kimi` 本机只有不含对话的空壳会话（不列出），对话映射同样未经真机验证；`cursor` 的 IDE 元数据补全与旧版 IDE 会话本机无可匹配数据（transcript id 与 IDE composer 不重合，库里没有消息行）。这些映射只由合成夹具测试覆盖。
 - 环境变量覆盖（`KIMI_CODE_HOME`、`COPILOT_HOME`、`OPENCLAW_STATE_DIR`、`CODEBUDDY_CONFIG_DIR`、`XDG_DATA_HOME` / `APPDATA`）只在该目录确有会话数据时采用，否则回落默认位置。
 - 恢复命令只是文档，与 `/v1/sessions/{key}/resume` 的表一致；"需 cwd" 表示要在会话的工作目录下执行。
 - `craft` 的 id 含 `/`，请求 `/v1/sessions/{key}` 时 key 必须百分号编码（CLI 与网页演示已编码）。Craft 的 Claude 引擎同时在 `~/.claude/projects` 写自己的 transcript（索引为 `claude`），同一对话会在两个 harness 各出现一次；用量只记在 `claude`。
@@ -69,7 +69,8 @@
 | codebuddy | 同 workbuddy；记录没有 `providerData.usage` 时用 `providerData.rawUsage`（OpenAI completions 形） | `input = prompt_tokens − cached_tokens`（或 `prompt_tokens_details.cached_tokens`），后者记为 `cache_read`；`output = completion_tokens`；`reasoning = completion_tokens_details.reasoning_tokens`（或 `completion_thinking_tokens`），output 未含时加回 | `providerData.model`，否则 `requestModelName` | — |
 | openclaw | 同 Pi（条目由 Pi 解码） | 同 Pi | `message.model` | `usage.cost.total` |
 | devin | 消息 `metadata.metrics` | 原样（`input_tokens` 不含缓存，`cache_read_tokens` / `cache_creation_tokens` 分列） | `metadata.generation_model` | — |
-| antigravity / cursor / factory / reasonix / kiro / copilot / craft | 不记录用量（craft 头部的 `tokenUsage` 是会话合计，且已由 `claude` 逐步计入） | — | — | — |
+| cursor（IDE 旧版会话） | 气泡的 `tokenCount` | 原样（`inputTokens` / `outputTokens`） | 气泡 `modelInfo.modelName`，否则会话的 `modelConfig.modelName` | — |
+| antigravity / cursor（transcript）/ factory / reasonix / kiro / copilot / craft | 不记录用量（craft 头部的 `tokenUsage` 是会话合计，且已由 `claude` 逐步计入） | — | — | — |
 
 - 重复计数：Codex 一旦出现 `token_usage_record`，同文件的 `token_count` 都是它的重复，全部跳过；旧 rollout 只有 `token_count`，`total_token_usage` 未变化的重复行（限流刷新）跳过。Pi / Prime 的 `child_usage_attributed` 是子代理文件自身用量的合计（真实数据逐 token 相等），子代理会话本身已计，故不再产出 usage。
 - `cost_usd` 只在 harness 自报正数时填写；≤ 0 视为未报，由价格目录计算。

@@ -23,6 +23,8 @@ pub mod copilot;
 pub mod craft;
 #[cfg(feature = "cursor")]
 pub mod cursor;
+#[cfg(feature = "cursor")]
+mod cursor_ide;
 #[cfg(feature = "devin")]
 pub mod devin;
 #[cfg(feature = "dsh")]
@@ -57,7 +59,8 @@ pub mod reasonix;
     feature = "minimax",
     feature = "copilot",
     feature = "devin",
-    feature = "openclaw"
+    feature = "openclaw",
+    feature = "cursor"
 ))]
 #[allow(dead_code, reason = "shared helpers; a single-adapter feature set uses only some")]
 mod sqlite;
