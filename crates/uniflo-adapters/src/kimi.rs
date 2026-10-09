@@ -646,6 +646,28 @@ mod tests {
     }
 
     #[test]
+    fn shell_metadata_arrives_with_the_first_conversation() {
+        let fx = Fixture::new();
+        let (a, p) = setup(&fx);
+        let w = wire();
+        let lines: Vec<&str> = w.lines().collect();
+        std::fs::write(&p, lines[..3].join("\n") + "\n").unwrap();
+        let out = uniflo_core::Adapter::read(&a, &p, None).unwrap();
+        assert!(out.batch.items.is_empty(), "an empty shell is not listed");
+        // The conversation starts while the daemon follows the file.
+        fx.append(&p, &(lines[3..].join("\n") + "\n"));
+        let out2 = uniflo_core::Adapter::read(&a, &p, Some(&out.cursor)).unwrap();
+        assert!(!out2.summary);
+        let g = group(out2.batch);
+        assert_eq!(g[S].meta.model.as_deref(), Some("kimi-k2"), "from the shell's config.update");
+        assert_eq!(g[S].meta.started_at, Some(1790000000000), "from the shell's metadata record");
+        assert_eq!(g[S].meta.cwd.as_deref(), Some("/w/app"));
+        assert_eq!(kinds(&g[S].events)[0], "user_message");
+        let out3 = uniflo_core::Adapter::read(&a, &p, Some(&out2.cursor)).unwrap();
+        assert!(out3.batch.items.is_empty(), "sent once");
+    }
+
+    #[test]
     fn migrated_history_without_steps() {
         let fx = Fixture::new();
         let (a, p) = setup(&fx);

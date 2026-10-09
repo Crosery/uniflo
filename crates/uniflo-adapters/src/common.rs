@@ -6,7 +6,7 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 use uniflo_core::util::file_mtime_ms;
 use uniflo_core::{
-    Adapter, Cursor, HarnessInfo, HistoryQuery, JsonlAdapter, LineDecoder, LiveSession, ReadOutput, Record,
+    Adapter, Cursor, HarnessInfo, HistoryQuery, JsonlAdapter, LineDecoder, LiveSession, MetaPatch, ReadOutput, Record,
 };
 use uniflo_schema::Event;
 
@@ -70,6 +70,50 @@ struct SideState {
     /// The session has produced events (it is listed).
     #[serde(default)]
     content: bool,
+    /// Metadata read while there were no events yet, sent with the first ones.
+    #[serde(default)]
+    held: Held,
+}
+
+/// [`MetaPatch`] merged the way the engine applies patches.
+#[derive(Default, Serialize, Deserialize)]
+struct Held {
+    parent: Option<String>,
+    title: Option<(u8, String)>,
+    cwd: Option<String>,
+    model: Option<String>,
+    started_at: Option<i64>,
+    updated_at: Option<i64>,
+}
+
+impl Held {
+    fn add(&mut self, p: &MetaPatch) {
+        if p.parent.is_some() {
+            self.parent.clone_from(&p.parent);
+        }
+        if let Some((rank, t)) = &p.title
+            && self.title.as_ref().is_none_or(|(r, _)| rank >= r)
+        {
+            self.title = Some((*rank, t.clone()));
+        }
+        if p.cwd.is_some() {
+            self.cwd.clone_from(&p.cwd);
+        }
+        if p.model.is_some() {
+            self.model.clone_from(&p.model);
+        }
+        if let Some(t) = p.started_at.filter(|t| *t > 0) {
+            self.started_at = Some(self.started_at.map_or(t, |x| x.min(t)));
+        }
+        if let Some(t) = p.updated_at {
+            self.updated_at = Some(self.updated_at.map_or(t, |x| x.max(t)));
+        }
+    }
+
+    fn into_patch(self) -> MetaPatch {
+        let Held { parent, title, cwd, model, started_at, updated_at } = self;
+        MetaPatch { parent, title, cwd, model, started_at, updated_at }
+    }
 }
 
 impl<D: Sidecar> WithSidecars<D> {
@@ -82,6 +126,7 @@ impl<D: Sidecar> WithSidecars<D> {
             d: Value::Null,
             sig: Vec::new(),
             content: false,
+            held: Held::default(),
         });
         (Cursor { state: side.d.clone(), ..c.clone() }, side)
     }
@@ -93,6 +138,7 @@ impl<D: Sidecar> WithSidecars<D> {
         src: &Path,
         cursor: &mut Cursor,
         content: bool,
+        held: Held,
         emit: Option<&[(i64, u64)]>,
         push: &mut dyn FnMut(&str, Record),
     ) {
@@ -105,7 +151,7 @@ impl<D: Sidecar> WithSidecars<D> {
             }
         }
         let d = serde_json::to_value(&st).unwrap_or(Value::Null);
-        cursor.state = serde_json::to_value(SideState { d, sig, content }).unwrap_or(Value::Null);
+        cursor.state = serde_json::to_value(SideState { d, sig, content, held }).unwrap_or(Value::Null);
     }
 }
 
@@ -127,18 +173,32 @@ impl<D: Sidecar> Adapter for WithSidecars<D> {
     }
 
     fn read(&self, src: &Path, cursor: Option<&Cursor>) -> Result<ReadOutput> {
-        let split = cursor.map(Self::split);
+        let mut split = cursor.map(Self::split);
         let mut out = self.inner.read(src, split.as_ref().map(|(c, _)| c))?;
         let had = split.as_ref().is_some_and(|(_, s)| s.content) && !out.reset;
         let content = had || out.batch.items.iter().any(|(_, r)| matches!(r, Record::Event(_)));
+        let mut held =
+            split.as_mut().filter(|_| !out.reset).map(|(_, s)| std::mem::take(&mut s.held)).unwrap_or_default();
         if !content {
-            // Metadata alone (headers, config records) would list an empty session.
-            out.batch.items.clear();
+            // Metadata alone (headers, config records) would list an empty session; keep it
+            // for when the conversation starts.
+            for (_, r) in out.batch.items.drain(..) {
+                if let Record::Meta(m) = r {
+                    held.add(&m);
+                }
+            }
+        } else if !had {
+            let early = std::mem::take(&mut held).into_patch();
+            if !early.is_empty()
+                && let Some(id) = self.inner.decoder.identify(src).map(|s| s.id)
+            {
+                out.batch.items.insert(0, (id, Record::Meta(early)));
+            }
         }
         // A plain follow re-sends sidecar records only when a sibling changed.
         let prev = split.as_ref().filter(|_| had && !out.summary).map(|(_, s)| s.sig.as_slice());
         let mut extra = Vec::new();
-        self.finish(src, &mut out.cursor, content, prev, &mut |id, r| extra.push((id.to_owned(), r)));
+        self.finish(src, &mut out.cursor, content, held, prev, &mut |id, r| extra.push((id.to_owned(), r)));
         out.batch.items.extend(extra);
         Ok(out)
     }
@@ -163,7 +223,7 @@ impl<D: Sidecar> Adapter for WithSidecars<D> {
             }
             sink(id, r)
         })?;
-        self.finish(src, &mut cursor, content, None, sink);
+        self.finish(src, &mut cursor, content, Held::default(), None, sink);
         Ok(cursor)
     }
 
