@@ -7,8 +7,9 @@
 //! (anything but the user's own input is synthetic); `context.append_message` mirrors it
 //! (the echo is skipped) and carries migrated history; `context.append_loop_event` streams
 //! one step: `step.begin`, `content.part` (`text` / `think`), `tool.call`, `tool.result`,
-//! `step.end`. A step that ends without tool calls ends the turn, unless the file records
-//! explicit turn ends (`turn.ended`, older builds). `usage.record` is one model call
+//! `step.end`. A step that ends without tool calls (or whose `finishReason` is not
+//! `tool_use`) ends the turn; older builds also write `turn.ended`, which shares that turn
+//! end's id. History pages start at a `turn.prompt`. `usage.record` is one model call
 //! (`inputOther` excludes the cache). Siblings rewritten in place: `state.json` (title, fork
 //! parent; "New Session" is a placeholder) and `<home>/session_index.jsonl` (cwd).
 
@@ -66,8 +67,9 @@ pub struct State {
     calls: u32,
     /// The file has step records; without them a tool-free assistant message ends the turn.
     steps: bool,
-    /// The file records explicit turn ends.
-    explicit: bool,
+    /// Offset of the input that opened the current turn: every end of that turn (a tool-free
+    /// step, then an explicit `turn.ended` in builds that write one) shares one id.
+    turn: Option<u64>,
     model: Option<String>,
 }
 
@@ -166,6 +168,10 @@ impl LineDecoder for Kimi {
         4
     }
 
+    fn page_start(&self, _prev: &Value, record: &Value) -> bool {
+        str_of(record, "type") == Some("turn.prompt")
+    }
+
     fn decode(&self, v: &Value, cx: &mut Cx<'_, State>) {
         let t = v.get("time").and_then(ts).unwrap_or(0);
         match str_of(v, "type").unwrap_or("") {
@@ -183,7 +189,11 @@ impl LineDecoder for Kimi {
                     model(cx, m);
                 }
             }
-            "turn.prompt" | "turn.steer" => {
+            ty @ ("turn.prompt" | "turn.steer") => {
+                cx.state.turn = Some(cx.pos);
+                if ty == "turn.prompt" {
+                    cx.state.echo = 0;
+                }
                 let user = by_user(v.get("origin"), cx);
                 let text = text_of(v.get("input").unwrap_or(&Value::Null));
                 if !text.trim().is_empty() {
@@ -224,17 +234,19 @@ impl LineDecoder for Kimi {
                 };
                 cx.emit(format!("o{}:usage", cx.pos), t, Body::Usage(usage));
             }
-            "turn.cancel" => {
-                cx.emit_at(t, Body::TurnEnd { reason: Some("cancelled".into()) });
-            }
-            "turn.ended" => {
-                cx.state.explicit = true;
-                cx.emit_at(t, Body::TurnEnd { reason: string_of(v, "reason") });
-            }
+            "turn.cancel" => turn_end(cx, t, Some("cancelled".into())),
+            "turn.ended" => turn_end(cx, t, string_of(v, "reason")),
             ty if IGNORED.contains(&ty) || ty.starts_with("turn.step.") => {}
             ty => cx.unknown(format!("type={ty}")),
         }
     }
+}
+
+fn turn_end(cx: &mut Cx<'_, State>, t: i64, reason: Option<String>) {
+    match cx.state.turn {
+        Some(at) => cx.emit(format!("o{at}:end"), t, Body::TurnEnd { reason }),
+        None => cx.emit_at(t, Body::TurnEnd { reason }),
+    };
 }
 
 fn model(cx: &mut Cx<'_, State>, m: String) {
@@ -304,8 +316,8 @@ fn message(m: &Value, t: i64, cx: &mut Cx<'_, State>) {
                 let id = str_of(c, "id").unwrap_or("");
                 tool_call(cx, t, id, str_of(f, "name").unwrap_or("tool"), f.get("arguments").unwrap_or(&Value::Null));
             }
-            if !cx.state.steps && calls.is_empty() && !cx.state.explicit {
-                cx.emit_at(t, Body::TurnEnd { reason: Some("completed".into()) });
+            if !cx.state.steps && calls.is_empty() {
+                turn_end(cx, t, Some("completed".into()));
             }
         }
         "tool" => {
@@ -324,8 +336,9 @@ fn loop_event(e: &Value, t: i64, cx: &mut Cx<'_, State>) {
             cx.state.calls = 0;
         }
         "step.end" => {
-            if cx.state.calls == 0 && !cx.state.explicit {
-                cx.emit_at(t, Body::TurnEnd { reason: Some("completed".into()) });
+            let last = str_of(e, "finishReason").map_or(cx.state.calls == 0, |r| r != "tool_use");
+            if last {
+                turn_end(cx, t, Some("completed".into()));
             }
         }
         "content.part" => parts(e.get("part").unwrap_or(&Value::Null), t, cx),
@@ -425,7 +438,8 @@ mod tests {
     use super::*;
     use crate::common::testkit::{Fixture, group, kinds};
     use serde_json::json;
-    use uniflo_schema::Status;
+    use uniflo_core::HistoryQuery;
+    use uniflo_schema::{Event, Status};
 
     const S: &str = "session_88888888-aaaa-bbbb-cccc-000000000008";
     const W: &str = "sessions/wd_app_abc123";
@@ -575,6 +589,60 @@ mod tests {
         let shown =
             out.batch.items.iter().any(|(_, r)| matches!(r, Record::Meta(m) if m.title.is_some() || m.cwd.is_some()));
         assert!(!shown, "no sidecar metadata for a shell without conversation");
+    }
+
+    #[test]
+    fn explicit_turn_end_after_a_tool_free_step_is_one_turn_end() {
+        let fx = Fixture::new();
+        let (a, p) = setup(&fx);
+        let w = wire();
+        let mut s: String = w.lines().take(14).map(|l| format!("{l}\n")).collect();
+        s += &l(json!({"type":"turn.ended","time":1790000006.5,"turnId":1,"reason":"completed"}));
+        s += &l(json!({"type":"turn.prompt","time":1790000010.0,"input":"again","origin":{"kind":"user"}}));
+        s += &l(
+            json!({"type":"context.append_message","time":1790000010.0,"message":{"role":"user","content":"again"}}),
+        );
+        s += &loop_ev(1790000011.0, json!({"type":"step.begin","uuid":"s3"}));
+        s += &loop_ev(1790000011.5, json!({"type":"content.part","part":{"type":"text","text":"Sure."}}));
+        s += &loop_ev(1790000012.0, json!({"type":"step.end","finishReason":"end_turn"}));
+        s += &l(json!({"type":"turn.ended","time":1790000012.5,"turnId":2,"reason":"completed"}));
+        std::fs::write(&p, &s).unwrap();
+        let r = fx.index(&a, &p);
+        let mut ends: Vec<&str> =
+            r.events.iter().filter(|e| matches!(e.body, Body::TurnEnd { .. })).map(|e| e.id.as_str()).collect();
+        ends.dedup();
+        let prompts: Vec<String> = s
+            .lines()
+            .scan(0usize, |at, l| {
+                let here = *at;
+                *at += l.len() + 1;
+                Some((here, l))
+            })
+            .filter(|(_, l)| l.contains("\"turn.prompt\""))
+            .map(|(at, _)| format!("o{at}:end"))
+            .collect();
+        assert_eq!(ends, prompts, "one id per turn, shared by step.end and turn.ended");
+        assert_eq!(r.status(), Status::Idle);
+        assert!(r.unknown.is_empty(), "{:?}", r.unknown);
+
+        // History pages start at a prompt: same ids and kinds as the whole read.
+        let index = uniflo_core::jsonl::dedupe_events(r.events.iter().cloned().map(Record::Event).collect());
+        for limit in [1, 3, 200] {
+            let mut paged = Vec::new();
+            let mut before = None;
+            for _ in 0..50 {
+                let page = a.history(&p, S, &HistoryQuery { before, limit }).unwrap();
+                let Some(first) = page.first() else { break };
+                before = first.pos;
+                paged.splice(0..0, page);
+            }
+            let ids = |evs: &[Event]| {
+                let mut v: Vec<(String, &'static str)> = evs.iter().map(|e| (e.id.clone(), e.body.kind())).collect();
+                v.sort();
+                v
+            };
+            assert_eq!(ids(&paged), ids(&index), "limit {limit}");
+        }
     }
 
     #[test]

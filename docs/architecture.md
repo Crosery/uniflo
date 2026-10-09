@@ -33,7 +33,7 @@ Gateway（axum）                       ← uniflo-gateway
 - **跟随**：偏移之后的新字节逐行解码；半行留到下次；文件变短或被重写视为重置，重新做头尾摘要。一次追平上限 16 MB，超过改走摘要。
 - **SQLite**：只读打开，按 rowid 读新行，未完成的 part/message 按主键重读；WAL 签名变化才触发读取。
 - **同一 `id` 的事件是覆盖**（流式更新）：客户端按 `(session, id)` upsert。
-- **流式片段**：`LineDecoder::finish` 在一次连续读取窗口结束时被调用，把还没闭合的消息（如 Grok 按片段写的文本）以 `partial` 发出；后续读到完整消息时复用同一 id 覆盖。
+- **流式片段**：`LineDecoder::finish` 在一次连续读取窗口结束时被调用，把还没闭合的消息（如 Grok 按片段写的文本）以 `partial` 发出；后续读到完整消息时复用同一 id 覆盖。历史分页只从 `LineDecoder::page_start` 认可的行开始（Grok 是带回合号与模型的提问、Kimi 是 `turn.prompt`），页内按 `pos` 排序，所以任意 `limit` 下翻页拿到的 id 与正文都和整文件解码一致；页尾之后还有内容时，未闭合的消息按完整发出。
 - **旁路文件**：会话目录里原地重写的 JSON（标题、cwd、模型、父会话、逐回合用量）由 `uniflo-adapters::common::WithSidecars` 包装的 `Sidecar` 读取：摘要 / 重置、会话首次出现内容、或旁路文件签名（mtime + 大小）变化时才补发；只有元数据、没有任何事件的会话不列出（grok、kiro、kimi）。
 - **整文件重写**：Craft 以「临时文件 → 删除 → 改名」重写 `session.jsonl`，所以源是会话目录，每次读取整源重读并 `reset`；文件短暂缺失时保留上次结果，不计读错误。
 - **库内会话树**：Devin、OpenClaw 的消息是一棵树，只展示当前可见分支；分支延长按行跟随，切换到别的分支时整库重读（`reset`）。OpenClaw 库里的条目是 Pi 条目，经 `uniflo_core::decode_record` 交给 Pi 的 `LineDecoder` 解码，不重复实现。

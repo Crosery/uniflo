@@ -47,8 +47,18 @@ pub trait LineDecoder: Send + Sync + 'static {
     fn decode(&self, record: &Value, cx: &mut Cx<'_, Self::State>);
 
     /// End of a contiguous run of records (one read window): emit what is still open, e.g. a
-    /// message streamed as fragments, as `partial`; its completed version reuses the id.
-    fn finish(&self, _cx: &mut Cx<'_, Self::State>) {}
+    /// message streamed as fragments. `more`: the window is a history page ending where a
+    /// newer page begins, so nothing open continues past it and it is complete; otherwise
+    /// emit it as `partial`, and its completed version reuses the id.
+    fn finish(&self, _cx: &mut Cx<'_, Self::State>, _more: bool) {}
+
+    /// Whether a history page may begin at `record`, `prev` being the record before it:
+    /// decoding from there with fresh state must give the events a whole-file decode gives.
+    /// Decoders whose events span records (merged fragments, turn numbering) say `false`
+    /// inside such a span; pages then reach back to the previous boundary.
+    fn page_start(&self, _prev: &Value, _record: &Value) -> bool {
+        true
+    }
 
     /// The file is one JSON document rewritten in place instead of appended lines.
     fn whole_file(&self, _path: &Path) -> bool {
@@ -178,15 +188,24 @@ impl<D: LineDecoder> JsonlAdapter<D> {
             }
         }
         if start > 0 {
-            self.finish(at, base + start as u64, state, sink);
+            self.finish(at, base + start as u64, state, sink, false);
         }
         start as u64
     }
 
-    fn finish(&self, at: At<'_>, pos: u64, state: &mut D::State, sink: &mut Sink) {
+    fn finish(&self, at: At<'_>, pos: u64, state: &mut D::State, sink: &mut Sink, more: bool) {
         let mut cx = Cx { key: at.key, src: at.src, pos, state, sink, n: 0 };
-        self.decoder.finish(&mut cx);
+        self.decoder.finish(&mut cx, more);
         sink.flush_meta();
+    }
+
+    /// [`LineDecoder::page_start`] on raw lines; an unparsable line is a boundary.
+    fn page_start(&self, prev: &[u8], line: &[u8]) -> bool {
+        let parse = |l: &[u8]| serde_json::from_slice::<Value>(trim_line(l)).ok();
+        match (parse(prev), parse(line)) {
+            (Some(p), Some(l)) => self.decoder.page_start(&p, &l),
+            _ => true,
+        }
     }
 
     fn decode_line(&self, line: &[u8], pos: u64, at: At<'_>, state: &mut D::State, sink: &mut Sink) {
@@ -344,14 +363,17 @@ impl<D: LineDecoder> Adapter for JsonlAdapter<D> {
         let size = f.metadata()?.len();
         let end = q.before.map_or(size, |b| b.min(size));
         let mut rev = RevLines::new(&mut f, end);
+        // Newest first. Past `limit`, keep going back until the oldest line can start a page.
         let mut lines: Vec<(u64, Vec<u8>)> = Vec::new();
         let mut estimate = 0usize;
-        while estimate < limit {
-            let Some((pos, line)) = rev.next_line()? else { break };
+        while let Some((pos, line)) = rev.next_line()? {
+            if estimate >= limit && lines.last().is_none_or(|(_, newer)| self.page_start(&line, newer)) {
+                break;
+            }
+            // Per line with fresh state; fragments still open at its end are not counted.
             let mut probe = Sink::default();
             let mut st = D::State::default();
             self.decode_line(&line, pos, At { src, key: &key }, &mut st, &mut probe);
-            self.finish(At { src, key: &key }, pos, &mut st, &mut probe);
             estimate += probe.records.iter().filter(|r| matches!(r, Record::Event(_))).count();
             lines.push((pos, line));
         }
@@ -361,8 +383,12 @@ impl<D: LineDecoder> Adapter for JsonlAdapter<D> {
         for (pos, line) in &lines {
             self.decode_line(line, *pos, At { src, key: &key }, &mut state, &mut sink);
         }
-        self.finish(At { src, key: &key }, end, &mut state, &mut sink);
-        Ok(dedupe_events(sink.records))
+        self.finish(At { src, key: &key }, end, &mut state, &mut sink, end < size);
+        // A merged message sits at its first fragment though it is emitted when it closes;
+        // ordered by position, the first event's `pos` is where the next older page ends.
+        let mut evs = dedupe_events(sink.records);
+        evs.sort_by_key(|e| e.pos);
+        Ok(evs)
     }
 
     fn read_all(&self, src: &Path, _sessions: &[String], sink: &mut dyn FnMut(&str, Record)) -> Result<Cursor> {
@@ -898,6 +924,8 @@ mod tests {
     }
 
     /// Fragments `{"f":"…"}` accumulate in state until `{"t":"end"}`; open text is flushed partial.
+    /// The message sits at its first fragment; `{"tick":1}` is an event inside a run. Pages
+    /// start only after an end.
     struct Frag;
 
     impl LineDecoder for Frag {
@@ -917,18 +945,25 @@ mod tests {
         fn decode(&self, v: &Value, cx: &mut Cx<'_, Self::State>) {
             match v.get("f").and_then(Value::as_str) {
                 Some(f) => cx.state.get_or_insert_with(|| (cx.pos, String::new())).1.push_str(f),
+                None if v.get("tick").is_some() => {
+                    cx.emit_at(0, Body::System { subtype: "tick".into(), text: String::new() });
+                }
                 None => {
                     if let Some((at, text)) = cx.state.take() {
-                        cx.emit(format!("m{at}"), 0, Body::AssistantMessage { text, model: None });
+                        cx.emit(format!("m{at}"), 0, Body::AssistantMessage { text, model: None }).pos = Some(at);
                     }
                     cx.emit_at(0, Body::TurnEnd { reason: None });
                 }
             }
         }
-        fn finish(&self, cx: &mut Cx<'_, Self::State>) {
+        fn finish(&self, cx: &mut Cx<'_, Self::State>, more: bool) {
             if let Some((at, text)) = cx.state.clone() {
-                cx.emit(format!("m{at}"), 0, Body::AssistantMessage { text, model: None }).partial = true;
+                let e = cx.emit(format!("m{at}"), 0, Body::AssistantMessage { text, model: None });
+                (e.pos, e.partial) = (Some(at), !more);
             }
+        }
+        fn page_start(&self, prev: &Value, _record: &Value) -> bool {
+            prev.get("t").is_some()
         }
     }
 
@@ -957,6 +992,57 @@ mod tests {
         assert!(matches!(&evs2[0].body, Body::AssistantMessage { text, .. } if text == "hello you"));
         let h = a.history(&p, "f", &HistoryQuery { before: None, limit: 10 }).unwrap();
         assert_eq!(h.iter().map(|e| e.body.kind()).collect::<Vec<_>>(), ["assistant_message", "turn_end"]);
+    }
+
+    #[test]
+    fn history_pages_never_start_inside_a_fragment_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = JsonlAdapter::new(Frag);
+        let p = dir.path().join("f.jsonl");
+        let mut s = String::new();
+        for turn in ["a", "b"] {
+            for i in 0..40 {
+                s += &format!("{{\"f\":\"{turn}{i} \"}}\n");
+                if i % 10 == 9 {
+                    s += "{\"tick\":1}\n";
+                }
+            }
+            s += "{\"t\":\"end\"}\n";
+        }
+        for i in 0..3 {
+            s += &format!("{{\"f\":\"c{i} \"}}\n");
+        }
+        std::fs::write(&p, &s).unwrap();
+        let out = a.read(&p, None).unwrap();
+        let full: Vec<Event> = events(&out).into_iter().cloned().collect();
+        assert_eq!(full.len(), 13);
+        // Page backwards with a limit far below the fragment count; every page boundary is an
+        // event position, as clients and the full-text indexer use it.
+        let mut paged: Vec<Event> = Vec::new();
+        let mut before = None;
+        for _ in 0..10 {
+            let page = a.history(&p, "f", &HistoryQuery { before, limit: 2 }).unwrap();
+            let Some(first) = page.first() else { break };
+            assert!(before.is_none_or(|b| first.pos.unwrap() < b), "pages move backwards");
+            before = first.pos;
+            paged.splice(0..0, page);
+        }
+        let view = |evs: &[Event]| -> std::collections::BTreeMap<String, (bool, String)> {
+            evs.iter()
+                .map(|e| {
+                    let text = match &e.body {
+                        Body::AssistantMessage { text, .. } => text.clone(),
+                        _ => String::new(),
+                    };
+                    (e.id.clone(), (e.partial, text))
+                })
+                .collect()
+        };
+        assert_eq!(paged.len(), full.len(), "no event twice");
+        assert_eq!(view(&paged), view(&full), "same ids, texts and partial flags as one whole read");
+        assert!(paged.windows(2).all(|w| w[0].pos <= w[1].pos));
+        let (partial, a) = &view(&full)["m0"];
+        assert!(!partial && a.starts_with("a0 a1 ") && a.ends_with("a39 "));
     }
 
     #[test]

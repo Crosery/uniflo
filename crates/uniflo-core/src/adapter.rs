@@ -79,7 +79,8 @@ pub struct ReadOutput {
 pub struct HistoryQuery {
     /// Only events with `pos < before`.
     pub before: Option<u64>,
-    /// Soft target: whole source lines are returned, so the result may exceed it slightly.
+    /// Soft target: whole source lines are returned, and a page reaches back to where decoding
+    /// can start (`LineDecoder::page_start`), so the result may exceed it.
     pub limit: usize,
 }
 

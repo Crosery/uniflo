@@ -191,10 +191,23 @@ impl LineDecoder for Grok {
         cx.state.last = cx.state.last.max(t);
     }
 
-    fn finish(&self, cx: &mut Cx<'_, State>) {
+    fn finish(&self, cx: &mut Cx<'_, State>, more: bool) {
         if let Some(r) = cx.state.open.clone() {
-            emit_run(cx, r).partial = true;
+            emit_run(cx, r).partial = !more;
         }
+    }
+
+    /// Only at a prompt that carries its turn number and model: fragments and turn ids
+    /// need nothing earlier from there.
+    fn page_start(&self, prev: &Value, record: &Value) -> bool {
+        fn kind(v: &Value) -> Option<&str> {
+            v.pointer("/params/update/sessionUpdate").and_then(Value::as_str)
+        }
+        kind(record) == Some("user_message_chunk")
+            && kind(prev) != Some("user_message_chunk")
+            && record
+                .pointer("/params/update/_meta")
+                .is_some_and(|m| m.get("promptIndex").is_some() && m.get("modelId").is_some())
     }
 }
 
@@ -486,7 +499,9 @@ mod tests {
     use super::*;
     use crate::common::testkit::{Fixture, group, kinds};
     use serde_json::json;
-    use uniflo_schema::Status;
+    use std::collections::BTreeMap;
+    use uniflo_core::HistoryQuery;
+    use uniflo_schema::{Event, Status};
 
     const G: &str = "sessions/%2Fw%2Fproj";
     const P: &str = "11111111-aaaa-bbbb-cccc-000000000001";
@@ -503,9 +518,13 @@ mod tests {
     }
 
     fn chunk(kind: &str, text: &str, t: i64) -> String {
+        prompt_chunk(kind, text, t, 0)
+    }
+
+    fn prompt_chunk(kind: &str, text: &str, t: i64, prompt: u64) -> String {
         let mut u = json!({"sessionUpdate": kind, "content": {"type": "text", "text": text}});
         if kind == "user_message_chunk" {
-            u["_meta"] = json!({"modelId": "grok-code-fast-1", "promptIndex": 0});
+            u["_meta"] = json!({"modelId": "grok-code-fast-1", "promptIndex": prompt});
         }
         upd(t, u)
     }
@@ -563,6 +582,91 @@ mod tests {
             &json!({"parent_session_id":P,"child_session_id":C,"subagent_id":C}).to_string(),
         );
         p
+    }
+
+    /// Three turns, the first answering in 500 fragments with a retry notice mid-reply; the
+    /// third is still streaming.
+    fn long_replies() -> String {
+        let mut s = hook(1790000000);
+        for (turn, n) in [(0u64, 500), (1, 300), (2, 40)] {
+            let t = 1790000001 + turn as i64 * 100;
+            s += &prompt_chunk("user_message_chunk", &format!("question {turn} "), t, turn);
+            s += &prompt_chunk("user_message_chunk", "please", t, turn);
+            s += &chunk("agent_thought_chunk", "thinking", t + 1);
+            for i in 0..n {
+                s += &chunk("agent_message_chunk", &format!("w{i} "), t + 2);
+                if turn == 0 && i == 250 {
+                    s += &upd(
+                        t + 2,
+                        json!({"sessionUpdate":"retry_state","type":"x","error_type":"api","message":"slow"}),
+                    );
+                }
+            }
+            if turn < 2 {
+                s += &upd(
+                    t + 3,
+                    json!({"sessionUpdate":"tool_call","toolCallId":format!("c{turn}"),"title":"Read","status":"completed","rawInput":{}}),
+                );
+                s += &chunk("agent_message_chunk", "done", t + 4);
+                s += &upd(t + 5, json!({"sessionUpdate":"turn_completed","stop_reason":"end_turn"}));
+            }
+        }
+        s
+    }
+
+    #[test]
+    fn history_pages_and_windows_match_the_index_for_long_fragment_runs() {
+        let fx = Fixture::new();
+        let p = fx.write(&format!("{G}/{P}/updates.jsonl"), &long_replies());
+        let a = gk(&fx);
+        let r = fx.index(&a, &p);
+        let view = |evs: &[Event]| -> BTreeMap<String, (&'static str, bool, String)> {
+            evs.iter()
+                .map(|e| {
+                    let text = match &e.body {
+                        Body::AssistantMessage { text, .. } | Body::UserMessage { text, .. } => text.clone(),
+                        Body::Reasoning { text } => text.clone(),
+                        _ => String::new(),
+                    };
+                    (e.id.clone(), (e.body.kind(), e.partial, text))
+                })
+                .collect()
+        };
+        let index = view(&r.events);
+        let ends: Vec<&String> = index.iter().filter(|(_, v)| v.0 == "turn_end").map(|(k, _)| k).collect();
+        assert_eq!(ends, ["turn1:end", "turn2:end"]);
+        let reply = r
+            .events
+            .iter()
+            .find(|e| matches!(&e.body, Body::AssistantMessage { text, .. } if text.starts_with("w0 w1 ")))
+            .unwrap();
+        assert!(matches!(&reply.body, Body::AssistantMessage { text, .. } if text.ends_with("w499 ")));
+        assert!(r.events.last().unwrap().partial, "the open reply at the end is partial");
+
+        // The gateway's paging: the default 200 and the web's 150 are far below the fragment count.
+        for limit in [200, 150, 7, 1] {
+            let mut paged: Vec<Event> = Vec::new();
+            let mut before = None;
+            for _ in 0..100 {
+                let page = a.history(&p, P, &HistoryQuery { before, limit }).unwrap();
+                let Some(first) = page.first() else { break };
+                assert!(before.is_none_or(|b| first.pos.unwrap() < b));
+                before = first.pos;
+                paged.splice(0..0, page);
+            }
+            assert_eq!(paged.len(), r.events.len(), "limit {limit}: no event twice");
+            assert_eq!(view(&paged), index, "limit {limit}: same ids, kinds, texts, partial flags");
+        }
+
+        let w = uniflo_core::window::window(
+            |before, limit| a.history(&p, P, &HistoryQuery { before, limit }),
+            &reply.id,
+            21,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(w.events[w.anchor], *reply);
+        assert!(w.events.iter().all(|e| index.get(&e.id) == view(std::slice::from_ref(e)).get(&e.id)));
     }
 
     #[test]

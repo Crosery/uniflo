@@ -98,7 +98,7 @@
 2. **选接口**：
    - 一个文件 = 一个会话的 JSONL / JSON → 实现 `uniflo_core::LineDecoder`，用 `JsonlAdapter::new(...)` 包装，自动获得头尾摘要、跟随、分页、去重。
    - 数据库或一文件多会话 → 实现 `uniflo_core::Adapter`；SQLite 用 `crate::sqlite::open_ro`，跟随按 rowid，绝不全表扫描。
-3. **映射**：每条原始记录 → `cx.emit(id, ts, Body)`。`id` 要在会话内稳定，同一条消息被原地更新时复用同一 id。工具调用与结果用同一个 `call_id` 配对。有显式回合边界时发 `TurnStart` / `TurnEnd`；不要在适配器里推断状态。
+3. **映射**：每条原始记录 → `cx.emit(id, ts, Body)`。`id` 要在会话内稳定，同一条消息被原地更新时复用同一 id。工具调用与结果用同一个 `call_id` 配对。有显式回合边界时发 `TurnStart` / `TurnEnd`；不要在适配器里推断状态。一条消息跨多行（流式片段）或事件依赖前文（回合序号）时：合并后的事件 `pos` 取首个片段，`finish` 发出未闭合的部分，`page_start` 只在「从这一行用全新状态解码与整文件解码结果相同」的行返回 `true`，历史分页只从这种行开始（见 grok、kimi）。
 4. **元数据**：`cx.meta()` 填 `cwd`、`model`、`started_at`、`title`（带优先级：1 摘要 < 2 自动标题 < 3 用户命名）、`parent`。
 5. **未知记录**：`cx.unknown("type=…")`；确认无用的类型加进模块的 `IGNORED`。
 6. **注册**：`Cargo.toml` 加 feature 并放进 `default`；`lib.rs` 加 `#[cfg(feature = "…")] pub mod …;` 并在 `all()` 中注册。
