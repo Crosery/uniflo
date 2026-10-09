@@ -15,7 +15,7 @@ pub struct UsageArgs {
     /// Session filter in search syntax (`h:claude in:~/work since:7d …`), or one session key
     /// for its per-step usage.
     pub query: Vec<String>,
-    /// harness, model, project, cwd, dir, day, hour, weekday or session.
+    /// harness, model, project, cwd, dir, day, hour, weekday, weekday_hour or session.
     #[arg(long = "by", default_value = "harness")]
     pub by: String,
     /// Event-time window start: `30m`, `2h`, `7d`, `YYYY-MM-DD` or epoch ms.
@@ -38,6 +38,9 @@ pub struct UsageArgs {
     /// cost, tokens, steps, sessions, prompts or key.
     #[arg(long)]
     pub sort: Option<String>,
+    /// Only steps of this model (a `--by model` key).
+    #[arg(long)]
+    pub model: Option<String>,
     #[arg(long)]
     pub json: bool,
 }
@@ -69,6 +72,7 @@ impl UsageArgs {
             depth: self.depth,
             limit: self.limit,
             sort: self.sort.clone(),
+            model: self.model.clone(),
         }
     }
 }
@@ -190,6 +194,7 @@ fn query_string(p: &UsageParams) -> String {
     put("depth", p.depth.map(|d| d.to_string()));
     put("limit", p.limit.map(|d| d.to_string()));
     put("sort", p.sort.clone());
+    put("model", p.model.clone());
     out.join("&")
 }
 

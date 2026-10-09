@@ -29,6 +29,9 @@ pub struct UsageParams {
     pub depth: Option<usize>,
     pub limit: Option<usize>,
     pub sort: Option<String>,
+    /// Only steps of this `group_by=model` key (catalog id or base name).
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 impl UsageParams {
@@ -50,6 +53,7 @@ impl UsageParams {
             depth: self.depth,
             limit: self.limit,
             sort: Sort::parse(self.sort.as_deref().unwrap_or(""))?,
+            model: self.model.clone().filter(|m| !m.is_empty()),
         };
         let all = engine.sessions();
         let picked: Vec<&Session> = search(&all, &sq, usize::MAX).into_iter().map(|h| h.session).collect();
