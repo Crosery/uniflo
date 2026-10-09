@@ -8,9 +8,13 @@
 <!--
   Uniflo gateway demo: one static file, no build step, no external runtime dependencies, works offline.
   Served by the daemon at /demo, or from any loopback origin with ?api=http://127.0.0.1:7311.
-  URL params: api, token, transport=sse|ws|ndjson, select=<session key>, redact (blur transcript text).
+  Views: sessions, usage, search (full text), manage (cleanup + archives), insights.
+  URL params: api, token, transport=sse|ws|ndjson, select=<session key>, redact (blur transcript text);
+  view state: view, q, at, steps · range, from, to, uh, um, up, group, under, sort, asc, stack, unpriced ·
+  sq, sf · mtab, mq · metric, rank. Writes (cleanup, archive delete, open-terminal) send X-Uniflo-Write: 1.
   Design tokens follow OpenCode's theme (alpha text scale, translucent surfaces) and Claude's
-  design guidelines (three type sizes, desaturated status colors, skeletons over spinners).
+  design guidelines (three type sizes, desaturated status colors, skeletons over spinners); every text
+  step clears WCAG AA. Chart colors: a fixed CVD-checked categorical order, a one-hue heat ramp.
 -->
 <style data-library="tom-select" data-version="2.6.2">
 /* Tom Select core stylesheet, Apache-2.0. Source-map footer omitted for offline embedding. */
@@ -21,36 +25,46 @@
 :root {
   --font-sans: Inter, -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Segoe UI", system-ui, sans-serif;
   --font-mono: "JetBrains Mono", "SF Mono", ui-monospace, Menlo, Consolas, monospace;
-  --fs-xs: 12px; --fs-sm: 13px; --fs-base: 14px; --fs-lg: 16px; --fs-xl: 20px;
+  --fs-xs: 12px; --fs-sm: 13px; --fs-base: 14px; --fs-lg: 16px; --fs-xl: 20px; --fs-2xl: 24px;
   --r-xs: 2px; --r-sm: 4px; --r-md: 6px; --r-lg: 8px; --r-xl: 12px;
   --dur: 150ms; --ease: cubic-bezier(.2, 0, 0, 1);
 
+  /* Text steps all clear WCAG AA (4.5:1) on every surface they sit on, the selected row included;
+     hierarchy comes from size and weight first, then these steps. */
   color-scheme: dark;
-  --bg: #101010; --bg-side: #121212; --bg-raised: #161616;
+  --bg: #101010; --bg-side: #121212; --bg-raised: #171717;
   --surface: rgba(255, 255, 255, .031); --surface-hover: rgba(255, 255, 255, .059); --surface-active: rgba(255, 255, 255, .085);
-  --text: rgba(255, 255, 255, .936); --text-2: rgba(255, 255, 255, .618); --text-3: rgba(255, 255, 255, .422); --text-4: rgba(255, 255, 255, .284);
+  --text: rgba(255, 255, 255, .936); --text-2: rgba(255, 255, 255, .70); --text-3: rgba(255, 255, 255, .60); --text-4: rgba(255, 255, 255, .54);
   --border: rgba(255, 255, 255, .08); --border-strong: rgba(255, 255, 255, .16);
-  --accent: #9dbefe; --accent-bg: rgba(83, 132, 255, .16);
+  --accent: #9dbefe; --accent-bg: rgba(83, 132, 255, .16); --accent-solid: #2f6bff; --on-solid: #fff;
   --ok: #7ab948; --ok-bg: rgba(122, 185, 72, .14);
   --warn: #d1a041; --warn-bg: rgba(209, 160, 65, .13);
-  --danger: #ee8884; --danger-bg: rgba(238, 136, 132, .12);
+  --danger: #ee8884; --danger-bg: rgba(238, 136, 132, .12); --danger-solid: #dc2626;
   --j-key: #9dbefe; --j-str: #00ceb9; --j-num: #d1a041; --j-lit: #c4a7ff;
   --hl: .80; --hc: .12;
   --shadow-lg: 0 16px 48px -6px rgba(0, 0, 0, .35), 0 6px 12px -2px rgba(0, 0, 0, .2);
+  /* Charts: categorical slots in fixed order (CVD-validated against these surfaces), neutral "other",
+     one-hue sequential ramp for heat cells. */
+  --c1: #3987e5; --c2: #d95926; --c3: #199e70; --c4: #c98500; --c5: #d55181; --c6: #008300; --c7: #9085e9; --c-other: #6b6b68;
+  --grid: rgba(255, 255, 255, .07); --axis: rgba(255, 255, 255, .16);
+  --heat-0: rgba(255, 255, 255, .055); --heat-1: #173a66; --heat-2: #1f5aa3; --heat-3: #3987e5; --heat-4: #9ec5f4;
 }
 @media (prefers-color-scheme: light) {
   :root {
     color-scheme: light;
     --bg: #fbfbfb; --bg-side: #f4f4f4; --bg-raised: #ffffff;
     --surface: rgba(0, 0, 0, .031); --surface-hover: rgba(0, 0, 0, .055); --surface-active: rgba(0, 0, 0, .085);
-    --text: #171717; --text-2: #5f5f5f; --text-3: #8a8a8a; --text-4: #b8b8b8;
+    --text: #171717; --text-2: #4a4a4a; --text-3: #5e5e5e; --text-4: #686868;
     --border: rgba(0, 0, 0, .08); --border-strong: rgba(0, 0, 0, .16);
-    --accent: #2f6bff; --accent-bg: rgba(47, 107, 255, .1);
-    --ok: #3d7f22; --ok-bg: rgba(61, 127, 34, .12); --warn: #9a6b0c; --warn-bg: rgba(154, 107, 12, .1);
-    --danger: #b3322c; --danger-bg: rgba(179, 50, 44, .08);
+    --accent: #1d4ed8; --accent-bg: rgba(29, 78, 216, .09); --accent-solid: #1d4ed8;
+    --ok: #2b7019; --ok-bg: rgba(43, 112, 25, .11); --warn: #8a5f08; --warn-bg: rgba(154, 107, 12, .1);
+    --danger: #b3322c; --danger-bg: rgba(179, 50, 44, .08); --danger-solid: #c62828;
     --j-key: #2f5fd0; --j-str: #0b7f72; --j-num: #9a6b0c; --j-lit: #7c4dce;
-    --hl: .52; --hc: .14;
+    --hl: .45; --hc: .14;
     --shadow-lg: 0 16px 48px -6px rgba(0, 0, 0, .12), 0 6px 12px -2px rgba(0, 0, 0, .06);
+    --c1: #2a78d6; --c2: #eb6834; --c3: #1baf7a; --c4: #eda100; --c5: #e87ba4; --c6: #008300; --c7: #4a3aa7; --c-other: #a3a29c;
+    --grid: rgba(0, 0, 0, .07); --axis: rgba(0, 0, 0, .18);
+    --heat-0: rgba(0, 0, 0, .055); --heat-1: #b7d3f6; --heat-2: #6da7ec; --heat-3: #2a78d6; --heat-4: #104281;
   }
 }
 * { box-sizing: border-box; }
@@ -59,37 +73,92 @@ body {
   background: var(--bg); color: var(--text); font: var(--fs-base)/1.5 var(--font-sans);
   -webkit-font-smoothing: antialiased; display: grid; grid-template-rows: auto minmax(0, 1fr); height: 100dvh; overflow: hidden;
 }
-button, input { font: inherit; color: inherit; }
+button, input, select { font: inherit; color: inherit; }
 button { cursor: pointer; }
+button:disabled { cursor: default; }
 ::selection { background: var(--accent-bg); }
 * { scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent; }
 .mono, code, pre, kbd { font-family: var(--font-mono); }
 .num { font-variant-numeric: tabular-nums; }
+.muted { color: var(--text-3); }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 svg.i { width: 14px; height: 14px; flex: none; stroke: currentColor; fill: none; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; }
+/* Harness icon: brand symbol tinted by currentColor, or a two-letter block. */
+.hi { width: 16px; height: 16px; flex: none; fill: currentColor; fill-rule: evenodd; color: var(--text-2); }
+.hi.hl { display: inline-flex; align-items: center; justify-content: center; border-radius: var(--r-sm); font: 600 9px/1 var(--font-sans); letter-spacing: -.02em;
+  color: oklch(var(--hl) var(--hc) var(--h)); background: oklch(var(--hl) var(--hc) var(--h) / .16); }
+.hi.lg { width: 20px; height: 20px; } .hi.hl.lg { font-size: 10.5px; }
 
 /* ---------- top bar ---------- */
-.top { display: grid; grid-template-columns: auto auto minmax(0, 1fr) auto auto; align-items: center; gap: 8px 16px; padding: 8px 14px; background: var(--bg-side); border-bottom: .5px solid var(--border-strong); min-width: 0; }
+.top { display: grid; grid-template-columns: auto auto minmax(0, 1fr) auto auto auto auto; align-items: center; gap: 8px 14px; padding: 8px 14px; background: var(--bg-side); border-bottom: .5px solid var(--border-strong); min-width: 0; }
 .brand { display: flex; align-items: center; gap: 8px; font-weight: 600; letter-spacing: -.01em; white-space: nowrap; }
 .brand svg { width: 20px; height: 20px; }
 .brand small { color: var(--text-3); font-weight: 400; font-size: var(--fs-sm); }
+.nav { display: flex; gap: 2px; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+.nav button { display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 11px; border: 0; border-radius: var(--r-md); background: none; color: var(--text-3); font-size: var(--fs-sm); font-weight: 500; white-space: nowrap; transition: background var(--dur), color var(--dur); }
+.nav button:hover { color: var(--text); background: var(--surface-hover); }
+.nav button[aria-selected=true] { color: var(--text); background: var(--surface-active); }
+.nav button svg.i { opacity: .9; }
 #conn { display: inline-flex; align-items: center; gap: 7px; min-height: 26px; padding: 0 4px 0 10px; border-radius: 999px; background: var(--surface); border: .5px solid var(--border-strong); font-size: var(--fs-xs); color: var(--text-2); white-space: nowrap; }
 #conn .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text-4); flex: none; }
 #conn[data-state=live] .dot { background: var(--ok); box-shadow: 0 0 0 3px var(--ok-bg); }
 #conn[data-state=connecting] .dot, #conn[data-state=retry] .dot { background: var(--warn); animation: breathe 1.2s infinite; }
 .seg { display: inline-flex; background: var(--surface); border-radius: 999px; padding: 2px; gap: 2px; flex: none; }
-.seg button { border: 0; background: none; height: 20px; padding: 0 9px; border-radius: 999px; font-size: 11.5px; color: var(--text-3); transition: background var(--dur) var(--ease), color var(--dur); }
+.seg button { border: 0; background: none; height: 20px; padding: 0 9px; border-radius: 999px; font-size: var(--fs-xs); color: var(--text-3); transition: background var(--dur) var(--ease), color var(--dur); }
 .seg button:hover { color: var(--text); }
-.seg button.on { background: var(--surface-active); color: var(--text); }
-.metrics { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 18px; font-size: var(--fs-xs); color: var(--text-3); min-width: 0; }
+.seg button.on, .seg button[aria-pressed=true] { background: var(--surface-active); color: var(--text); }
+.seg.lg { border-radius: var(--r-md); border: .5px solid var(--border); }
+.seg.lg button { height: 26px; padding: 0 11px; border-radius: var(--r-sm); font-size: var(--fs-sm); }
+.metrics { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 6px 16px; font-size: var(--fs-xs); color: var(--text-3); min-width: 0; }
 .metrics b { color: var(--text); font: 500 var(--fs-sm) var(--font-mono); font-variant-numeric: tabular-nums; margin-left: 5px; }
 .metrics > span { white-space: nowrap; }
 .metrics .spark { display: inline-flex; align-items: center; gap: 6px; }
 .metrics svg { width: 64px; height: 18px; }
 .metrics polyline { fill: none; stroke: var(--accent); stroke-width: 1.5; stroke-linejoin: round; }
-#m-api { font: var(--fs-xs) var(--font-mono); color: var(--text-4); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; max-width: 180px; }
-.iconbtn { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; border-radius: var(--r-md); border: 0; background: none; color: var(--text-3); transition: background var(--dur), color var(--dur); flex: none; }
+#m-api { font: var(--fs-xs) var(--font-mono); color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; max-width: 180px; }
+.iconbtn { display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 30px; border-radius: var(--r-md); border: 0; background: none; color: var(--text-3); transition: background var(--dur), color var(--dur); flex: none; }
 .iconbtn:hover, .iconbtn.on { background: var(--surface-hover); color: var(--text); }
-button:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.iconbtn svg.i { width: 16px; height: 16px; }
+#notify[aria-pressed=true] { color: var(--accent); background: var(--accent-bg); }
+button:focus-visible, summary:focus-visible, input:focus-visible, select:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* ---------- shared controls ---------- */
+.btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: 30px; padding: 0 12px; border-radius: var(--r-md); border: .5px solid var(--border-strong); background: var(--surface); color: var(--text); font-size: var(--fs-sm); font-weight: 500; white-space: nowrap; transition: background var(--dur), border-color var(--dur); }
+.btn:hover:not(:disabled) { background: var(--surface-hover); }
+.btn:disabled { opacity: .5; }
+.btn.sm { height: 26px; padding: 0 9px; font-size: var(--fs-xs); }
+.btn.primary { background: var(--accent-solid); border-color: transparent; color: var(--on-solid); }
+.btn.primary:hover:not(:disabled) { background: color-mix(in srgb, var(--accent-solid) 88%, #000); }
+.btn.danger { background: var(--danger-solid); border-color: transparent; color: var(--on-solid); }
+.btn.danger:hover:not(:disabled) { background: color-mix(in srgb, var(--danger-solid) 88%, #000); }
+.btn.ghost { background: none; border-color: transparent; color: var(--text-2); }
+.btn.ghost:hover:not(:disabled) { color: var(--text); }
+.input, .select { height: 30px; padding: 0 10px; border-radius: var(--r-md); background: var(--surface); border: .5px solid var(--border-strong); font-size: var(--fs-sm); color: var(--text); outline: none; min-width: 0; transition: background var(--dur), box-shadow var(--dur); }
+.input::placeholder { color: var(--text-3); }
+.input:hover, .select:hover { background: var(--surface-hover); }
+.input:focus, .select:focus { box-shadow: 0 0 0 2px var(--accent-bg), 0 0 0 1px var(--accent); background: var(--bg); }
+.select { padding-right: 26px; appearance: none; max-width: 220px; text-overflow: ellipsis;
+  background-image: linear-gradient(45deg, transparent 50%, var(--text-3) 50%), linear-gradient(135deg, var(--text-3) 50%, transparent 50%);
+  background-position: calc(100% - 13px) 50%, calc(100% - 9px) 50%; background-size: 4px 4px; background-repeat: no-repeat; }
+.select option { background: var(--bg-raised); color: var(--text); }
+.pill { display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 10px; border-radius: 999px; background: var(--surface); border: .5px solid var(--border); font-size: var(--fs-xs); color: var(--text-2); white-space: nowrap; }
+.pill i { width: 6px; height: 6px; border-radius: 50%; background: var(--ok); }
+.pill.warn { color: var(--warn); background: var(--warn-bg); border-color: transparent; }
+.pill.warn i { background: var(--warn); }
+.tag { display: inline-flex; align-items: center; gap: 4px; height: 20px; padding: 0 7px; border-radius: var(--r-sm); font-size: var(--fs-xs); font-weight: 500; white-space: nowrap; background: var(--surface-hover); color: var(--text-2); flex: none; }
+.tag.ok { background: var(--ok-bg); color: var(--ok); }
+.tag.warn { background: var(--warn-bg); color: var(--warn); }
+.tag.bad { background: var(--danger-bg); color: var(--danger); }
+.tag.acc { background: var(--accent-bg); color: var(--accent); }
+.notice { display: flex; gap: 10px; align-items: flex-start; padding: 10px 14px; border-radius: var(--r-lg); border: .5px solid var(--border-strong); background: var(--surface); font-size: var(--fs-sm); color: var(--text-2); line-height: 1.6; }
+.notice svg.i { margin-top: 3px; color: var(--text-3); }
+.notice.warn { border-color: color-mix(in srgb, var(--warn) 35%, transparent); background: var(--warn-bg); color: var(--text); }
+.notice.warn svg.i { color: var(--warn); }
+.notice.bad { border-color: color-mix(in srgb, var(--danger) 35%, transparent); background: var(--danger-bg); color: var(--text); }
+.notice code { font-size: 12px; padding: 1px 5px; border-radius: var(--r-sm); background: var(--surface-hover); }
+#toasts { position: fixed; right: 16px; bottom: 16px; display: grid; gap: 8px; z-index: 50; pointer-events: none; }
+.toast { padding: 9px 14px; border-radius: var(--r-lg); background: var(--bg-raised); border: .5px solid var(--border-strong); box-shadow: var(--shadow-lg); font-size: var(--fs-sm); max-width: 360px; animation: enter 200ms var(--ease); }
+.toast.bad { color: var(--danger); }
 
 /* ---------- layout ---------- */
 .app { --side-width: clamp(240px, 26vw, 320px); display: grid; grid-template-columns: var(--side-width) minmax(0, 1fr) 300px; min-height: 0; min-width: 0; }
@@ -98,21 +167,22 @@ button:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); 
 .side, .rail { background: var(--bg-side); min-height: 0; min-width: 0; display: flex; flex-direction: column; }
 .side { border-right: .5px solid var(--border-strong); overflow-y: auto; }
 .rail { border-left: .5px solid var(--border-strong); overflow-y: auto; }
+[hidden] { display: none !important; }
 
 /* ---------- sidebar ---------- */
 .search { padding: 12px 12px 8px; flex: none; }
 .field { position: relative; }
 .field svg { position: absolute; left: 9px; top: 8px; color: var(--text-3); }
 #q { width: 100%; height: 30px; padding: 0 34px 0 30px; border-radius: var(--r-md); background: var(--surface); border: .5px solid var(--border-strong); font: var(--fs-sm) var(--font-mono); outline: none; transition: background var(--dur), box-shadow var(--dur); }
-#q::placeholder { color: var(--text-4); font-family: var(--font-sans); }
+#q::placeholder { color: var(--text-3); font-family: var(--font-sans); }
 #q:hover { background: var(--surface-hover); }
 #q:focus { box-shadow: 0 0 0 2px var(--accent-bg), 0 0 0 1px var(--accent); background: var(--bg); }
-kbd { display: inline-flex; align-items: center; height: 18px; padding: 0 6px; border-radius: var(--r-xs); background: var(--surface); border: .5px solid var(--border-strong); font-size: 11px; color: var(--text-3); }
+kbd { display: inline-flex; align-items: center; height: 18px; padding: 0 6px; border-radius: var(--r-xs); background: var(--surface); border: .5px solid var(--border-strong); font-size: 12px; color: var(--text-3); }
 .field kbd { position: absolute; right: 7px; top: 6px; }
-.qmeta { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 2px 8px; margin-top: 6px; font-size: 11.5px; color: var(--text-4); }
-.qmeta b { color: var(--text-3); font-weight: 500; }
+.qmeta { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 2px 8px; margin-top: 6px; font-size: var(--fs-xs); color: var(--text-3); }
+.qmeta b { color: var(--text-2); font-weight: 500; }
 .chips { display: flex; flex-wrap: wrap; gap: 4px; padding: 0 12px 10px; flex: none; }
-.chip { display: inline-flex; align-items: center; gap: 5px; height: 22px; padding: 0 8px; border-radius: var(--r-sm); background: var(--surface); border: 0; font-size: var(--fs-xs); font-weight: 500; color: var(--text-2); white-space: nowrap; transition: background var(--dur), color var(--dur); }
+.chip { display: inline-flex; align-items: center; gap: 5px; height: 24px; padding: 0 9px; border-radius: var(--r-sm); background: var(--surface); border: 0; font-size: var(--fs-xs); font-weight: 500; color: var(--text-2); white-space: nowrap; transition: background var(--dur), color var(--dur); }
 .chip:hover { background: var(--surface-hover); color: var(--text); }
 .chip.on { background: var(--accent-bg); color: var(--accent); }
 .hdot { width: 6px; height: 6px; border-radius: 50%; background: oklch(var(--hl) var(--hc) var(--h)); }
@@ -138,55 +208,93 @@ kbd { display: inline-flex; align-items: center; height: 18px; padding: 0 6px; b
 .harness-combo .option.selected { background: var(--accent-bg); color: var(--accent); }
 .harness-combo .option.selected .h-selected { display: flex; }
 .harness-combo .option.selected .h-count { color: inherit; opacity: .75; }
-.h-option { display: flex; align-items: center; gap: 6px; min-width: 0; width: 100%; }
-.h-option .hdot { flex: none; }
+.h-option { display: flex; align-items: center; gap: 7px; min-width: 0; width: 100%; }
+.h-option .hi { width: 14px; height: 14px; color: inherit; }
+.h-option .hi.hl { font-size: 8px; }
 .h-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.h-count { flex: none; font: 11px var(--font-mono); color: var(--text-3); }
-.h-working { flex: none; font: 11px var(--font-mono); color: var(--ok); white-space: nowrap; }
+.h-count { flex: none; font: 12px var(--font-mono); color: var(--text-3); }
+.h-working { flex: none; font: 12px var(--font-mono); color: var(--ok); white-space: nowrap; }
 .h-selected { display: none; align-items: center; flex: none; }
-.label { padding: 10px 14px 4px; font-size: 11px; font-weight: 500; color: var(--text-4); letter-spacing: .04em; display: flex; justify-content: space-between; }
+.label { padding: 10px 14px 4px; font-size: var(--fs-xs); font-weight: 500; color: var(--text-3); letter-spacing: .04em; display: flex; justify-content: space-between; }
 #list { flex: 1; min-height: 120px; overflow-y: auto; padding: 0 6px 12px; }
-.row { display: grid; grid-template-columns: 14px minmax(0, 1fr); gap: 0 6px; padding: 7px 8px; border-radius: var(--r-md); cursor: pointer; position: relative; transition: background var(--dur); }
+.row { display: grid; grid-template-columns: 20px minmax(0, 1fr); gap: 0 9px; padding: 8px 8px; border-radius: var(--r-md); cursor: pointer; position: relative; transition: background var(--dur); }
 .row:hover { background: var(--surface-hover); }
 .row.sel { background: var(--surface-active); }
 .row.sel::before { content: ""; position: absolute; left: -6px; top: 8px; bottom: 8px; width: 2px; border-radius: 2px; background: var(--accent); }
-.sd { width: 6px; height: 6px; border-radius: 50%; background: var(--text-4); margin: 7px 0 0 3px; }
-.row[data-status=work] .sd { background: var(--ok); box-shadow: 0 0 0 3px var(--ok-bg); animation: breathe 1.6s ease-in-out infinite; }
+.ricon { position: relative; display: flex; align-items: center; justify-content: center; width: 20px; height: 20px; margin-top: 1px; }
+.ricon .hi { width: 18px; height: 18px; }
+.ricon .hi.hl { width: 18px; height: 18px; }
+.sd { position: absolute; right: -3px; bottom: -3px; width: 9px; height: 9px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 2px var(--bg-side); display: none; }
+.row[data-status=work] .sd { display: block; animation: breathe 1.6s ease-in-out infinite; }
 .r1 { display: flex; gap: 8px; align-items: baseline; min-width: 0; }
 .rt { flex: 1; min-width: 0; font-size: var(--fs-sm); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .row[data-status=idle] .rt { color: var(--text-2); }
-.age { font: 11px var(--font-mono); color: var(--text-4); font-variant-numeric: tabular-nums; flex: none; }
+.age { font: 12px var(--font-mono); color: var(--text-3); font-variant-numeric: tabular-nums; flex: none; }
 .r2 { display: flex; gap: 6px; align-items: center; margin-top: 2px; min-width: 0; font-size: var(--fs-xs); color: var(--text-3); }
-.r2 .cwd { font-family: var(--font-mono); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
-.r2 .pid { font: 11px var(--font-mono); color: var(--text-3); flex: none; }
-.ht { display: inline-flex; align-items: center; height: 17px; padding: 0 5px; border-radius: var(--r-xs); font: 500 11px var(--font-mono); color: oklch(var(--hl) var(--hc) var(--h)); background: oklch(var(--hl) var(--hc) var(--h) / .12); flex: none; }
-.sub { color: var(--text-4); flex: none; }
+.r2 .cwd { font-family: var(--font-mono); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1; }
+.r2 .pid { font: 12px var(--font-mono); color: var(--text-3); flex: none; }
+.r2 .rcost { font: 12px var(--font-mono); color: var(--text-3); flex: none; font-variant-numeric: tabular-nums; }
+.r2 .tag { height: 17px; padding: 0 5px; font-size: 11px; }
+.ht { display: inline-flex; align-items: center; gap: 5px; height: 18px; padding: 0 6px; border-radius: var(--r-xs); font: 500 12px var(--font-mono); color: oklch(var(--hl) var(--hc) var(--h)); background: oklch(var(--hl) var(--hc) var(--h) / .12); flex: none; }
+.ht .hi { width: 12px; height: 12px; color: inherit; }
+.ht .hi.hl { background: none; font-size: 8px; }
+.sub { color: var(--text-3); flex: none; }
 
 /* ---------- conversation ---------- */
 .conv { --conv-pad: clamp(14px, 3vw, 32px); display: flex; flex-direction: column; min-height: 0; min-width: 0; }
 .conv-nav { display: none; padding: 8px var(--conv-pad) 0; flex: none; }
 .conv-nav .chip { height: 28px; }
-#detail-head { border-bottom: .5px solid var(--border); padding: 14px var(--conv-pad) 12px; max-height: 40%; overflow-y: auto; flex: none; }
+#detail-head { border-bottom: .5px solid var(--border); padding: 14px var(--conv-pad) 12px; max-height: 55%; overflow-y: auto; flex: none; }
 .wrap { max-width: 760px; margin: 0 auto; width: 100%; }
+#detail-head .wrap { max-width: 880px; }
 .sh-top { display: flex; align-items: center; gap: 10px; min-width: 0; }
-.sh-top h2 { margin: 0; font-size: var(--fs-lg); font-weight: 600; letter-spacing: -.01em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.sh-top h2 { margin: 0; font-size: var(--fs-lg); font-weight: 600; letter-spacing: -.01em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1; }
+.sh-actions { display: flex; gap: 6px; flex: none; }
 .badge { display: inline-flex; align-items: center; gap: 6px; height: 22px; padding: 0 8px; border-radius: 999px; font-size: var(--fs-xs); font-weight: 500; flex: none; background: var(--surface-hover); color: var(--text-2); }
 .badge i { width: 6px; height: 6px; border-radius: 50%; background: var(--text-4); }
 .badge.work { background: var(--ok-bg); color: var(--ok); }
 .badge.work i { background: var(--ok); animation: breathe 1.6s infinite; }
 .sh-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; margin-top: 8px; font-size: var(--fs-xs); color: var(--text-3); }
 .sh-meta > span { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
-.sh-meta .mono { font-size: 11.5px; color: var(--text-2); }
+.sh-meta .mono { font-size: 12px; color: var(--text-2); }
 .sh-meta .key { cursor: copy; border-bottom: 1px dashed var(--border-strong); }
+.sh-usage { display: grid; grid-template-columns: auto minmax(0, 1fr) minmax(180px, 240px); gap: 10px 22px; align-items: center; margin-top: 12px; padding: 10px 12px; border-radius: var(--r-lg); border: .5px solid var(--border); background: var(--surface); }
+.sh-usage:empty { display: none; }
+.us-cost b { display: block; font: 600 var(--fs-lg) var(--font-sans); font-variant-numeric: tabular-nums; letter-spacing: -.01em; }
+.us-cost span { font-size: var(--fs-xs); color: var(--text-3); white-space: nowrap; }
+.us-cost .warn { color: var(--warn); }
+.us-tok { display: flex; flex-wrap: wrap; gap: 4px 18px; margin: 0; }
+.us-tok div { min-width: 0; }
+.us-tok dt { font-size: var(--fs-xs); color: var(--text-3); }
+.us-tok dd { margin: 0; font: 500 var(--fs-sm) var(--font-mono); font-variant-numeric: tabular-nums; }
+.ctx-h { display: flex; justify-content: space-between; gap: 8px; font-size: var(--fs-xs); color: var(--text-3); margin-bottom: 5px; white-space: nowrap; }
+.ctx-h .mono { color: var(--text-2); }
+.bar { height: 6px; border-radius: 999px; background: var(--surface-active); overflow: hidden; }
+.bar > i { display: block; height: 100%; border-radius: 999px; background: var(--accent); min-width: 2px; }
+.bar.warn > i { background: var(--warn); } .bar.bad > i { background: var(--danger); }
+.steps { margin-top: 10px; border: .5px solid var(--border); border-radius: var(--r-lg); max-height: 300px; overflow: auto; }
+.steps .dt th { position: sticky; top: 0; background: var(--bg-raised); z-index: 1; }
+.menu { position: fixed; z-index: 40; min-width: 240px; max-width: min(420px, calc(100vw - 24px)); padding: 6px; border-radius: var(--r-lg); background: var(--bg-raised); border: .5px solid var(--border-strong); box-shadow: var(--shadow-lg); }
+.menu .cmd { margin: 2px 4px 6px; padding: 7px 9px; border-radius: var(--r-md); background: var(--surface); font: 12px/1.5 var(--font-mono); color: var(--text-2); word-break: break-all; max-height: 96px; overflow: auto; }
+.menu button { display: flex; align-items: center; gap: 8px; width: 100%; height: 32px; padding: 0 10px; border: 0; border-radius: var(--r-md); background: none; font-size: var(--fs-sm); text-align: left; color: var(--text); }
+.menu button:hover:not(:disabled), .menu button:focus-visible { background: var(--surface-hover); outline: none; }
+.menu button:disabled { color: var(--text-3); }
+.menu .sep { height: .5px; margin: 5px 4px; background: var(--border-strong); }
+.menu p { margin: 4px 10px 6px; font-size: var(--fs-xs); color: var(--text-3); line-height: 1.5; }
 #timeline { flex: 1; min-height: 0; overflow-y: auto; scroll-behavior: auto; }
 #thread { padding: 18px var(--conv-pad) 64px; }
-#more { display: flex; margin: 0 auto 14px; height: 26px; padding: 0 12px; border-radius: 999px; border: .5px solid var(--border-strong); background: var(--surface); color: var(--text-2); font-size: var(--fs-xs); align-items: center; gap: 6px; }
-#more:hover { background: var(--surface-hover); color: var(--text); }
+#more, #newer { display: flex; margin: 0 auto 14px; height: 28px; padding: 0 12px; border-radius: 999px; border: .5px solid var(--border-strong); background: var(--surface); color: var(--text-2); font-size: var(--fs-xs); align-items: center; gap: 6px; }
+#newer { margin: 18px auto 0; }
+#newer.fresh { color: var(--accent); border-color: var(--accent); }
+#more:hover, #newer:hover { background: var(--surface-hover); color: var(--text); }
 .ev { position: relative; }
 .ev.enter { animation: enter 240ms var(--ease); }
 .ev + .ev { margin-top: 10px; }
-.ev .when { position: absolute; top: 2px; right: 100%; margin-right: 10px; font: 11px var(--font-mono); color: var(--text-4); opacity: 0; transition: opacity var(--dur); white-space: nowrap; }
+.ev .when { position: absolute; top: 2px; right: 100%; margin-right: 10px; font: 12px var(--font-mono); color: var(--text-3); opacity: 0; transition: opacity var(--dur); white-space: nowrap; }
 .ev:hover > .when { opacity: 1; }
+.hit-target { border-radius: var(--r-lg); box-shadow: 0 0 0 2px var(--accent-bg), 0 0 0 1px var(--accent); }
+.ev.hit-target { padding: 4px 8px; margin-left: -8px; margin-right: -8px; }
+.flash { animation: flash 2.4s var(--ease); }
 
 .k-user_message:not(.syn) { display: flex; justify-content: flex-end; margin: 22px 0 14px; }
 .bubble { max-width: 82%; padding: 9px 14px; border-radius: var(--r-xl); background: var(--surface-active); font-size: var(--fs-base); line-height: 1.6; white-space: pre-wrap; word-break: break-word; }
@@ -210,8 +318,8 @@ kbd { display: inline-flex; align-items: center; height: 18px; padding: 0 6px; b
 .md th, .md td { border: .5px solid var(--border-strong); padding: 4px 10px; text-align: left; }
 .md th { background: var(--surface); font-weight: 600; }
 .code { margin: 0 0 .8em; border-radius: var(--r-lg); border: .5px solid var(--border-strong); background: var(--surface); overflow: hidden; }
-.code-h { display: flex; justify-content: space-between; align-items: center; height: 28px; padding: 0 6px 0 12px; font: 11px var(--font-mono); color: var(--text-3); border-bottom: .5px solid var(--border); }
-.copy { border: 0; background: none; color: var(--text-3); font-size: 11px; height: 20px; padding: 0 6px; border-radius: var(--r-sm); }
+.code-h { display: flex; justify-content: space-between; align-items: center; height: 28px; padding: 0 6px 0 12px; font: 12px var(--font-mono); color: var(--text-3); border-bottom: .5px solid var(--border); }
+.copy { border: 0; background: none; color: var(--text-3); font-size: 12px; height: 22px; padding: 0 6px; border-radius: var(--r-sm); }
 .copy:hover { background: var(--surface-hover); color: var(--text); }
 pre { margin: 0; padding: 10px 12px; font-size: 12.5px; line-height: 1.55; white-space: pre-wrap; word-break: break-word; overflow: auto; max-height: 360px; }
 .code pre code { background: none; padding: 0; font-size: inherit; }
@@ -225,10 +333,10 @@ details[open] > summary .chev { transform: rotate(90deg); }
 .think > summary, .note > summary { display: flex; align-items: center; gap: 6px; min-height: 26px; padding: 3px 0; min-width: 0; font-size: var(--fs-sm); color: var(--text-3); }
 .think > summary:hover, .note > summary:hover { color: var(--text-2); }
 .think .lbl { font-style: italic; white-space: nowrap; flex: none; }
-.think .cnt { font: 11px var(--font-mono); color: var(--text-4); white-space: nowrap; }
+.think .cnt { font: 12px var(--font-mono); color: var(--text-3); white-space: nowrap; }
 .think-body { margin: 4px 0 6px 6px; padding: 2px 0 2px 14px; border-left: 2px solid var(--border-strong); color: var(--text-2); font-size: var(--fs-sm); line-height: 1.6; white-space: pre-wrap; word-break: break-word; max-height: 420px; overflow: auto; }
 .note-label { flex: none; max-width: 45%; overflow-wrap: anywhere; }
-.note .pv { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; color: var(--text-4); }
+.note .pv { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; color: var(--text-3); }
 .note.warn > summary { color: var(--warn); }
 .note pre { margin: 4px 0 6px; border-radius: var(--r-md); background: var(--surface); border: .5px solid var(--border); color: var(--text-2); }
 
@@ -240,23 +348,23 @@ details[open] > summary .chev { transform: rotate(90deg); }
 .tool .ti { color: var(--text-3); display: flex; flex: none; }
 .tool .tn { font-weight: 500; flex: none; max-width: 45%; overflow-wrap: anywhere; }
 .tool .ta { flex: 1; min-width: 0; font: 12px var(--font-mono); color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.tool .td { font: 11px var(--font-mono); color: var(--text-4); font-variant-numeric: tabular-nums; flex: none; }
-.st-ok { color: var(--ok); display: flex; } .st-err { color: var(--danger); display: flex; } .st-none { color: var(--text-4); font-size: 11px; }
+.tool .td { font: 12px var(--font-mono); color: var(--text-3); font-variant-numeric: tabular-nums; flex: none; }
+.st-ok { color: var(--ok); display: flex; } .st-err { color: var(--danger); display: flex; } .st-none { color: var(--text-3); font-size: 12px; }
 .spin { width: 12px; height: 12px; border-radius: 50%; border: 1.5px solid var(--border-strong); border-top-color: var(--accent); animation: spin .8s linear infinite; flex: none; }
 .tool-body { padding: 0 10px 10px; display: grid; gap: 8px; }
 .blk { border-radius: var(--r-md); border: .5px solid var(--border); background: var(--bg); overflow: hidden; }
-.blk-h { display: flex; flex-wrap: wrap; gap: 4px 8px; min-height: 24px; align-items: center; padding: 4px 10px; font-size: 11px; color: var(--text-3); border-bottom: .5px solid var(--border); overflow-wrap: anywhere; }
+.blk-h { display: flex; flex-wrap: wrap; gap: 4px 8px; min-height: 24px; align-items: center; padding: 4px 10px; font-size: 12px; color: var(--text-3); border-bottom: .5px solid var(--border); overflow-wrap: anywhere; }
 .blk-h .mono { min-width: 0; max-width: 100%; }
 .blk.err .blk-h { color: var(--danger); }
 .j-k { color: var(--j-key); } .j-s { color: var(--j-str); } .j-n { color: var(--j-num); } .j-l { color: var(--j-lit); }
 .cut { color: var(--warn); }
 
 .k-turn_start { display: none; }
-.k-turn_end { display: flex; align-items: center; gap: 10px; margin: 18px 0 !important; font: 11px var(--font-mono); color: var(--text-4); }
+.k-turn_end { display: flex; align-items: center; gap: 10px; margin: 18px 0 !important; font: 12px var(--font-mono); color: var(--text-3); }
 .k-turn_end > span { min-width: 0; overflow-wrap: anywhere; }
 .k-turn_end::before, .k-turn_end::after { content: ""; flex: 1; border-top: .5px solid var(--border); }
 .k-usage { display: none; }   /* summed onto the turn divider instead */
-.think-empty { display: flex; align-items: center; height: 22px; padding-left: 20px; font-size: var(--fs-sm); font-style: italic; color: var(--text-4); }
+.think-empty { display: flex; align-items: center; height: 22px; padding-left: 20px; font-size: var(--fs-sm); font-style: italic; color: var(--text-3); }
 .ev.k-reasoning + .ev.k-reasoning { margin-top: 2px; }
 
 .shimmer { background: linear-gradient(90deg, var(--text-3) 0%, var(--text) 50%, var(--text-3) 100%); background-size: 200% 100%; -webkit-background-clip: text; background-clip: text; color: transparent; animation: shimmer 1.2s linear infinite; }
@@ -265,42 +373,203 @@ details[open] > summary .chev { transform: rotate(90deg); }
 .empty svg { width: 36px; height: 36px; opacity: .6; }
 .empty h3 { margin: 4px 0 0; font-size: var(--fs-base); font-weight: 500; color: var(--text-2); }
 .empty p { margin: 0; font-size: var(--fs-sm); }
-.keys { display: flex; gap: 14px; margin-top: 8px; font-size: var(--fs-xs); color: var(--text-4); }
+.keys { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px 14px; margin-top: 8px; font-size: var(--fs-xs); color: var(--text-3); }
 .keys span { display: inline-flex; gap: 6px; align-items: center; }
 .sk { border-radius: var(--r-sm); background: linear-gradient(90deg, var(--surface) 25%, var(--surface-active) 50%, var(--surface) 75%); background-size: 200% 100%; animation: sk 1.2s linear infinite; }
 
 /* ---------- right rail ---------- */
 .sec { padding: 12px 14px; border-bottom: .5px solid var(--border); }
-.sec-h { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; font-size: 11px; font-weight: 500; color: var(--text-4); letter-spacing: .04em; }
-.sec-h .ok { color: var(--ok); font: 500 11px var(--font-mono); letter-spacing: 0; }
+.sec-h { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; font-size: var(--fs-xs); font-weight: 500; color: var(--text-3); letter-spacing: .04em; }
+.sec-h .ok { color: var(--ok); font: 500 12px var(--font-mono); letter-spacing: 0; }
 .sec-h .bad { color: var(--danger); }
-.linkbtn { border: 0; background: none; color: var(--text-3); font-size: 11px; padding: 2px 6px; border-radius: var(--r-sm); }
+.linkbtn { border: 0; background: none; color: var(--text-3); font-size: 12px; padding: 2px 6px; border-radius: var(--r-sm); }
 .linkbtn:hover { background: var(--surface-hover); color: var(--text); }
-.chk { display: grid; grid-template-columns: 44px minmax(0, 1fr) auto 14px; align-items: center; gap: 6px; height: 26px; font-size: var(--fs-xs); border-bottom: .5px solid var(--border); }
+.chk { display: grid; grid-template-columns: 48px minmax(0, 1fr) auto 14px; align-items: center; gap: 6px; height: 27px; font-size: var(--fs-xs); border-bottom: .5px solid var(--border); }
 .chk:last-child { border-bottom: 0; }
-.mth { font: 500 10px var(--font-mono); color: var(--text-3); background: var(--surface-hover); border-radius: var(--r-xs); padding: 1px 0; text-align: center; }
-.pth { font: 11.5px var(--font-mono); color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.chk .ms { font: 11px var(--font-mono); color: var(--text-3); font-variant-numeric: tabular-nums; text-align: right; }
+.mth { font: 500 11px var(--font-mono); color: var(--text-2); background: var(--surface-hover); border-radius: var(--r-xs); padding: 1px 0; text-align: center; }
+.pth { font: 12px var(--font-mono); color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chk .ms { font: 12px var(--font-mono); color: var(--text-3); font-variant-numeric: tabular-nums; text-align: right; }
 .chk .ms.slow { color: var(--warn); }
 .chk .ic { display: flex; justify-content: center; }
 .chk[data-ok=true] .ic { color: var(--ok); } .chk[data-ok=false] .ic { color: var(--danger); }
-.cards { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
-.cards { grid-template-columns: repeat(4, 1fr); }
+.cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
 .card { padding: 6px 8px; border-radius: var(--r-md); background: var(--surface); border: .5px solid var(--border); min-width: 0; }
-.card span { display: block; font-size: 10.5px; color: var(--text-3); white-space: nowrap; }
+.card span { display: block; font-size: 12px; color: var(--text-3); white-space: nowrap; }
 .card b { display: block; margin-top: 1px; font: 600 var(--fs-base) var(--font-sans); font-variant-numeric: tabular-nums; letter-spacing: -.01em; white-space: nowrap; }
-.card b small { font-size: 11px; font-weight: 400; color: var(--text-3); margin-left: 2px; }
+.card b small { font-size: 12px; font-weight: 400; color: var(--text-3); margin-left: 2px; }
 .card.bad b { color: var(--danger); }
-#ticker { font: 11.5px/1.75 var(--font-mono); padding: 0 14px 14px; }
-.tk { display: grid; grid-template-columns: 54px 7px minmax(0, 1fr); gap: 7px; align-items: center; white-space: nowrap; animation: slide 150ms var(--ease); }
-.tk time { color: var(--text-4); }
+#ticker { font: 12px/1.75 var(--font-mono); padding: 0 14px 14px; }
+.tk { display: grid; grid-template-columns: 58px 7px minmax(0, 1fr); gap: 7px; align-items: center; white-space: nowrap; animation: slide 150ms var(--ease); }
+.tk time { color: var(--text-3); }
 .tk i { width: 5px; height: 5px; border-radius: 50%; background: var(--text-4); }
 .tk.t-event i { background: var(--ok); } .tk.t-session i { background: var(--accent); } .tk.t-removed i, .tk.t-lagged i { background: var(--danger); }
 .tk span { overflow: hidden; text-overflow: ellipsis; color: var(--text-2); }
-.tk span em { font-style: normal; color: var(--text-4); }
-.tk-empty { margin: 4px 0 0; font: var(--fs-xs) var(--font-sans); color: var(--text-4); line-height: 1.6; }
+.tk span em { font-style: normal; color: var(--text-3); }
+.tk-empty { margin: 4px 0 0; font: var(--fs-xs) var(--font-sans); color: var(--text-3); line-height: 1.6; }
 
-body.redact .txt, body.redact pre, body.redact .md { filter: blur(5px); }
+/* ---------- pages: usage, search, manage, insights ---------- */
+.view { min-height: 0; min-width: 0; overflow-y: auto; overflow-x: hidden; }
+.page { --pad: clamp(16px, 3.2vw, 36px); max-width: 1240px; margin: 0 auto; padding: 26px var(--pad) 72px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 18px; min-width: 0; }
+.page > * { min-width: 0; }
+.page.narrow { max-width: 920px; }
+.page-h { display: flex; align-items: flex-end; justify-content: space-between; gap: 10px 20px; flex-wrap: wrap; }
+.page-h h1 { margin: 0; font-size: var(--fs-xl); font-weight: 600; letter-spacing: -.015em; }
+.page-h p { margin: 4px 0 0; font-size: var(--fs-sm); color: var(--text-3); max-width: 640px; }
+.page-h .side-info { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; min-width: 0; }
+.toolbar .grow { flex: 1; }
+.toolbar label.inline { display: inline-flex; align-items: center; gap: 6px; font-size: var(--fs-xs); color: var(--text-3); }
+.panel { border: .5px solid var(--border-strong); border-radius: var(--r-xl); background: var(--bg-raised); min-width: 0; }
+.panel-h { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; padding: 14px 16px 0; }
+.panel-h h2 { margin: 0; font-size: var(--fs-base); font-weight: 600; letter-spacing: -.005em; }
+.panel-h h2 small { margin-left: 8px; font-size: var(--fs-xs); font-weight: 400; color: var(--text-3); }
+.panel-b { padding: 12px 16px 16px; min-width: 0; }
+.status-line { font-size: var(--fs-xs); color: var(--text-3); min-height: 18px; }
+.status-line.bad { color: var(--danger); }
+
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(132px, 1fr)); gap: 10px; }
+.kpi { display: flex; flex-direction: column; gap: 2px; padding: 12px 14px; border-radius: var(--r-lg); border: .5px solid var(--border-strong); background: var(--bg-raised); min-width: 0; text-align: left; color: inherit; font: inherit; }
+.kpi span { font-size: var(--fs-xs); color: var(--text-3); white-space: nowrap; }
+.kpi b { font: 600 var(--fs-xl)/1.25 var(--font-sans); letter-spacing: -.015em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.kpi small { font-size: var(--fs-xs); color: var(--text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.kpi.hero { grid-column: span 2; }
+.kpi.hero b { font-size: var(--fs-2xl); }
+.kpi-link { all: unset; cursor: pointer; color: var(--warn); font-weight: 500; border-radius: 4px; }
+.kpi-link:hover { text-decoration: underline; text-underline-offset: 3px; }
+.kpi-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+#i-status:empty { display: none; }
+.unpriced-list { display: grid; gap: 0; }
+.unpriced-list .ur { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 16px; padding: 7px 0; border-top: .5px solid var(--border); font-size: var(--fs-sm); }
+.unpriced-list .ur:first-child { border-top: 0; }
+.unpriced-list .ur .mono { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.legend { display: flex; flex-wrap: wrap; gap: 6px 16px; padding: 10px 16px 0; font-size: var(--fs-xs); color: var(--text-2); }
+.legend span { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.legend i { width: 10px; height: 10px; border-radius: 3px; flex: none; }
+.legend b { font: 500 12px var(--font-mono); color: var(--text-3); font-variant-numeric: tabular-nums; }
+.legend .hi { width: 13px; height: 13px; }
+.chart { position: relative; padding: 4px 8px 12px; min-height: 250px; }
+.chart:focus-visible { outline-offset: -2px; border-radius: var(--r-lg); }
+.chart svg { display: block; width: 100%; overflow: visible; }
+.chart text { font: 12px var(--font-sans); fill: var(--text-3); font-variant-numeric: tabular-nums; }
+.chart .grid { stroke: var(--grid); stroke-width: 1; }
+.chart .base { stroke: var(--axis); stroke-width: 1; }
+.chart .band { fill: transparent; }
+.chart .band.on { fill: var(--surface-hover); }
+.chart-empty { display: grid; place-items: center; height: 230px; font-size: var(--fs-sm); color: var(--text-3); }
+.tip { position: absolute; z-index: 5; pointer-events: none; min-width: 180px; padding: 9px 11px; border-radius: var(--r-lg); background: var(--bg-raised); border: .5px solid var(--border-strong); box-shadow: var(--shadow-lg); font-size: var(--fs-xs); color: var(--text-2); }
+.tip h4 { margin: 0 0 6px; font-size: var(--fs-xs); font-weight: 600; color: var(--text); }
+.tip div { display: flex; align-items: center; gap: 7px; justify-content: space-between; line-height: 1.8; }
+.tip div > span { display: inline-flex; align-items: center; gap: 6px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tip i { width: 8px; height: 8px; border-radius: 2px; flex: none; }
+.tip b { font: 500 12px var(--font-mono); color: var(--text); font-variant-numeric: tabular-nums; }
+.tip .tot { margin-top: 4px; padding-top: 4px; border-top: .5px solid var(--border); }
+
+.crumbs { display: flex; flex-wrap: wrap; align-items: center; gap: 2px; padding: 10px 16px 0; font-size: var(--fs-sm); min-width: 0; }
+.crumbs button { border: 0; background: none; height: 26px; padding: 0 6px; border-radius: var(--r-sm); color: var(--text-2); font-family: var(--font-mono); font-size: 12.5px; max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.crumbs button:hover { background: var(--surface-hover); color: var(--text); }
+.crumbs button[aria-current=page] { color: var(--text); font-weight: 600; }
+.crumbs .sep { color: var(--text-3); }
+.table-wrap { overflow-x: auto; min-width: 0; }
+.dt { width: 100%; border-collapse: collapse; font-size: var(--fs-sm); font-variant-numeric: tabular-nums; }
+.dt th, .dt td { padding: 8px 12px; text-align: right; white-space: nowrap; border-bottom: .5px solid var(--border); }
+.dt th:first-child, .dt td:first-child { text-align: left; }
+.dt th.l, .dt td.l { text-align: left; }
+.dt th { font-size: var(--fs-xs); font-weight: 500; color: var(--text-3); background: var(--bg-raised); }
+.dt th button { border: 0; background: none; padding: 2px 0; color: inherit; font: inherit; display: inline-flex; align-items: center; gap: 4px; }
+.dt th button:hover { color: var(--text); }
+.dt th[aria-sort] button { color: var(--text); }
+.dt th .arrow { font-size: 10px; opacity: .9; }
+.dt tbody tr:hover td { background: var(--surface); }
+.dt td.name { max-width: 420px; overflow: hidden; text-overflow: ellipsis; }
+.dt td .cellname { display: inline-flex; align-items: center; gap: 8px; min-width: 0; max-width: 100%; vertical-align: middle; }
+.dt td .cellname > span { overflow: hidden; text-overflow: ellipsis; }
+.dt td .sub2 { margin-left: 8px; font-size: var(--fs-xs); color: var(--text-3); font-family: var(--font-mono); }
+.dt td.cost { font-weight: 600; }
+.dt td.dim { color: var(--text-3); }
+.dt td.warnc { color: var(--warn); }
+.dt tfoot td { font-weight: 600; border-bottom: 0; border-top: .5px solid var(--border-strong); }
+.dt .linkish { border: 0; background: none; padding: 0; color: var(--text); font: inherit; text-align: left; cursor: pointer; overflow: hidden; text-overflow: ellipsis; }
+.dt .linkish:hover { color: var(--accent); text-decoration: underline; text-underline-offset: 3px; }
+.dt .tw { display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; margin-right: 2px; border: 0; border-radius: var(--r-sm); background: none; color: var(--text-3); flex: none; }
+.dt .tw:hover { background: var(--surface-hover); color: var(--text); }
+.dt .tw svg { transition: transform var(--dur) var(--ease); }
+.dt .tw[aria-expanded=true] svg { transform: rotate(90deg); }
+.dt .tw.blank { visibility: hidden; }
+.dt td input[type=checkbox], .dt th input[type=checkbox] { width: 15px; height: 15px; margin: 0; accent-color: var(--accent-solid); vertical-align: middle; }
+.dt .ck { width: 34px; padding-right: 0; }
+.mini { display: inline-block; width: 44px; height: 4px; margin-left: 8px; vertical-align: middle; border-radius: 999px; background: var(--surface-active); overflow: hidden; }
+.mini i { display: block; height: 100%; background: var(--accent); }
+
+/* search */
+.sform { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 280px) auto; gap: 8px; }
+.sfield { position: relative; min-width: 0; }
+.sfield svg.i { position: absolute; left: 11px; top: 11px; color: var(--text-3); }
+.sfield .input { width: 100%; height: 36px; padding-left: 34px; font-size: var(--fs-base); }
+#s-f { width: 100%; height: 36px; font-family: var(--font-mono); font-size: var(--fs-sm); }
+.sform .btn { height: 36px; }
+.sres { display: grid; gap: 12px; }
+.sgroup { border: .5px solid var(--border-strong); border-radius: var(--r-xl); background: var(--bg-raised); overflow: hidden; }
+.sgroup-h { display: flex; align-items: center; gap: 10px; padding: 11px 14px; border-bottom: .5px solid var(--border); min-width: 0; }
+.sgroup-h .t { flex: 1; min-width: 0; }
+.sgroup-h .t b { display: block; font-size: var(--fs-sm); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sgroup-h .t span { display: block; font: 12px var(--font-mono); color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sgroup-h .age { font-size: var(--fs-xs); }
+.hit { display: grid; grid-template-columns: 64px minmax(0, 1fr) auto; gap: 12px; align-items: baseline; width: 100%; padding: 10px 14px; border: 0; border-top: .5px solid var(--border); background: none; text-align: left; color: var(--text-2); font-size: var(--fs-sm); line-height: 1.6; }
+.hit:first-of-type { border-top: 0; }
+.hit:hover { background: var(--surface); color: var(--text); }
+.hit .k { font-size: var(--fs-xs); color: var(--text-3); white-space: nowrap; }
+.hit .snip { overflow-wrap: anywhere; }
+.hit .ts { font: 12px var(--font-mono); color: var(--text-3); white-space: nowrap; }
+mark { background: color-mix(in srgb, var(--c4) 30%, transparent); color: var(--text); border-radius: 3px; padding: 0 2px; }
+
+/* manage */
+.subtabs { display: flex; gap: 2px; border-bottom: .5px solid var(--border-strong); }
+.subtabs button { position: relative; height: 34px; padding: 0 12px; border: 0; background: none; font-size: var(--fs-sm); font-weight: 500; color: var(--text-3); }
+.subtabs button:hover { color: var(--text); }
+.subtabs button[aria-selected=true] { color: var(--text); }
+.subtabs button[aria-selected=true]::after { content: ""; position: absolute; left: 8px; right: 8px; bottom: -1px; height: 2px; border-radius: 2px; background: var(--accent); }
+.subtabs .count { margin-left: 6px; font: 12px var(--font-mono); color: var(--text-3); }
+.selbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 10px 14px; border-radius: var(--r-lg); background: var(--surface); border: .5px solid var(--border); font-size: var(--fs-sm); color: var(--text-2); }
+.selbar b { color: var(--text); font-weight: 600; }
+.selbar .grow { flex: 1; }
+.review, #m-list-pane, #m-archive-pane { display: grid; gap: 12px; }
+.rlist { display: grid; }
+.ritem { display: grid; grid-template-columns: 20px minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 10px 16px; border-top: .5px solid var(--border); font-size: var(--fs-sm); min-width: 0; }
+.ritem:first-child { border-top: 0; }
+.ritem .t { min-width: 0; }
+.ritem .t b { display: block; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ritem .t span { display: block; font-size: var(--fs-xs); color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ritem .r { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; font: 12.5px var(--font-mono); color: var(--text-2); white-space: nowrap; }
+.confirm-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: flex-end; }
+
+/* insights */
+.grid2 { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: 18px; }
+.heat-wrap { overflow-x: auto; padding: 4px 16px 6px; }
+.heat-wrap svg, .punch svg { display: block; }
+.heat-wrap text, .punch text { font: 11.5px var(--font-sans); fill: var(--text-3); }
+.cell { rx: 2.5px; }
+.l0 { fill: var(--heat-0); } .l1 { fill: var(--heat-1); } .l2 { fill: var(--heat-2); } .l3 { fill: var(--heat-3); } .l4 { fill: var(--heat-4); }
+.cell:hover { stroke: var(--text); stroke-width: 1.5px; }
+.heat-foot { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 16px; padding: 4px 16px 14px; font-size: var(--fs-xs); color: var(--text-3); }
+.heat-foot b { color: var(--text); font-weight: 600; }
+.scale { display: inline-flex; align-items: center; gap: 3px; }
+.scale i { width: 11px; height: 11px; border-radius: 2.5px; }
+.punch { overflow-x: auto; padding: 8px 16px 14px; }
+.punch .mbar { fill: var(--c1); }
+.ranks { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; padding: 12px 16px 16px; }
+.rank h3 { margin: 0 0 8px; font-size: var(--fs-sm); font-weight: 600; color: var(--text-2); }
+.rank ol { list-style: none; margin: 0; padding: 0; display: grid; gap: 9px; }
+.rank li { display: grid; grid-template-columns: 16px minmax(0, 1fr) auto; gap: 4px 8px; align-items: center; font-size: var(--fs-sm); }
+.rank li .n { font: 12px var(--font-mono); color: var(--text-3); }
+.rank li .nm { display: inline-flex; align-items: center; gap: 6px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rank li .nm span { overflow: hidden; text-overflow: ellipsis; }
+.rank li .v { font: 500 12.5px var(--font-mono); font-variant-numeric: tabular-nums; }
+.rank li .rb { grid-column: 2 / -1; height: 5px; border-radius: 999px; background: var(--surface-active); overflow: hidden; }
+.rank li .rb i { display: block; height: 100%; border-radius: 999px; background: var(--c1); }
+.rank .none { font-size: var(--fs-sm); color: var(--text-3); }
+
+body.redact .txt, body.redact pre, body.redact .md, body.redact .snip { filter: blur(5px); }
 
 @keyframes breathe { 50% { opacity: .45; } }
 @keyframes spin { to { transform: rotate(360deg); } }
@@ -309,26 +578,52 @@ body.redact .txt, body.redact pre, body.redact .md { filter: blur(5px); }
 @keyframes sk { from { background-position: 100% 0; } to { background-position: -100% 0; } }
 @keyframes enter { from { opacity: 0; transform: translateY(4px); } }
 @keyframes slide { from { opacity: 0; transform: translateX(-4px); } }
+@keyframes flash { 0%, 30% { background: var(--accent-bg); } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
 @media (max-width: 1180px) {
-  .top { grid-template-columns: auto auto minmax(0, 1fr); }
-  .brand small, #m-api, #rail-toggle, .metrics .opt, .metrics .spark svg { display: none; }
+  .top { grid-template-columns: auto auto minmax(0, 1fr) auto auto; }
+  .brand small, #m-api, .metrics .opt, .metrics .spark svg { display: none; }
+  #rail-toggle { display: none; }
   .app, .app.norail { grid-template-columns: var(--side-width) minmax(0, 1fr) 0; }
   .rail { display: none; }
+  .grid2 { grid-template-columns: minmax(0, 1fr); }
 }
 @media (max-width: 960px) {
-  .top { grid-template-columns: minmax(0, 1fr) auto; }
-  .metrics { grid-column: 1 / -1; }
+  .metrics { display: none; }
+  .top { grid-template-columns: auto minmax(0, 1fr) auto auto; }
+  .sh-usage { grid-template-columns: auto minmax(0, 1fr); }
+  .sh-usage .ctx { grid-column: 1 / -1; }
+  .ranks { grid-template-columns: minmax(0, 1fr); }
+  .sform { grid-template-columns: minmax(0, 1fr) auto; }
+  .sform .sfield { grid-column: 1 / -1; }
 }
 @media (max-width: 760px) {
+  .top { grid-template-columns: minmax(0, 1fr) auto auto; padding: 8px 10px; }
+  .nav { grid-column: 1 / -1; grid-row: 2; }
+  .nav button { flex: 1; justify-content: center; padding: 0 6px; }
+  .nav button svg.i { display: none; }
   .app, .app.norail { grid-template-columns: minmax(0, 1fr); }
   .side { border-right: 0; }
   .app.thread-open .side, .app:not(.thread-open) .conv { display: none; }
   .conv-nav { display: flex; }
-}
-@media (max-width: 600px) {
-  .top { grid-template-columns: minmax(0, 1fr); }
-  #conn { justify-self: start; }
+  .sh-top { flex-wrap: wrap; }
+  .sh-top h2 { flex-basis: calc(100% - 80px); }
+  .sh-actions { width: 100%; }
+  .sh-usage { grid-template-columns: auto minmax(0, 1fr); gap: 8px 16px; }
+  .sh-usage .us-tok { display: none; }
+  .sh-usage .ctx { grid-column: auto; }
+  .ctx-sub { display: none; }
+  .kpi.hero { grid-column: 1 / -1; }
+  .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .page { padding-top: 18px; gap: 14px; }
+  .page-h h1 { font-size: var(--fs-lg); }
+  .toolbar .select { max-width: none; flex: 1 1 140px; }
+  .hit { grid-template-columns: minmax(0, 1fr) auto; }
+  .hit .k { grid-column: 1 / -1; }
+  .ritem { grid-template-columns: 20px minmax(0, 1fr); }
+  .ritem .r { grid-column: 2; justify-content: flex-start; }
+  .dt th, .dt td { padding: 8px 9px; }
+  #m-table .mst, #m-table th:nth-last-child(-n+2), #m-table td:nth-last-child(-n+2) { display: none; }
 }
 </style>
 </head>
@@ -392,13 +687,13 @@ SOFTWARE.
     </svg>
     uniflo <small>live sessions</small>
   </div>
-  <span id="conn" data-state="idle"><span class="dot"></span><span id="conn-text">未连接</span>
-    <span class="seg" id="transport">
-      <button data-transport="sse" title="Server-Sent Events · /v1/stream">SSE</button>
-      <button data-transport="ws" title="WebSocket · /v1/ws">WS</button>
-      <button data-transport="ndjson" title="NDJSON · /v1/stream.ndjson">NDJSON</button>
-    </span>
-  </span>
+  <nav class="nav" id="nav" role="tablist" aria-label="视图">
+    <button role="tab" data-view="sessions" aria-controls="app" title="会话 (1)"><svg class="i" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10"/></svg>会话</button>
+    <button role="tab" data-view="usage" aria-controls="v-usage" title="用量 (2)"><svg class="i" viewBox="0 0 24 24"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>用量</button>
+    <button role="tab" data-view="search" aria-controls="v-search" title="检索 (3)"><svg class="i" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>检索</button>
+    <button role="tab" data-view="manage" aria-controls="v-manage" title="管理 (4)"><svg class="i" viewBox="0 0 24 24"><path d="M3 7h18M5 7l1 13h12l1-13M9 7V4h6v3"/></svg>管理</button>
+    <button role="tab" data-view="insights" aria-controls="v-insights" title="洞察 (5)"><svg class="i" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>洞察</button>
+  </nav>
   <div class="metrics">
     <span>会话<b id="m-sessions">–</b></span>
     <span>工作中<b id="m-working">–</b></span>
@@ -406,13 +701,23 @@ SOFTWARE.
     <span class="opt">seq<b id="m-seq">0</b></span>
     <span class="opt">REST<b id="m-rest">–</b></span>
   </div>
+  <span id="conn" data-state="idle"><span class="dot"></span><span id="conn-text">未连接</span>
+    <span class="seg" id="transport">
+      <button data-transport="sse" title="Server-Sent Events · /v1/stream">SSE</button>
+      <button data-transport="ws" title="WebSocket · /v1/ws">WS</button>
+      <button data-transport="ndjson" title="NDJSON · /v1/stream.ndjson">NDJSON</button>
+    </span>
+  </span>
   <span id="m-api"></span>
+  <button class="iconbtn" id="notify" aria-pressed="false" title="回合结束通知：关">
+    <svg class="i" viewBox="0 0 24 24"><path d="M6 8a6 6 0 1 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg>
+  </button>
   <button class="iconbtn on" id="rail-toggle" title="显示 / 隐藏右侧面板" aria-controls="right" aria-expanded="true">
     <svg class="i" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M15 4v16"/></svg>
   </button>
 </header>
 
-<div class="app" id="app">
+<div class="app" id="app" role="tabpanel" data-view="sessions">
   <aside class="side" id="session-list-panel">
     <div class="search">
       <div class="field">
@@ -427,6 +732,7 @@ SOFTWARE.
       <button class="chip" data-tok="is:live">有进程</button>
       <button class="chip" data-tok="is:root">顶层</button>
       <button class="chip" data-tok="since:1d">24 小时</button>
+      <button class="chip" data-tok="is:archived">已归档</button>
     </div>
     <div class="harness-filter" id="harnesses">
       <label for="harness-select">Agent harness</label>
@@ -444,7 +750,7 @@ SOFTWARE.
         <svg viewBox="0 0 24 24" fill="none" stroke-width="1.6" stroke-linecap="round"><path d="M3 5.5c7 0 8 6.5 18 6.5M3 12h18M3 18.5c7 0 8-6.5 18-6.5" stroke="url(#g)"/></svg>
         <h3>选择一个会话</h3>
         <p>所有 harness 的会话都已归一成同一种事件流，实时更新。</p>
-        <div class="keys"><span><kbd>/</kbd>搜索</span><span><kbd>j</kbd><kbd>k</kbd>切换会话</span><span><kbd>esc</kbd>退出搜索</span></div>
+        <div class="keys"><span><kbd>/</kbd>搜索</span><span><kbd>j</kbd><kbd>k</kbd>切换会话</span><span><kbd>1</kbd>–<kbd>5</kbd>切换视图</span><span><kbd>esc</kbd>退出搜索</span></div>
       </div>
     </div>
   </main>
@@ -465,6 +771,123 @@ SOFTWARE.
   </aside>
 </div>
 
+<section class="view" id="v-usage" role="tabpanel" data-view="usage" hidden>
+  <div class="page">
+    <div class="page-h">
+      <div><h1>用量与费用</h1><p>按事件时间统计每一步的 token 与费用。费用是按价格目录折算的 API 等价成本，订阅用户并不按此计费。</p></div>
+      <div class="side-info"><span class="pill" id="u-pricing">价格目录</span></div>
+    </div>
+    <div class="toolbar">
+      <div class="seg lg" id="u-range" role="group" aria-label="时间范围">
+        <button data-range="24h">24 小时</button><button data-range="7d">7 天</button><button data-range="30d">30 天</button><button data-range="90d">90 天</button><button data-range="custom">自定义</button>
+      </div>
+      <span id="u-custom" class="toolbar" hidden>
+        <input class="input" type="date" id="u-from" aria-label="开始日期"><span class="muted">至</span><input class="input" type="date" id="u-to" aria-label="结束日期">
+      </span>
+      <span class="grow"><span class="status-line" id="u-status" role="status"></span></span>
+      <select class="select" id="u-h" aria-label="按 harness 过滤"><option value="">全部 harness</option></select>
+      <select class="select" id="u-m" aria-label="按模型过滤"><option value="">全部模型</option></select>
+      <select class="select" id="u-p" aria-label="按项目过滤"><option value="">全部项目</option></select>
+    </div>
+    <div class="kpis" id="u-kpis"></div>
+    <div class="panel" id="u-unpriced" hidden>
+      <div class="panel-h"><h2>未定价的模型<small>没有 harness 自报金额，也不在价格目录里；总费用不含这些步骤，不按 0 计</small></h2></div>
+      <div class="panel-b"><div class="unpriced-list" id="u-unpriced-list"></div></div>
+    </div>
+    <div class="panel">
+      <div class="panel-h"><h2>每日费用<small>API 等价成本</small></h2>
+        <div class="seg lg" id="u-stack" role="group" aria-label="堆叠维度"><button data-stack="harness">按 harness</button><button data-stack="model">按模型</button></div>
+      </div>
+      <div class="legend" id="u-legend"></div>
+      <div class="chart" id="u-chart" tabindex="0" aria-label="每日费用堆叠柱状图，左右方向键查看每天的明细"></div>
+    </div>
+    <div class="panel">
+      <div class="panel-h"><h2>明细</h2>
+        <div class="toolbar">
+          <div class="seg lg" id="u-group" role="group" aria-label="分组">
+            <button data-group="harness">Harness</button><button data-group="model">模型</button><button data-group="project">项目</button><button data-group="dir">目录</button><button data-group="day">日期</button>
+          </div>
+          <button class="btn sm" id="u-csv"><svg class="i" viewBox="0 0 24 24"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg>导出 CSV</button>
+        </div>
+      </div>
+      <nav class="crumbs" id="u-crumbs" aria-label="目录层级" hidden></nav>
+      <div class="panel-b"><div class="table-wrap"><table class="dt" id="u-table"></table></div></div>
+    </div>
+  </div>
+</section>
+
+<section class="view" id="v-search" role="tabpanel" data-view="search" hidden>
+  <div class="page narrow">
+    <div class="page-h"><div><h1>全文检索</h1><p>检索消息正文、思考、工具参数与输出。空格分隔的词需同时出现，<code>"引号"</code> 内为短语，<code>-词</code> 排除；中文与代码片段都按子串匹配。</p></div></div>
+    <form class="sform" id="s-form" role="search">
+      <div class="sfield"><svg class="i" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+        <input class="input" id="s-q" type="search" placeholder="搜索正文，例如 缓存击穿 或 parse_rel" aria-label="检索正文" autocomplete="off" spellcheck="false"></div>
+      <input class="input" id="s-f" placeholder="会话过滤：h:claude since:7d" aria-label="会话过滤（会话搜索语法）" autocomplete="off" spellcheck="false">
+      <button class="btn primary" type="submit">搜索</button>
+    </form>
+    <div class="status-line" id="s-status" role="status"></div>
+    <div class="sres" id="s-results"></div>
+    <button class="btn" id="s-more" hidden>加载更多会话</button>
+  </div>
+</section>
+
+<section class="view" id="v-manage" role="tabpanel" data-view="manage" hidden>
+  <div class="page">
+    <div class="page-h"><div><h1>会话管理</h1><p>清理会话会先写一份精简归档，再把源文件移入系统回收站，不会直接删除。归档后的会话仍可查看、检索和统计用量。</p></div></div>
+    <div class="notice warn" id="m-ro" hidden><svg class="i" viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>
+      <div><b>只读模式</b>：守护进程以 <code>--read-only</code> 启动，清理会话、删除归档、在终端打开等写操作都已关闭，这里只能浏览。去掉 <code>--read-only</code> 重启守护进程后可用。</div></div>
+    <div class="notice bad" id="m-off" hidden></div>
+    <div class="subtabs" role="tablist" aria-label="管理">
+      <button role="tab" id="m-tab-list" data-mtab="list" aria-controls="m-list-pane">会话</button>
+      <button role="tab" id="m-tab-archive" data-mtab="archive" aria-controls="m-archive-pane">归档<span class="count" id="m-arch-count"></span></button>
+    </div>
+    <div id="m-list-pane" role="tabpanel">
+      <div class="toolbar">
+        <input class="input mono" id="m-q" placeholder="过滤：h:claude before:30d !s:work" aria-label="按会话搜索语法过滤" style="flex:1 1 260px" autocomplete="off" spellcheck="false">
+        <button class="btn" id="m-selall">选中全部匹配</button>
+        <button class="btn ghost" id="m-clear">清空选择</button>
+      </div>
+      <div class="selbar" id="m-selbar"><span id="m-selinfo">未选择会话</span><span class="grow"></span><button class="btn primary" id="m-plan" disabled>生成清理计划</button></div>
+      <div class="status-line" id="m-status" role="status"></div>
+      <div class="panel"><div class="table-wrap"><table class="dt" id="m-table"></table></div></div>
+    </div>
+    <div id="m-review" class="review" hidden></div>
+    <div id="m-archive-pane" role="tabpanel" hidden>
+      <div class="status-line" id="m-arch-status" role="status"></div>
+      <div class="panel"><div class="table-wrap"><table class="dt" id="m-arch-table"></table></div></div>
+    </div>
+  </div>
+</section>
+
+<section class="view" id="v-insights" role="tabpanel" data-view="insights" hidden>
+  <div class="page">
+    <div class="page-h">
+      <div><h1>活跃度洞察</h1><p>最近一年的使用节奏：哪天最忙、一周里什么时候最常用、花在哪些项目和模型上。</p></div>
+      <div class="seg lg" id="i-metric" role="group" aria-label="指标"><button data-metric="sessions">会话</button><button data-metric="prompts">提示</button><button data-metric="tokens">Token</button><button data-metric="cost">费用</button></div>
+    </div>
+    <div class="status-line" id="i-status" role="status"></div>
+    <div class="panel">
+      <div class="panel-h"><h2 id="i-heat-title">每日活跃</h2></div>
+      <div class="heat-wrap" id="i-heat"></div>
+      <div class="heat-foot" id="i-heat-foot"></div>
+    </div>
+    <div class="panel">
+      <div class="panel-h"><h2 id="i-punch-title">星期 × 小时</h2></div>
+      <div class="punch" id="i-punch"></div>
+      <div class="heat-foot" id="i-punch-foot"></div>
+    </div>
+    <div class="panel">
+      <div class="panel-h"><h2>排行<small>最近一年 · 前 5 名</small></h2>
+        <div class="seg lg" id="i-rank" role="group" aria-label="排行指标"><button data-rank="cost">费用</button><button data-rank="tokens">Token</button><button data-rank="sessions">会话</button><button data-rank="prompts">提示</button><button data-rank="steps">步数</button></div>
+      </div>
+      <div class="ranks" id="i-ranks"></div>
+    </div>
+  </div>
+</section>
+
+<div class="menu" id="menu" role="menu" hidden></div>
+<div class="tip" id="tip" hidden></div>
+<div id="toasts" aria-live="polite"></div>
 <!--
 Tom Select 2.6.2 base distribution; https://tom-select.js.org/
 Includes bundled Sifter and Unicode Variants. Source-map footer omitted for offline embedding.
@@ -1060,11 +1483,15 @@ const P = new URLSearchParams(location.search);
 const TOKEN = P.get("token") || "";
 const MAX_TEXT = 4000, LIST_LIMIT = 300, PAGE = 150;
 const $ = (s, r = document) => r.querySelector(s);
+const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 if (P.has("redact")) document.body.classList.add("redact");
 const narrowLayout = matchMedia("(max-width: 760px)");
+const TZ = Intl.DateTimeFormat().resolvedOptions().timeZone || "";
+const IS_MAC = /mac/i.test(navigator.userAgentData?.platform || navigator.platform || "");
 
 let API = "";
+let READ_ONLY = false;
 let transport = P.get("transport") || localStorage.getItem("uniflo.transport") || "sse";
 let lastSeq = 0;
 let harnesses = new Map();          // id -> Harness
@@ -1092,12 +1519,42 @@ const I = {
   check: '<path d="M5 12.5 10 17l9-10"/>',
   x: '<path d="M6 6l12 12M18 6 6 18"/>',
   up: '<path d="M12 19V5M5 12l7-7 7 7"/>',
+  down: '<path d="M12 5v14M5 12l7 7 7-7"/>',
+  copy: '<rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/>',
+  play: '<path d="m7 4 13 8-13 8z"/>',
+  trash: '<path d="M3 7h18M5 7l1 13h12l1-13M9 7V4h6v3"/>',
+  table: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 10h18M9 10v10"/>',
+  info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.5h.01"/>',
+  warn: '<path d="M12 3 2 20h20z"/><path d="M12 10v4M12 17h.01"/>',
+  archive: '<rect x="3" y="4" width="18" height="5" rx="1"/><path d="M5 9v10a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V9M10 13h4"/>',
 };
-const icon = (n, cls = "i") => `<svg class="${cls}" viewBox="0 0 24 24">${I[n]}</svg>`;
+const icon = (n, cls = "i") => `<svg class="${cls}" viewBox="0 0 24 24" aria-hidden="true">${I[n]}</svg>`;
 const HUES = { claude: 40, qoder: 190, qwen: 265, codex: 160, pi: 300, omp: 285, crosery: 330, commandcode: 15, gemini: 225,
   antigravity: 205, opencode: 60, kilo: 100, zcode: 175, mimocode: 25, workbuddy: 140, minimax: 350, hermes: 245, factory: 75, reasonix: 120, cursor: 0, dsh: 215 };
 const hue = (id) => HUES[id] ?? [...id].reduce((a, c) => (a * 31 + c.charCodeAt(0)) % 360, 7);
-const htag = (id) => `<span class="ht" style="--h:${hue(id)}">${esc(id)}</span>`;
+const hname = (id) => harnesses.get(id)?.name || id;
+// Two letters for harnesses without a brand icon: initials of the name's words or capitals.
+function initials(name) {
+  const words = String(name).split(/[\s\-_]+/).filter(Boolean);
+  if (words.length > 1) return (words[0][0] + words[1][0]).toUpperCase();
+  const caps = name.match(/[A-Z]/g);
+  if (caps && caps.length > 1) return caps.slice(0, 2).join("");
+  return name.slice(0, 1).toUpperCase() + name.slice(1, 2).toLowerCase();
+}
+const hasIcon = (id) => !!document.getElementById("hi-" + id);
+function hicon(id, cls = "") {
+  const name = esc(hname(id));
+  if (hasIcon(id)) return `<svg class="hi ${cls}" viewBox="0 0 24 24" role="img" aria-label="${name}"><title>${name}</title><use href="#hi-${esc(id)}"/></svg>`;
+  return `<span class="hi hl ${cls}" style="--h:${hue(id)}" role="img" aria-label="${name}" title="${name}">${esc(initials(hname(id)))}</span>`;
+}
+const htag = (id) => `<span class="ht" style="--h:${hue(id)}">${hicon(id)}${esc(id)}</span>`;
+// Notification icon: the brand path (or letter block) as a data URL, readable on light and dark shells.
+function iconDataUrl(id) {
+  const sym = document.getElementById("hi-" + id);
+  const body = sym ? sym.innerHTML : `<text x="12" y="16.5" text-anchor="middle" font-family="sans-serif" font-size="11" font-weight="700">${esc(initials(hname(id)))}</text>`;
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="-4 -4 32 32"><rect x="-4" y="-4" width="32" height="32" rx="7" fill="#f4f4f4"/><g fill="#1f1f1f" fill-rule="evenodd">${body}</g></svg>`;
+  return "data:image/svg+xml;charset=utf-8," + encodeURIComponent(svg);
+}
 
 // ---------------------------------------------------------------- formatting
 function age(ms) {
@@ -1109,11 +1566,27 @@ function age(ms) {
   return Math.floor(s / 86400) + "d";
 }
 const clock = (ms) => (ms ? new Date(ms).toLocaleTimeString("zh-CN", { hour12: false }) : "");
+const stamp = (ms) => (ms ? new Date(ms).toLocaleString("zh-CN", { hour12: false, month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }) : "–");
 const base = (p) => (p ? p.split("/").filter(Boolean).pop() || p : "");
 const short = (key) => { const i = key.indexOf(":"); return key.slice(0, i + 1) + key.slice(i + 1, i + 9); };
 const label = (s) => s.title || s.preview || s.id;
 const fmtN = (n) => (n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e4 ? (n / 1e3).toFixed(1) + "k" : String(n ?? 0));
-const dur = (ms) => (ms < 1000 ? ms + "ms" : ms < 60000 ? (ms / 1000).toFixed(1) + "s" : Math.round(ms / 60000) + "m");
+const tok = (n) => { n = n || 0; return n >= 1e9 ? (n / 1e9).toFixed(2) + "B" : n >= 1e6 ? (n / 1e6).toFixed(n >= 1e8 ? 0 : 1) + "M" : n >= 1e3 ? (n / 1e3).toFixed(n >= 1e5 ? 0 : 1) + "k" : String(n); };
+const full = (n) => (n ?? 0).toLocaleString("en-US");
+function money(v) {
+  if (v == null) return "—";
+  if (v === 0) return "$0.00";
+  if (v < 0.01) return "<$0.01";
+  return "$" + v.toLocaleString("en-US", { minimumFractionDigits: v >= 1000 ? 0 : 2, maximumFractionDigits: v >= 1000 ? 0 : 2 });
+}
+const bytes = (n) => { n = n || 0; const u = ["B", "KB", "MB", "GB", "TB"]; let i = 0; while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; } return (i ? n.toFixed(n >= 100 ? 0 : 1) : n) + " " + u[i]; };
+const dur = (ms) => (ms < 1000 ? ms + "ms" : ms < 60000 ? (ms / 1000).toFixed(1) + "s" : ms < 3600_000 ? Math.round(ms / 60000) + " 分钟" : (ms / 3600_000).toFixed(1) + " 小时");
+const pad2 = (n) => String(n).padStart(2, "0");
+const dayKey = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+const addDays = (d, n) => { const x = new Date(d); x.setDate(x.getDate() + n); return x; };
+const WEEK = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
+const dayLabel = (key) => { const [y, m, d] = key.split("-").map(Number); return `${key} ${WEEK[new Date(y, m - 1, d).getDay()]}`; };
+const tokensOf = (r) => (r.input || 0) + (r.output || 0) + (r.cache_read || 0) + (r.cache_write || 0);
 
 // Markdown subset: fences, headings, lists, quotes, tables, rules, inline code/bold/italic/links.
 // Input is escaped before any tag is added, and links are limited to http(s).
@@ -1194,6 +1667,7 @@ const CHECKS = [
   ["sessions", "GET", "/v1/sessions?q="], ["sessions_ndjson", "GET", "/v1/sessions?format=ndjson"],
   ["session", "GET", "/v1/sessions/{key}"], ["events", "GET", "/v1/sessions/{key}/events"],
   ["sse", "SSE", "/v1/stream"], ["ws", "WS", "/v1/ws"], ["ndjson", "NDJSON", "/v1/stream.ndjson"],
+  ["usage", "GET", "/v1/usage"], ["pricing", "GET", "/v1/pricing"], ["search", "GET", "/v1/search"], ["archive", "GET", "/v1/archive"],
 ];
 const checkState = new Map();
 let checksQueued = false;
@@ -1234,6 +1708,22 @@ async function api(name, path, q) {
     throw e;
   }
 }
+// Plain JSON GET for the views (no self-check bookkeeping); errors carry the HTTP status.
+async function getJson(path, q) {
+  const r = await fetch(url(path, q));
+  const body = await r.json().catch(() => ({}));
+  if (!r.ok) throw Object.assign(new Error(body.error || `HTTP ${r.status}`), { status: r.status });
+  return body;
+}
+// Write routes need the custom header (docs/api.md#写接口); the token rides in the query like reads.
+async function write(method, path, body, q) {
+  const headers = { "X-Uniflo-Write": "1" };
+  if (body !== undefined) headers["Content-Type"] = "application/json";
+  const r = await fetch(url(path, q), { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
+  const out = await r.json().catch(() => ({}));
+  if (!r.ok) throw Object.assign(new Error(out.error || `HTTP ${r.status}`), { status: r.status, body: out });
+  return out;
+}
 async function resolveApi() {
   const given = P.get("api");
   if (given) return given.replace(/\/$/, "");
@@ -1244,6 +1734,48 @@ async function resolveApi() {
     } catch {}
   }
   return "http://127.0.0.1:7311";
+}
+function toast(msg, bad) {
+  const n = document.createElement("div");
+  n.className = "toast" + (bad ? " bad" : "");
+  n.textContent = msg;
+  $("#toasts").append(n);
+  setTimeout(() => n.remove(), 3200);
+}
+
+// ---------------------------------------------------------------- URL state
+// Every view and filter lives in the query string next to api/token/transport, so a refresh
+// or a shared link restores the same screen. Defaults are left out of the URL.
+const DEFAULTS = { view: "sessions", range: "30d", group: "harness", stack: "harness", metric: "sessions", rank: "cost", mtab: "list" };
+const getp = (k) => new URLSearchParams(location.search).get(k) ?? DEFAULTS[k] ?? "";
+function setp(patch, push = false) {
+  const p = new URLSearchParams(location.search);
+  for (const [k, v] of Object.entries(patch)) {
+    if (v === null || v === undefined || v === "" || v === false || v === DEFAULTS[k]) p.delete(k);
+    else p.set(k, v === true ? "1" : v);
+  }
+  const next = "?" + p.toString().replace(/%2F/g, "/").replace(/%3A/g, ":");
+  if (next !== location.search) history[push ? "pushState" : "replaceState"](null, "", next);
+}
+
+// ---------------------------------------------------------------- views
+const VIEWS = ["sessions", "usage", "search", "manage", "insights"];
+let view = null, ready = false;
+const viewEnter = {};
+function showView(v, push = false) {
+  if (!VIEWS.includes(v)) v = "sessions";
+  const changed = v !== view;
+  view = v;
+  for (const b of $$("#nav [data-view]")) {
+    const on = b.dataset.view === v;
+    b.setAttribute("aria-selected", String(on));
+    b.tabIndex = on ? 0 : -1;
+  }
+  for (const el of $$('[role=tabpanel][data-view]')) el.hidden = el.dataset.view !== v;
+  setp({ view: v }, push && changed);
+  closeMenu();
+  hideTip();
+  if (ready) viewEnter[v]?.();
 }
 
 // ---------------------------------------------------------------- session list
@@ -1271,15 +1803,20 @@ function renderList() {
     $("#list").innerHTML = all.length ? html : `<div class="empty"><h3>没有匹配的会话</h3><p>试试 <kbd>s:work</kbd> 或换个关键词</p></div>`;
   });
 }
+function usageBrief(u) {
+  if (!u || !u.steps) return "";
+  const cost = u.cost_usd != null ? money(u.cost_usd) : "未定价";
+  return `<span class="rcost" title="API 等价成本 ${esc(cost)} · ${full(tokensOf(u))} token · ${u.steps} 步">${esc(cost)} · ${tok(tokensOf(u))}</span>`;
+}
 function rowHtml(s) {
   return `<div class="row${s.key === selected ? " sel" : ""}" data-key="${esc(s.key)}" data-status="${s.status}">
-    <span class="sd"></span>
+    <span class="ricon">${hicon(s.harness)}<i class="sd"></i></span>
     <div><div class="r1"><span class="rt txt">${esc(label(s))}</span><span class="age" data-ts="${s.updated_at}">${age(s.updated_at)}</span></div>
-    <div class="r2">${htag(s.harness)}${s.parent ? '<span class="sub" title="子会话">↳ sub</span>' : ""}<span class="cwd txt">${esc(base(s.cwd))}</span>${s.pid ? `<span class="pid" title="进程 ${s.pid}">⚡${s.pid}</span>` : ""}</div></div>
+    <div class="r2">${s.parent ? '<span class="sub" title="子会话">↳</span>' : ""}<span class="cwd txt">${esc(base(s.cwd) || s.harness)}</span>${s.archived ? '<span class="tag acc" title="源文件已清理，内容来自精简归档">已归档</span>' : ""}${s.pid ? `<span class="pid" title="进程 ${s.pid}">⚡${s.pid}</span>` : ""}${usageBrief(s.usage)}</div></div>
   </div>`;
 }
 function skeletonList() {
-  $("#list").innerHTML = Array.from({ length: 9 }, () => `<div class="row"><span class="sd"></span><div><div class="sk" style="height:12px;width:${50 + Math.random() * 40}%"></div><div class="sk" style="height:10px;width:40%;margin-top:7px"></div></div></div>`).join("");
+  $("#list").innerHTML = Array.from({ length: 9 }, () => `<div class="row"><span class="ricon"><span class="sk" style="width:18px;height:18px"></span></span><div><div class="sk" style="height:12px;width:${50 + Math.random() * 40}%"></div><div class="sk" style="height:10px;width:40%;margin-top:7px"></div></div></div>`).join("");
 }
 
 let searchSeq = 0, searchTimer = null;
@@ -1290,6 +1827,7 @@ async function runSearch() {
   if (mine !== searchSeq) return r;
   sessions = new Map(r.body.map((s) => [s.key, s]));
   order = r.body.map((s) => s.key);
+  for (const s of r.body) trackStatus(s);
   $("#q-info").innerHTML = `<b>${r.body.length}</b> 条 · ${r.ms.toFixed(1)} ms`;
   syncFilters();
   renderList();
@@ -1325,7 +1863,7 @@ function queryHarness() {
 }
 function harnessOption(data) {
   return `<div class="h-option" title="${esc(data.name || data.text)}">
-    ${data.value && !data.query ? `<span class="hdot" style="--h:${hue(data.value)}" aria-hidden="true"></span>` : icon("agent")}
+    ${data.value && !data.query ? hicon(data.value) : icon("agent")}
     <span class="h-name">${esc(data.text)}</span>
     ${data.sessions != null ? `<span class="h-count num">${esc(data.sessions)}</span>` : ""}
     ${data.working ? `<span class="h-working" title="${esc(data.working)} 个工作中">工作 ${esc(data.working)}</span>` : ""}
@@ -1346,6 +1884,7 @@ const harnessSelect = new TomSelect("#harness-select", {
     const tokens = $("#q").value.split(/\s+/).filter((t) => t && !/^(h|harness):/i.test(t));
     if (value) tokens.push("h:" + value);
     $("#q").value = tokens.join(" ");
+    setp({ q: $("#q").value.trim() });
     syncFilters();
     queueSearch(0);
   },
@@ -1408,6 +1947,7 @@ async function refreshMeta() {
     $("#m-sessions").textContent = b.sessions;
     $("#m-working").textContent = b.working;
     $("#m-api").textContent = `${API.replace(/^https?:\/\//, "")} · schema v${b.schema} · ${b.version}`;
+    if (READ_ONLY !== !!b.read_only) { READ_ONLY = !!b.read_only; applyReadOnly(); }
   }
   if (st.status === "fulfilled") {
     const s = st.value.body;
@@ -1423,23 +1963,151 @@ function syncFilters() {
   document.querySelectorAll(".chip[data-tok]").forEach((c) => c.classList.toggle("on", toks.has(c.dataset.tok)));
   if (!harnessSelect.isDisabled) refreshHarnessOptions();
 }
-
-// ---------------------------------------------------------------- transcript
-function renderHead(s) {
-  const head = $("#detail-head");
-  head.hidden = false;
-  head.innerHTML = `<div class="wrap">
-    <div class="sh-top"><span class="badge ${s.status}"><i></i>${s.status === "work" ? "工作中" : "空闲"}</span><h2 class="txt">${esc(label(s))}</h2></div>
-    <div class="sh-meta">${htag(s.harness)}
-      ${s.model ? `<span class="mono">${esc(s.model)}</span>` : ""}
-      ${s.cwd ? `<span class="mono txt">${esc(s.cwd)}</span>` : ""}
-      ${s.pid ? `<span>进程 <span class="mono">${s.pid}</span></span>` : ""}
-      ${s.parent ? `<span>父会话 <span class="mono">${esc(short(s.parent))}</span></span>` : ""}
-      <span>${esc(s.status_reason || "")} · ${age(s.status_since)} 前</span>
-      <span class="mono key" data-copy-text="${esc(s.key)}" title="点击复制">${esc(short(s.key))}</span>
-    </div></div>`;
+// Read-only daemons answer every write with 403: hide what would write instead of failing late.
+function applyReadOnly() {
+  document.body.classList.toggle("read-only", READ_ONLY);
+  $("#m-ro").hidden = !READ_ONLY;
+  if (current) renderHead(current, true);
+  if (view === "manage") viewEnter.manage();
 }
 
+// ---------------------------------------------------------------- session detail head
+let headFor = null;
+function renderHead(s, rebuild = false) {
+  const head = $("#detail-head");
+  head.hidden = false;
+  if (headFor !== s.key || rebuild) {
+    headFor = s.key;
+    const stepsOpen = getp("steps") === "1";
+    head.innerHTML = `<div class="wrap">
+      <div class="sh-top"><span id="sh-badge"></span><h2 class="txt" id="sh-title"></h2>
+        <div class="sh-actions">
+          <button class="btn sm" id="steps-toggle" aria-expanded="${stepsOpen}" aria-controls="steps-panel">${icon("table")}每步用量</button>
+          <button class="btn sm" id="resume-btn" aria-haspopup="menu" aria-expanded="false">${icon("play")}恢复</button>
+          ${READ_ONLY || s.archived ? "" : `<button class="btn sm" id="clean-btn" title="生成清理计划">${icon("trash")}清理</button>`}
+        </div></div>
+      <div class="sh-meta" id="sh-meta"></div>
+      <div class="sh-usage" id="sh-usage"></div>
+      <div class="steps" id="steps-panel"${stepsOpen ? "" : " hidden"}></div>
+    </div>`;
+    if (stepsOpen) loadSteps(s.key);
+  }
+  const badge = $("#sh-badge");
+  badge.className = `badge ${s.status}`;
+  badge.innerHTML = `<i></i>${s.status === "work" ? "工作中" : "空闲"}`;
+  $("#sh-title").textContent = label(s);
+  $("#sh-meta").innerHTML = `${htag(s.harness)}
+    ${s.archived ? '<span class="tag acc" title="源文件已移入回收站，内容来自精简归档">已归档</span>' : ""}
+    ${s.model ? `<span class="mono">${esc(s.model)}</span>` : ""}
+    ${s.cwd ? `<span class="mono txt">${esc(s.cwd)}</span>` : ""}
+    ${s.pid ? `<span>进程 <span class="mono">${s.pid}</span></span>` : ""}
+    ${s.parent ? `<span>父会话 <span class="mono">${esc(short(s.parent))}</span></span>` : ""}
+    <span>${esc(s.status_reason || "")} · ${age(s.status_since)} 前</span>
+    <span class="mono key" data-copy-text="${esc(s.key)}" title="点击复制">${esc(short(s.key))}</span>`;
+  renderUsageStrip(s.usage);
+  if (T?.steps && s.usage && s.usage.steps !== T.steps.totals?.steps) {
+    clearTimeout(T.stepsTimer);
+    T.stepsTimer = setTimeout(() => !$("#steps-panel")?.hidden && loadSteps(s.key), 600);
+  }
+}
+function ctxBar(tokens, limit, pct) {
+  if (pct == null && limit) pct = tokens * 100 / limit;
+  const cls = pct >= 90 ? "bad" : pct >= 70 ? "warn" : "";
+  return { pct, cls };
+}
+function renderUsageStrip(u) {
+  const box = $("#sh-usage");
+  if (!box) return;
+  if (!u || !u.steps) { box.innerHTML = ""; return; }
+  const last = T?.steps?.steps?.at(-1);
+  const pct = last && last.context_pct != null ? last.context_pct : u.context_limit ? u.last_context_tokens * 100 / u.context_limit : null;
+  const { cls } = ctxBar(u.last_context_tokens, u.context_limit, pct);
+  box.innerHTML = `<div class="us-cost"><b data-v="${u.cost_usd ?? ""}">${u.cost_usd != null ? money(u.cost_usd) : "未定价"}</b><span>API 等价成本 · ${u.steps} 步</span>
+      ${u.unpriced_steps ? `<span class="warn" style="display:block">${u.unpriced_steps} 步未定价</span>` : ""}</div>
+    <dl class="us-tok">${[["输入", u.input], ["输出", u.output], ["缓存读", u.cache_read], ["缓存写", u.cache_write], ["思考", u.reasoning]]
+      .map(([k, v]) => `<div><dt>${k}</dt><dd title="${full(v)}" data-v="${v}">${tok(v)}</dd></div>`).join("")}</dl>
+    <div class="ctx"><div class="ctx-h"><span>上下文<span class="ctx-sub">（最后一步）</span></span><span class="mono">${tok(u.last_context_tokens)}${u.context_limit ? ` / ${tok(u.context_limit)}` : ""}${pct != null ? ` · ${pct.toFixed(pct < 10 ? 1 : 0)}%` : ""}</span></div>
+      <div class="bar ${cls}" id="ctx-bar" data-pct="${pct ?? ""}" role="meter" aria-label="上下文窗口占用" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${pct ?? 0}"><i style="width:${Math.min(100, pct ?? 0)}%"></i></div></div>`;
+}
+const SOURCE = { harness: "自报", catalog: "目录价", approx: "近似价" };
+async function loadSteps(key) {
+  const box = $("#steps-panel");
+  if (!box) return;
+  if (!T?.steps) box.innerHTML = `<div class="status-line" style="padding:10px 12px">加载每步用量…</div>`;
+  try {
+    const d = await getJson(`/v1/sessions/${encodeURIComponent(key)}/usage`);
+    if (!T || T.key !== key) return;
+    T.steps = d;
+    if (!d.steps.length) { box.innerHTML = `<div class="status-line" style="padding:10px 12px">这个会话没有 usage 记录。</div>`; return; }
+    const atEnd = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
+    box.innerHTML = `<table class="dt" id="steps-table"><thead><tr><th>#</th><th class="l">时间</th><th>回合</th><th class="l">模型</th><th>输入</th><th>输出</th><th>缓存读</th><th>缓存写</th><th>思考</th><th>费用</th><th class="l">来源</th><th>上下文</th></tr></thead><tbody>
+      ${d.steps.map((s, i) => `<tr data-event="${esc(s.event)}"><td class="dim">${i + 1}</td><td class="l dim">${clock(s.ts)}</td><td class="dim">${s.turn}</td>
+        <td class="l mono">${esc(s.model || "—")}</td>${["input", "output", "cache_read", "cache_write", "reasoning"].map((k) => `<td data-k="${k}" data-v="${s[k]}" title="${full(s[k])}">${tok(s[k])}</td>`).join("")}
+        <td data-k="cost_usd" data-v="${s.cost_usd ?? ""}" class="${s.cost_usd == null ? "warnc" : ""}">${s.cost_usd != null ? money(s.cost_usd) : "未定价"}</td>
+        <td class="l dim">${s.cost_source ? SOURCE[s.cost_source] || s.cost_source : "—"}</td>
+        <td data-k="context_pct" data-v="${s.context_pct ?? ""}">${tok(s.context_tokens)}${s.context_pct != null ? ` · ${s.context_pct.toFixed(s.context_pct < 10 ? 1 : 0)}%<span class="mini"><i style="width:${Math.min(100, s.context_pct)}%"></i></span>` : ""}</td></tr>`).join("")}
+    </tbody></table>`;
+    if (atEnd || !box.dataset.seen) box.scrollTop = box.scrollHeight;
+    box.dataset.seen = "1";
+    if (current?.key === key) renderUsageStrip(current.usage);
+  } catch (e) {
+    box.innerHTML = `<div class="status-line bad" style="padding:10px 12px">加载每步用量失败：${esc(e.message)}</div>`;
+  }
+}
+
+// ---------------------------------------------------------------- resume menu
+let menuFor = null;
+function closeMenu() {
+  const m = $("#menu");
+  if (m.hidden) return;
+  m.hidden = true;
+  menuFor?.setAttribute("aria-expanded", "false");
+  menuFor = null;
+}
+function openMenu(btn, html) {
+  const m = $("#menu");
+  m.innerHTML = html;
+  m.hidden = false;
+  const r = btn.getBoundingClientRect();
+  const w = m.offsetWidth;
+  m.style.left = Math.max(12, Math.min(innerWidth - w - 12, r.right - w)) + "px";
+  m.style.top = Math.min(innerHeight - m.offsetHeight - 12, r.bottom + 6) + "px";
+  btn.setAttribute("aria-expanded", "true");
+  menuFor = btn;
+  m.querySelector("button:not(:disabled)")?.focus();
+}
+const resumeCache = new Map();
+async function openResume(btn) {
+  if (menuFor === btn) return closeMenu();
+  const key = selected;
+  let info = resumeCache.get(key);
+  if (!info) {
+    try { info = await getJson(`/v1/sessions/${encodeURIComponent(key)}/resume`); resumeCache.set(key, info); }
+    catch (e) { toast("无法获取恢复命令：" + e.message, true); return; }
+  }
+  const terms = [["terminal", "Terminal"], ["iterm", "iTerm2"], ["ghostty", "Ghostty"]];
+  openMenu(btn, `${info.supported ? `<div class="cmd" title="${esc(info.command)}">${esc(info.command)}</div>` : `<p>${esc(info.reason || "这个 harness 不支持恢复")}</p>`}
+    <button role="menuitem" data-act="copy-resume" ${info.supported ? "" : "disabled"}>${icon("copy")}复制恢复命令</button>
+    ${IS_MAC && !READ_ONLY && info.supported ? `<div class="sep"></div>${terms.map(([t, n]) => `<button role="menuitem" data-act="open-term" data-term="${t}">${icon("term")}在 ${n} 中打开</button>`).join("")}` : ""}
+    ${!IS_MAC ? "<p>其他平台请复制命令，在终端里运行。</p>" : READ_ONLY ? "<p>只读模式下不能直接打开终端。</p>" : ""}`);
+}
+async function copyResume() {
+  const info = resumeCache.get(selected);
+  closeMenu();
+  if (!info?.command) return;
+  try { await navigator.clipboard.writeText(info.command); toast("已复制恢复命令"); }
+  catch { toast("无法写入剪贴板，请手动复制：" + info.command, true); }
+}
+async function openTerminal(term) {
+  const key = selected;
+  closeMenu();
+  try {
+    const r = await write("POST", `/v1/sessions/${encodeURIComponent(key)}/open-terminal`, undefined, { terminal: term });
+    toast(`已在 ${r.terminal || term} 中打开`);
+  } catch (e) { toast("打开终端失败：" + e.message, true); }
+}
+
+// ---------------------------------------------------------------- transcript
 function toolInfo(name, input) {
   const n = (name || "").toLowerCase();
   const ic = /bash|shell|exec|command|terminal|run|cmd/.test(n) ? "term"
@@ -1495,7 +2163,7 @@ function evHtml(e) {
       const took = res && res.ts && e.ts && res.ts >= e.ts ? dur(res.ts - e.ts) : "";
       const out = res ? `<div class="blk${res.is_error ? " err" : ""}" data-id="${esc(res.id)}" data-kind="tool_result"><div class="blk-h">${res.is_error ? "错误输出" : "输出"}${cutMark(res)}</div><pre class="txt">${esc(res.output || "（无输出）")}</pre></div>` : "";
       return `<details class="tool ${st}"${open(e.id)} data-open-id="${esc(e.id)}"><summary><span class="ti">${icon(ic)}</span><span class="tn">${esc(e.name)}</span><span class="ta txt">${esc(arg)}</span><span class="td">${took}</span>${stateIcon(st)}${icon("chev", "chev")}</summary>
-        <div class="tool-body"><div class="blk"><div class="blk-h">参数<span class="mono" style="margin-left:auto;color:var(--text-4)">${esc(e.call_id)}</span></div><pre class="txt">${json(e.input)}</pre></div>${out}</div></details>`;
+        <div class="tool-body"><div class="blk"><div class="blk-h">参数<span class="mono" style="margin-left:auto;color:var(--text-3)">${esc(e.call_id)}</span></div><pre class="txt">${json(e.input)}</pre></div>${out}</div></details>`;
     }
     case "tool_result":
       return `<details class="tool ${e.is_error ? "error" : "ok"}"${open(e.id)} data-open-id="${esc(e.id)}"><summary><span class="ti">${icon("back")}</span><span class="tn">${esc(e.name || "工具结果")}</span><span class="ta txt">${esc((e.output || "").split("\n")[0])}</span>${stateIcon(e.is_error ? "error" : "ok")}${icon("chev", "chev")}</summary>
@@ -1516,6 +2184,7 @@ function renderNode(e) {
   n.dataset.id = e.id;
   n.dataset.kind = e.kind;
   n.innerHTML = evHtml(e);
+  if (T?.at === e.id) n.classList.add("hit-target");
   return n;
 }
 // Tool results render inside their call's card; a result whose call is not loaded yet
@@ -1538,7 +2207,7 @@ function place(e, live, anchor) {
   const node = renderNode(e);
   const old = T.nodes.get(e.id);
   if (old) old.replaceWith(node);
-  else $("#thread").insertBefore(node, anchor || null);
+  else $("#thread").insertBefore(node, anchor || $("#newer"));
   T.nodes.set(e.id, node);
   if (live) node.classList.add("enter");
   if (e.kind === "turn_end") turnTotal(node);
@@ -1561,38 +2230,52 @@ function refreshPendingTools() {
   for (const [callId, id] of T.calls) if (!T.results.has(callId)) place(T.evs.get(id), false);
 }
 
-async function select(key, reveal = true) {
+// `at`: open the session around one event (a search hit) and highlight it. The window may stop
+// short of the newest events; then live appends wait behind a "jump to latest" button.
+async function select(key, reveal = true, at = null) {
   if (reveal) {
     $("#app").classList.add("thread-open");
     if (narrowLayout.matches) $("#show-list").focus();
   }
   selected = key;
   renderList();
-  const params = new URLSearchParams(location.search);
-  params.set("select", key);
-  history.replaceState(null, "", "?" + params);
-  T = { key, evs: new Map(), nodes: new Map(), calls: new Map(), results: new Map(), open: T?.key === key ? T.open : new Set(), loading: true, pending: [], nextBefore: null };
+  setp({ select: key, at });
+  T = { key, at, evs: new Map(), nodes: new Map(), calls: new Map(), results: new Map(), open: T?.key === key ? T.open : new Set(), loading: true, pending: [], nextBefore: null, window: false };
   const mine = T;
   $("#timeline").innerHTML = `<div class="wrap" id="thread">${Array.from({ length: 4 }, (_, i) => `<div style="margin:18px 0;${i % 2 ? "" : "display:flex;justify-content:flex-end"}"><div class="sk" style="height:${i % 2 ? 64 : 34}px;width:${i % 2 ? 100 : 45}%"></div></div>`).join("")}</div>`;
   const enc = encodeURIComponent(key);
   try {
-    const [s, ev] = await Promise.all([
+    const [s, ev, latest] = await Promise.all([
       api("session", `/v1/sessions/${enc}`),
-      api("events", `/v1/sessions/${enc}/events`, { limit: PAGE, max_text: MAX_TEXT }),
+      api("events", `/v1/sessions/${enc}/events`, at ? { around: at, limit: PAGE, max_text: MAX_TEXT } : { limit: PAGE, max_text: MAX_TEXT }),
+      at ? getJson(`/v1/sessions/${enc}/events`, { limit: 1, max_text: 1 }) : null,
     ]);
     if (T !== mine) return;
     current = s.body;
+    trackStatus(current);
     renderHead(current);
-    $("#timeline").innerHTML = `<div class="wrap" id="thread"><button id="more">${icon("up")}加载更早</button></div>`;
+    const newest = latest?.events?.at(-1)?.id;
+    T.window = !!at && !!newest && !ev.body.events.some((e) => e.id === newest);
+    $("#timeline").innerHTML = `<div class="wrap" id="thread"><button id="more">${icon("up")}加载更早</button>${T.window ? `<button id="newer">${icon("down")}跳到最新</button>` : ""}</div>`;
     for (const e of ev.body.events) upsertEvent(e, false);
     T.loading = false;
-    for (const e of T.pending) upsertEvent(e, true);   // live events that raced the history fetch
+    if (!T.window) for (const e of T.pending) upsertEvent(e, true);   // live events that raced the history fetch
     T.pending = [];
     setMore(ev.body.next_before);
-    scrollBottom(true);
+    if (at) revealEvent(at); else scrollBottom(true);
   } catch (e) {
     if (T === mine) $("#timeline").innerHTML = `<div class="empty"><h3>加载失败</h3><p>${esc(e.message)}</p></div>`;
   }
+}
+function revealEvent(id) {
+  const node = T.nodes.get(id) || $(`#timeline [data-id="${CSS.escape(id)}"]`);
+  if (!node) { toast("这条事件已不在会话里", true); return; }
+  for (let d = node.closest("details"); d; d = d.parentElement?.closest("details")) {
+    d.open = true;
+    if (d.dataset.openId) T.open.add(d.dataset.openId);
+  }
+  node.classList.add("hit-target", "flash");
+  node.scrollIntoView({ block: "center" });
 }
 function setMore(nb) {
   T.nextBefore = nb;
@@ -1613,6 +2296,10 @@ async function loadEarlier(btn) {
 function scrollBottom(force) {
   const tl = $("#timeline");
   if (force || tl.scrollHeight - tl.scrollTop - tl.clientHeight < 160) tl.scrollTop = tl.scrollHeight;
+}
+function openSession(key, at = null) {
+  showView("sessions", true);
+  select(key, true, at);
 }
 
 // ---------------------------------------------------------------- live stream
@@ -1683,12 +2370,13 @@ function onEnv(env) {
   lastSeq = Math.max(lastSeq, env.seq);
   $("#m-seq").textContent = lastSeq;
   switch (env.type) {
-    case "session": upsertSession(env.session); break;
+    case "session": trackStatus(env.session); upsertSession(env.session); break;
     case "removed": removeSession(env.key); break;
     case "lagged": return resync();
     case "event":
       if (T && env.event.session === T.key) {
         if (T.loading) T.pending.push(env.event);
+        else if (T.window) $("#newer")?.classList.add("fresh");
         else { upsertEvent(env.event, true); scrollBottom(false); }
       }
       break;
@@ -1722,7 +2410,7 @@ async function resync() {
   try {
     const r = await runSearch();
     lastSeq = r.seq;
-    if (selected) select(selected);
+    if (selected) select(selected, false, T?.at);
     refreshMeta().catch(() => {});
   } catch {}
   connect();
@@ -1746,23 +2434,722 @@ async function probeTransports() {
   }
   api("sessions_ndjson", "/v1/sessions", { format: "ndjson", limit: 20 }).catch(() => {});
 }
+function probeServices() {
+  api("usage", "/v1/usage", { limit: 1 }).catch(() => {});
+  api("pricing", "/v1/pricing").catch(() => {});
+  api("search", "/v1/search", { q: "uniflo", limit: 1 }).catch(() => {});
+  api("archive", "/v1/archive").catch(() => {});
+}
+
+// ---------------------------------------------------------------- notifications
+// A session that goes work → idle while the page is in the background raises one notification,
+// at most once per session every 30 s. Off until the user turns it on (permission asked then).
+const NOTIFY_GAP = 30_000;
+const statusSeen = new Map();       // key -> { status, since }
+const notified = new Map();         // key -> last notification time
+let notifyOn = localStorage.getItem("uniflo.notify") === "1" && "Notification" in window && Notification.permission === "granted";
+function renderNotify() {
+  const b = $("#notify");
+  b.setAttribute("aria-pressed", String(notifyOn));
+  b.title = notifyOn ? "回合结束通知：开（页面在后台时提醒）" : "回合结束通知：关";
+}
+async function toggleNotify() {
+  if (notifyOn) { notifyOn = false; localStorage.setItem("uniflo.notify", "0"); renderNotify(); toast("已关闭回合结束通知"); return; }
+  if (!("Notification" in window)) { toast("这个浏览器不支持系统通知", true); return; }
+  const perm = Notification.permission === "granted" ? "granted" : await Notification.requestPermission();
+  if (perm !== "granted") { toast("没有获得通知权限，请在浏览器设置里允许", true); return; }
+  notifyOn = true;
+  localStorage.setItem("uniflo.notify", "1");
+  renderNotify();
+  toast("已开启：会话完成一个回合且页面在后台时提醒");
+}
+function trackStatus(s) {
+  const prev = statusSeen.get(s.key);
+  statusSeen.set(s.key, { status: s.status, since: s.status_since });
+  if (prev?.status === "work" && s.status === "idle") turnEnded(s, Math.max(0, (s.status_since || Date.now()) - (prev.since || 0)));
+}
+function turnEnded(s, took) {
+  if (!notifyOn || document.visibilityState === "visible" || !("Notification" in window)) return;
+  const now = Date.now();
+  if (now - (notified.get(s.key) || 0) < NOTIFY_GAP) return;
+  notified.set(s.key, now);
+  try {
+    const n = new Notification(label(s), { body: `${hname(s.harness)} · 本回合用时 ${dur(took)}${s.cwd ? " · " + base(s.cwd) : ""}`, icon: iconDataUrl(s.harness), tag: s.key });
+    n.onclick = () => { window.focus(); openSession(s.key); n.close?.(); };
+  } catch {}
+}
+
+// ---------------------------------------------------------------- usage view
+const U = { seq: 0, data: null, kids: new Map(), open: new Set(), root: null };
+const UCOLS = [["label", "名称"], ["sessions", "会话"], ["prompts", "提示"], ["steps", "步数"], ["input", "输入"], ["output", "输出"],
+  ["cache_read", "缓存读"], ["cache_write", "缓存写"], ["cost_usd", "费用"], ["unpriced_steps", "未定价"]];
+const RANGES = { "24h": 1, "7d": 7, "30d": 30, "90d": 90 };
+function uState() {
+  const group = getp("group");
+  return { range: getp("range"), from: getp("from"), to: getp("to"), h: getp("uh"), m: getp("um"), p: getp("up"), group,
+    under: getp("under"), sort: getp("sort") || (group === "day" ? "label" : "cost_usd"), asc: getp("asc") === "1",
+    stack: getp("stack"), unpriced: getp("unpriced") === "1" };
+}
+// Calendar days ending today (local time zone, sent as `tz`); 24h is a rolling window.
+function uWindow(st) {
+  const today = new Date();
+  if (st.range === "custom" && st.from) {
+    const to = st.to ? new Date(st.to + "T00:00:00") : today;
+    return { since: st.from, until: dayKey(addDays(to, 1)), days: daysBetween(new Date(st.from + "T00:00:00"), to) };
+  }
+  if (st.range === "24h") return { since: "24h", days: daysBetween(new Date(Date.now() - 86400_000), today) };
+  const n = RANGES[st.range] || 30;
+  const from = addDays(today, -(n - 1));
+  return { since: dayKey(from), days: daysBetween(from, today) };
+}
+function daysBetween(a, b) {
+  const out = [];
+  for (let d = new Date(a.getFullYear(), a.getMonth(), a.getDate()); d <= b && out.length < 800; d = addDays(d, 1)) out.push(dayKey(d));
+  return out;
+}
+function uParams(st, w, extra = {}) {
+  return { q: st.h ? "h:" + st.h : undefined, model: st.m || undefined, under: st.p || undefined, since: w.since, until: w.until, tz: TZ || undefined, ...extra };
+}
+const qs = (o) => new URLSearchParams(Object.entries(o).filter(([, v]) => v !== undefined && v !== null && v !== "")).toString();
+async function loadUsage() {
+  const st = uState(), w = uWindow(st), mine = ++U.seq;
+  renderUsageControls(st);
+  const status = $("#u-status");
+  status.className = "status-line";
+  status.textContent = U.data ? "更新中…" : "加载中…";
+  const memo = new Map();
+  const get = (o) => { const k = qs(o); if (!memo.has(k)) memo.set(k, getJson("/v1/usage", o)); return memo.get(k); };
+  const tableParams = st.group === "dir"
+    ? uParams(st, w, { group_by: "dir", under: st.under || st.p || undefined, depth: 1 })
+    : uParams(st, w, { group_by: st.group });
+  try {
+    const [table, kpi, pricing, optModels, optProjects] = await Promise.all([
+      get(tableParams), get(uParams(st, w, { group_by: "model" })), getJson("/v1/pricing").catch(() => null),
+      get({ group_by: "model", since: w.since, until: w.until, tz: TZ || undefined }),
+      get({ group_by: "project", since: w.since, until: w.until, tz: TZ || undefined }),
+    ]);
+    // Series of the stacked chart: the top six of the stack dimension by cost, each with its daily totals.
+    const dim = st.stack === "model" ? kpi : await get(uParams(st, w, { group_by: "harness" }));
+    const top = dim.rows.filter((r) => r.cost_usd > 0).slice(0, 6);
+    const [days, ...perSeries] = await Promise.all([
+      get(uParams(st, w, { group_by: "day" })),
+      ...top.map((r) => get(st.stack === "model"
+        ? uParams(st, w, { group_by: "day", model: r.key || undefined })
+        : uParams({ ...st, h: r.key }, w, { group_by: "day" }))),
+    ]);
+    let root = U.root;
+    if (st.group === "dir" && (st.under || st.p) && !root) root = (await get(uParams(st, w, { group_by: "dir", depth: 1 }))).under;
+    if (mine !== U.seq) return;
+    if (st.group !== "dir" || !st.under) U.root = st.group === "dir" ? table.under : U.root;
+    if (root) U.root = root;
+    U.data = { st, w, table, kpi, pricing, days, series: top.map((r, i) => ({ key: r.key, label: r.label, rows: perSeries[i].rows })), optModels, optProjects, query: qs(tableParams), kpiQuery: qs(uParams(st, w, { group_by: "model" })) };
+    U.kids.clear();
+    U.open.clear();
+    renderUsage();
+    const ix = kpi.indexing;
+    status.textContent = ix && !ix.ready ? `用量索引仍在后台建立（${ix.done}/${ix.total} 个会话），数字会继续增长。` : "";
+  } catch (e) {
+    if (mine !== U.seq) return;
+    status.className = "status-line bad";
+    status.textContent = `加载失败：${e.message}${U.data ? "。下面显示的是上一次成功加载的数据。" : ""}`;
+  }
+}
+function renderUsageControls(st) {
+  for (const b of $$("#u-range button")) b.setAttribute("aria-pressed", String(b.dataset.range === st.range));
+  for (const b of $$("#u-group button")) b.setAttribute("aria-pressed", String(b.dataset.group === st.group));
+  for (const b of $$("#u-stack button")) b.setAttribute("aria-pressed", String(b.dataset.stack === st.stack));
+  $("#u-custom").hidden = st.range !== "custom";
+  if (st.range === "custom") {
+    $("#u-from").value = st.from || dayKey(addDays(new Date(), -29));
+    $("#u-to").value = st.to || dayKey(new Date());
+  }
+}
+function fillSelect(sel, opts, value, all) {
+  const list = [["", all], ...opts];
+  if (value && !opts.some(([v]) => v === value)) list.push([value, value]);
+  sel.innerHTML = list.map(([v, t, title]) => `<option value="${esc(v)}"${v === value ? " selected" : ""}${title ? ` title="${esc(title)}"` : ""}>${esc(t)}</option>`).join("");
+}
+function renderUsage() {
+  const { st, table, kpi, pricing, optModels, optProjects } = U.data;
+  fillSelect($("#u-h"), [...harnesses.values()].filter((h) => h.sessions > 0).sort((a, b) => b.sessions - a.sessions).map((h) => [h.id, h.name]), st.h, "全部 harness");
+  fillSelect($("#u-m"), optModels.rows.filter((r) => r.key).map((r) => [r.key, r.label]), st.m, "全部模型");
+  fillSelect($("#u-p"), optProjects.rows.filter((r) => r.key).map((r) => [r.key, base(r.key), r.key]), st.p, "全部项目");
+  const pr = $("#u-pricing");
+  if (pricing) {
+    pr.className = "pill" + (pricing.stale ? " warn" : "");
+    pr.innerHTML = `<i></i>价格目录 · ${pricing.source === "snapshot" ? "内置快照" : esc(pricing.source)} · ${pricing.fetched_at ? (pricing.stale ? "已过期，" : "") + "同步于 " + age(pricing.fetched_at) + " 前" : "未同步"}`;
+    pr.title = `${pricing.models} 个模型${pricing.overrides ? ` · ${pricing.overrides} 个自定义价格` : ""}${pricing.error ? " · 最近一次同步失败：" + pricing.error : ""}${pricing.sync_enabled ? "" : " · 自动同步已关闭"}`;
+    pr.dataset.stale = String(!!pricing.stale);
+  }
+  renderKpis(kpi.totals, kpi.rows, st);
+  renderStack();
+  renderCrumbs();
+  renderUsageTable();
+  $("#v-usage").dataset.query = U.data.query;
+  $("#v-usage").dataset.kpiQuery = U.data.kpiQuery;
+}
+function renderKpis(t, modelRows, st) {
+  const unpriced = t.unpriced_steps || 0;
+  const tiles = [
+    `<div class="kpi hero" data-k="cost_usd" data-v="${t.cost_usd ?? ""}"><span>总费用</span><b>${t.cost_usd != null ? money(t.cost_usd) : t.steps ? "—" : "$0.00"}</b><small>API 等价成本 · ${unpriced
+      ? `<button class="kpi-link" id="u-unpriced-btn" data-k="unpriced_steps" data-v="${unpriced}" aria-expanded="${st.unpriced}" aria-controls="u-unpriced">另有 ${full(unpriced)} 步未定价，${st.unpriced ? "收起" : "查看"}模型 ${st.unpriced ? "▴" : "▾"}</button>`
+      : '<span data-k="unpriced_steps" data-v="0">全部已定价</span>'}</small></div>`,
+    ...[["input", "输入"], ["output", "输出"], ["cache_read", "缓存读"], ["cache_write", "缓存写"], ["steps", "步数"], ["sessions", "会话数"]]
+      .map(([k, n]) => `<div class="kpi" data-k="${k}" data-v="${t[k] || 0}" title="${full(t[k])}"><span>${n}</span><b>${k === "steps" || k === "sessions" ? full(t[k]) : tok(t[k])}</b><small>${k === "output" && t.reasoning ? `含思考 ${tok(t.reasoning)}` : k === "sessions" ? `${full(t.prompts)} 次提示` : "&nbsp;"}</small></div>`),
+  ];
+  $("#u-kpis").innerHTML = tiles.join("");
+  const list = modelRows.filter((r) => r.unpriced_steps > 0).sort((a, b) => b.unpriced_steps - a.unpriced_steps);
+  $("#u-unpriced").hidden = !(st.unpriced && unpriced);
+  $("#u-unpriced-list").innerHTML = list.map((r) => `<div class="ur" data-model="${esc(r.key)}"><span class="mono" title="${esc(r.label)}">${esc(r.key ? r.label : "（未记录模型）")}</span><span class="num warnc" style="color:var(--warn)">${full(r.unpriced_steps)} 步未定价</span><span class="num muted">共 ${full(r.steps)} 步 · ${full(r.sessions)} 个会话</span></div>`).join("");
+}
+
+// Stacked daily cost: top six series by cost + neutral "other", 2px surface gaps, rounded caps.
+const SERIES = ["var(--c1)", "var(--c2)", "var(--c3)", "var(--c4)", "var(--c5)", "var(--c6)", "var(--c7)"];
+let chartModel = null;
+function renderStack() {
+  const { st, w, days, series } = U.data;
+  const byDay = (rows) => new Map(rows.map((r) => [r.key, r.cost_usd || 0]));
+  const total = byDay(days.rows);
+  const ser = series.map((s, i) => ({ ...s, color: SERIES[i], v: byDay(s.rows) }));
+  const other = { key: "(other)", label: "其他", color: "var(--c-other)", v: new Map() };
+  for (const d of w.days) {
+    const rest = (total.get(d) || 0) - ser.reduce((a, s) => a + (s.v.get(d) || 0), 0);
+    if (rest > 1e-9) other.v.set(d, rest);
+  }
+  const all = other.v.size ? [...ser, other] : ser;
+  chartModel = { days: w.days, series: all, total, active: -1, stack: st.stack };
+  const sum = (s) => [...s.v.values()].reduce((a, b) => a + b, 0);
+  $("#u-legend").innerHTML = all.length > 1 || (all.length === 1 && all[0] !== other)
+    ? all.map((s) => `<span data-series="${esc(s.key)}"><i style="background:${s.color}"></i>${st.stack === "harness" && s !== other ? hicon(s.key) : ""}${esc(st.stack === "harness" && s !== other ? hname(s.key) : s.label || "（未记录模型）")}<b>${money(sum(s))}</b></span>`).join("")
+    : "";
+  drawStack();
+}
+// At most five steps of 1 / 2 / 2.5 / 5 × 10^k.
+function niceScale(max) {
+  const raw = max / 5, p = 10 ** Math.floor(Math.log10(raw)), n = raw / p;
+  const step = (n <= 1 ? 1 : n <= 2 ? 2 : n <= 2.5 ? 2.5 : n <= 5 ? 5 : 10) * p;
+  return { step, top: Math.ceil(max / step - 1e-9) * step };
+}
+const axisMoney = (v, step) => "$" + (step >= 1 ? Math.round(v).toLocaleString("en-US") : v.toFixed(step >= .1 ? 1 : step >= .01 ? 2 : 3));
+function drawStack() {
+  const el = $("#u-chart"), m = chartModel;
+  if (!m) return;
+  const max = Math.max(0, ...m.days.map((d) => m.total.get(d) || 0));
+  if (!max) { el.innerHTML = `<div class="chart-empty">所选范围内没有可定价的用量</div>`; return; }
+  const W = Math.max(280, el.clientWidth - 16), H = 240, L = 52, R = 8, Tp = 10, B = 26;
+  const { step, top } = niceScale(max), iw = W - L - R, ih = H - Tp - B, band = iw / m.days.length;
+  const bw = Math.max(2, Math.min(24, band * 0.62));
+  const y = (v) => Tp + ih - (v / top) * ih;
+  let svg = `<svg viewBox="0 0 ${W} ${H}" height="${H}" role="img" aria-label="每日费用">`;
+  for (let v = 0, i = 0; v <= top + 1e-9; v += step, i++) {
+    const yy = Math.round(y(v)) + .5;
+    svg += `<line class="${i ? "grid" : "base"}" x1="${L}" x2="${W - R}" y1="${yy}" y2="${yy}"/><text x="${L - 8}" y="${yy + 4}" text-anchor="end">${axisMoney(v, step)}</text>`;
+  }
+  const every = Math.ceil(m.days.length / Math.max(2, Math.floor(iw / 64)));
+  m.days.forEach((d, i) => {
+    const x0 = L + i * band, cx = x0 + band / 2;
+    svg += `<rect class="band${i === m.active ? " on" : ""}" data-i="${i}" x="${x0}" y="${Tp}" width="${band}" height="${ih}"/>`;
+    let acc = 0;
+    const segs = m.series.map((s) => ({ s, v: s.v.get(d) || 0 })).filter((x) => x.v > 0);
+    segs.forEach(({ s, v }, j) => {
+      const y1 = y(acc + v), y0 = y(acc);
+      acc += v;
+      const gap = j ? 2 : 0, h = Math.max(0, y0 - y1 - gap);
+      if (h < .5) return;
+      const x = cx - bw / 2, r = j === segs.length - 1 ? Math.min(4, h, bw / 2) : 0;
+      svg += r
+        ? `<path d="M${x},${y1 + h} V${y1 + r} Q${x},${y1} ${x + r},${y1} H${x + bw - r} Q${x + bw},${y1} ${x + bw},${y1 + r} V${y1 + h} Z" style="fill:${s.color}" pointer-events="none"/>`
+        : `<rect x="${x}" y="${y1}" width="${bw}" height="${h}" style="fill:${s.color}" pointer-events="none"/>`;
+    });
+    if (i % every === 0 || m.days.length <= 8) svg += `<text x="${cx}" y="${H - 8}" text-anchor="middle">${d.slice(5).replace("-", "/")}</text>`;
+  });
+  el.innerHTML = svg + "</svg>";
+  el.dataset.days = m.days.length;
+}
+function showDayTip(i, clientX, clientY) {
+  const m = chartModel, el = $("#u-chart");
+  if (!m || i < 0 || i >= m.days.length) return hideTip();
+  m.active = i;
+  $$("#u-chart .band").forEach((b) => b.classList.toggle("on", Number(b.dataset.i) === i));
+  const d = m.days[i];
+  const lines = m.series.map((s) => ({ s, v: s.v.get(d) || 0 })).filter((x) => x.v > 0).sort((a, b) => b.v - a.v);
+  const tip = $("#tip");
+  tip.innerHTML = `<h4>${dayLabel(d)}</h4>${lines.map(({ s, v }) => `<div><span><i style="background:${s.color}"></i>${esc(m.stack === "harness" && s.key !== "(other)" ? hname(s.key) : s.label || "（未记录模型）")}</span><b>${money(v)}</b></div>`).join("")}
+    <div class="tot"><span>合计（API 等价）</span><b>${money(m.total.get(d) || 0)}</b></div>`;
+  tip.hidden = false;
+  const r = el.getBoundingClientRect();
+  const band = el.querySelector(`.band[data-i="${i}"]`)?.getBoundingClientRect();
+  const x = clientX ?? (band ? band.left + band.width / 2 : r.left);
+  const yy = clientY ?? r.top + 60;
+  const w = tip.offsetWidth, h = tip.offsetHeight;
+  tip.style.position = "fixed";
+  tip.style.left = Math.max(8, Math.min(innerWidth - w - 8, x + 14 + w > innerWidth ? x - w - 14 : x + 14)) + "px";
+  tip.style.top = Math.max(8, Math.min(innerHeight - h - 8, yy - h / 2)) + "px";
+}
+function hideTip() {
+  $("#tip").hidden = true;
+  if (chartModel) { chartModel.active = -1; $$("#u-chart .band.on").forEach((b) => b.classList.remove("on")); }
+}
+
+function renderCrumbs() {
+  const { st } = U.data, nav = $("#u-crumbs");
+  nav.hidden = st.group !== "dir";
+  if (nav.hidden) return;
+  const root = st.p || U.root || U.data.table.under || "/";
+  const here = st.under || root;
+  const rel = here.startsWith(root) ? here.slice(root.length).split("/").filter(Boolean) : [];
+  let path = root;
+  const crumbs = [`<button data-under="" ${here === root ? 'aria-current="page"' : ""} title="${esc(root)}">${esc(st.p ? base(root) : "全部目录")}<span class="sub2" style="margin-left:6px">${esc(st.p ? "" : root)}</span></button>`];
+  rel.forEach((c, i) => {
+    path = path.replace(/\/$/, "") + "/" + c;
+    crumbs.push(`<span class="sep">›</span><button data-under="${esc(path)}" ${i === rel.length - 1 ? 'aria-current="page"' : ""} title="${esc(path)}">${esc(c)}</button>`);
+  });
+  nav.innerHTML = crumbs.join("");
+}
+function sortRows(rows, st) {
+  const k = st.sort, dir = st.asc ? 1 : -1;
+  const val = (r) => (k === "label" ? (st.group === "day" ? r.key : (r.label || "").toLowerCase()) : k === "cost_usd" ? r.cost_usd ?? -1 : r[k] || 0);
+  return [...rows].sort((a, b) => {
+    if (a.key === "(other)") return 1;
+    if (b.key === "(other)") return -1;
+    const x = val(a), y = val(b);
+    return (x < y ? -1 : x > y ? 1 : 0) * dir || String(a.key).localeCompare(String(b.key));
+  });
+}
+function nameCell(r, st, depth = 0) {
+  if (st.group === "harness") return `<span class="cellname">${hicon(r.key)}<span>${esc(hname(r.key))}</span><span class="sub2">${esc(r.key)}</span></span>`;
+  if (st.group === "model") return `<span class="cellname"><span class="mono">${esc(r.key ? r.label : "（未记录模型）")}</span></span>`;
+  if (st.group === "project") return `<span class="cellname" title="${esc(r.key)}"><span>${esc(r.key ? base(r.key) : r.label)}</span><span class="sub2">${esc(r.key)}</span></span>`;
+  if (st.group === "day") return `<span class="cellname">${esc(r.key ? dayLabel(r.key) : r.label)}</span>`;
+  const self = r.label === ".";
+  const tw = self ? `<span class="tw blank"></span>` : `<button class="tw" data-expand="${esc(r.key)}" aria-expanded="${U.open.has(r.key)}" aria-label="展开 ${esc(r.label)}">${icon("chev")}</button>`;
+  return `<span class="cellname" style="padding-left:${depth * 20}px" title="${esc(r.key)}">${tw}${self ? `<span class="muted">（此目录本身）</span>` : `<button class="linkish mono" data-under="${esc(r.key)}">${esc(r.label)}</button>`}</span>`;
+}
+function rowCells(r) {
+  return UCOLS.slice(1).map(([k]) => k === "cost_usd"
+    ? `<td class="cost" data-k="cost_usd" data-v="${r.cost_usd ?? ""}">${money(r.cost_usd)}</td>`
+    : k === "unpriced_steps"
+      ? `<td data-k="${k}" data-v="${r[k]}" class="${r[k] ? "warnc" : "dim"}">${r[k] ? full(r[k]) : "—"}</td>`
+      : `<td data-k="${k}" data-v="${r[k]}" title="${full(r[k])}">${k === "sessions" || k === "prompts" || k === "steps" ? full(r[k]) : tok(r[k])}</td>`).join("");
+}
+function renderUsageTable() {
+  const { st, table } = U.data;
+  const head = `<thead><tr>${UCOLS.map(([k, n]) => {
+    const on = st.sort === k;
+    const title = k === "cost_usd" ? "费用（API 等价）" : k === "label" ? ({ harness: "Harness", model: "模型", project: "项目", dir: "目录", day: "日期" }[st.group]) : n;
+    return `<th${k === "label" ? ' class="l"' : ""}${on ? ` aria-sort="${st.asc ? "ascending" : "descending"}"` : ""}><button data-sort="${k}">${esc(title)}${on ? `<span class="arrow">${st.asc ? "▲" : "▼"}</span>` : ""}</button></th>`;
+  }).join("")}</tr></thead>`;
+  const rows = [];
+  const walk = (list, depth) => {
+    for (const r of sortRows(list, st)) {
+      rows.push(`<tr data-key="${esc(r.key)}" data-depth="${depth}"><td class="name">${nameCell(r, st, depth)}</td>${rowCells(r)}</tr>`);
+      if (st.group === "dir" && U.open.has(r.key) && U.kids.has(r.key)) walk(U.kids.get(r.key), depth + 1);
+    }
+  };
+  walk(table.rows, 0);
+  const t = table.totals;
+  $("#u-table").innerHTML = `${head}<tbody>${rows.join("") || `<tr><td colspan="${UCOLS.length}" class="dim" style="text-align:center;padding:28px">所选范围内没有用量</td></tr>`}</tbody>
+    <tfoot><tr data-key="total"><td>合计</td>${rowCells(t)}</tr></tfoot>`;
+}
+async function toggleDir(path) {
+  if (U.open.has(path)) { U.open.delete(path); return renderUsageTable(); }
+  U.open.add(path);
+  if (!U.kids.has(path)) {
+    const { st, w } = U.data;
+    try { U.kids.set(path, (await getJson("/v1/usage", uParams(st, w, { group_by: "dir", under: path, depth: 1 }))).rows); }
+    catch (e) { U.open.delete(path); toast("加载子目录失败：" + e.message, true); }
+  }
+  renderUsageTable();
+}
+function exportCsv() {
+  if (!U.data) return;
+  const { st, table } = U.data;
+  const cols = ["名称", "key", "会话", "提示", "步数", "输入", "输出", "缓存读", "缓存写", "思考", "费用（USD，API 等价）", "未定价步数"];
+  const cell = (v) => { const s = String(v ?? ""); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+  const name = (r) => st.group === "harness" ? hname(r.key) : st.group === "day" ? r.key : r.label;
+  const lines = [cols, ...sortRows(table.rows, st).map((r) => [name(r), r.key, r.sessions, r.prompts, r.steps, r.input, r.output, r.cache_read, r.cache_write, r.reasoning, r.cost_usd ?? "", r.unpriced_steps]),
+    ["合计", "total", table.totals.sessions, table.totals.prompts, table.totals.steps, table.totals.input, table.totals.output, table.totals.cache_read, table.totals.cache_write, table.totals.reasoning, table.totals.cost_usd ?? "", table.totals.unpriced_steps]];
+  const blob = new Blob(["﻿" + lines.map((l) => l.map(cell).join(",")).join("\n") + "\n"], { type: "text/csv;charset=utf-8" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `uniflo-usage-${st.group}-${st.range}.csv`;
+  document.body.append(a);
+  a.click();
+  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+}
+viewEnter.usage = loadUsage;
+
+// ---------------------------------------------------------------- search view
+const S = { seq: 0, offset: 0, q: "", f: "" };
+const KIND = { user_message: "用户", assistant_message: "回复", reasoning: "思考", tool_call: "工具调用", tool_result: "工具输出", system: "系统" };
+function snippet(s) {
+  return String(s).split("\u0002").map((part, i) => {
+    if (!i) return esc(part);
+    const j = part.indexOf("\u0003");
+    return j < 0 ? `<mark>${esc(part)}</mark>` : `<mark>${esc(part.slice(0, j))}</mark>${esc(part.slice(j + 1))}`;
+  }).join("");
+}
+async function runFts(append = false) {
+  const q = $("#s-q").value.trim(), f = $("#s-f").value.trim();
+  setp({ sq: q, sf: f });
+  const status = $("#s-status"), box = $("#s-results");
+  if (!q) { box.innerHTML = ""; status.textContent = "输入要找的词：可以是中文、代码片段、报错信息。"; $("#s-more").hidden = true; return; }
+  const mine = ++S.seq;
+  if (!append) S.offset = 0;
+  status.className = "status-line";
+  status.textContent = "搜索中…";
+  const t0 = performance.now();
+  try {
+    const r = await getJson("/v1/search", { q, filter: f, limit: 20, offset: S.offset });
+    if (mine !== S.seq) return;
+    const html = r.results.map((g) => `<article class="sgroup" data-session="${esc(g.session)}">
+      <div class="sgroup-h">${hicon(g.harness, "lg")}<div class="t"><b class="txt">${esc(g.title || g.session)}</b><span>${esc(g.cwd || g.session)}</span></div><span class="age" title="${esc(stamp(g.updated_at))}">${age(g.updated_at)}</span></div>
+      ${g.hits.map((h) => `<button class="hit" data-session="${esc(g.session)}" data-event="${esc(h.event)}"><span class="k">${KIND[h.kind] || esc(h.kind)}</span><span class="snip">${snippet(h.snippet)}</span><span class="ts">${stamp(h.ts)}</span></button>`).join("")}
+    </article>`).join("");
+    if (append) box.insertAdjacentHTML("beforeend", html); else box.innerHTML = html || `<div class="empty" style="height:auto;padding:48px 0"><h3>没有找到</h3><p>换个词，或去掉会话过滤再试。</p></div>`;
+    S.offset = r.offset + r.results.length;
+    const more = r.total > S.offset;
+    $("#s-more").hidden = !more;
+    const notes = [];
+    notes.push(`${r.scanned_until || r.partial ? "至少 " : ""}${r.total} 个会话命中 · ${(performance.now() - t0).toFixed(0)} ms`);
+    if (r.order === "recent") notes.push("含少于 3 个字的词，按时间倒序");
+    if (r.indexing) notes.push(`索引仍在构建（${r.progress?.done ?? 0}/${r.progress?.total ?? 0} 个会话），结果可能不全`);
+    if (r.partial) notes.push("短词扫描超时，较早的命中可能缺失");
+    status.textContent = notes.join(" · ");
+  } catch (e) {
+    if (mine !== S.seq) return;
+    status.className = "status-line bad";
+    status.textContent = e.status === 503 ? "全文检索不可用：守护进程以 --no-fts 启动或索引无法打开。" : `检索失败：${e.message}`;
+  }
+}
+let ftsTimer = null;
+const queueFts = () => { clearTimeout(ftsTimer); ftsTimer = setTimeout(() => runFts(), 300); };
+viewEnter.search = () => {
+  const q = getp("sq"), f = getp("sf");
+  if ($("#s-q").value !== q || $("#s-f").value !== f || !$("#s-results").childElementCount) { $("#s-q").value = q; $("#s-f").value = f; runFts(); }
+};
+
+// ---------------------------------------------------------------- manage view
+const M = { seq: 0, list: [], preview: new Map(), sel: new Set(), plan: null, lastClick: null, available: true };
+const REASON = { working: "会话运行中", live_process: "有存活进程", subagent: "随父会话清理", unsupported: "不支持清理", archived: "已归档", source_missing: "源文件不存在" };
+function mtab() { return getp("mtab"); }
+viewEnter.manage = () => {
+  const tab = mtab();
+  $("#m-tab-list").setAttribute("aria-selected", String(tab === "list"));
+  $("#m-tab-archive").setAttribute("aria-selected", String(tab === "archive"));
+  $("#m-ro").hidden = !READ_ONLY;
+  if (M.plan) { $("#m-list-pane").hidden = true; $("#m-archive-pane").hidden = true; $("#m-review").hidden = false; return; }
+  $("#m-review").hidden = true;
+  $("#m-list-pane").hidden = tab !== "list";
+  $("#m-archive-pane").hidden = tab !== "archive";
+  if ($("#m-q").value !== getp("mq")) $("#m-q").value = getp("mq");
+  loadArchives(tab === "archive");
+  if (tab === "list") loadManage();
+};
+async function loadManage() {
+  const mine = ++M.seq, q = $("#m-q").value.trim();
+  const status = $("#m-status");
+  status.className = "status-line";
+  status.textContent = "加载中…";
+  try {
+    const list = await getJson("/v1/sessions", { q, limit: 200 });
+    if (mine !== M.seq) return;
+    M.list = list;
+    status.textContent = `${list.length} 个会话${list.length >= 200 ? "（只显示前 200 个，缩小过滤条件以查看更多）" : ""}`;
+    renderManage();
+    // Sizes and eligibility come from a dry-run plan: it only reads metadata and expires on its own.
+    if (!READ_ONLY && M.available && list.length) {
+      const need = list.map((s) => s.key);
+      {
+        try {
+          const plan = await write("POST", "/v1/cleanup/plan", { sessions: need });
+          for (const c of plan.sessions) M.preview.set(c.key, c);
+        } catch (e) {
+          if (e.status === 503) { M.available = false; $("#m-off").hidden = false; $("#m-off").textContent = "这个守护进程没有数据目录，会话清理不可用。"; }
+          else status.textContent += ` · 无法计算大小：${e.message}`;
+        }
+        if (mine === M.seq) renderManage();
+      }
+    }
+  } catch (e) {
+    if (mine !== M.seq) return;
+    status.className = "status-line bad";
+    status.textContent = `加载失败：${e.message}${M.list.length ? "。下面是上一次的列表。" : ""}`;
+  }
+}
+function statusTag(s) {
+  if (s.archived) return '<span class="tag acc">已归档</span>';
+  if (s.status === "work") return '<span class="tag ok">工作中</span>';
+  if (s.pid) return `<span class="tag">有进程 ${s.pid}</span>`;
+  return '<span class="tag">空闲</span>';
+}
+function renderManage() {
+  const can = !READ_ONLY && M.available;
+  const rows = M.list.map((s) => {
+    const c = M.preview.get(s.key);
+    const elig = !can ? '<span class="dim">—</span>' : !c ? '<span class="sk" style="display:inline-block;width:56px;height:10px"></span>'
+      : c.eligible ? `<span class="tag ok">${icon("check")}可清理</span>` : `<span class="tag" title="${esc(c.message || c.reason || "")}">${esc(REASON[c.reason] || c.message || c.reason)}</span>`;
+    const size = !can ? "—" : !c ? "" : c.bytes ? bytes(c.bytes) : "—";
+    return `<tr data-key="${esc(s.key)}" data-eligible="${c ? c.eligible : ""}">
+      ${can ? `<td class="ck"><input type="checkbox" data-pick="${esc(s.key)}" aria-label="选择 ${esc(label(s))}"${M.sel.has(s.key) ? " checked" : ""}></td>` : ""}
+      <td class="l name"><span class="cellname">${hicon(s.harness)}<button class="linkish" data-open="${esc(s.key)}" title="${esc(s.key)}">${esc(label(s))}</button>${s.parent ? '<span class="sub2">子代理</span>' : ""}</span></td>
+      <td class="l mst">${statusTag(s)}</td>
+      <td data-k="bytes" data-v="${c?.bytes ?? ""}">${size}</td>
+      <td class="l" data-k="eligible">${elig}</td>
+      <td class="l dim mono" title="${esc(s.cwd || "")}">${esc(base(s.cwd) || "—")}</td>
+      <td class="dim" title="${esc(stamp(s.updated_at))}">${age(s.updated_at)}</td></tr>`;
+  });
+  const allPicked = can && M.list.length && M.list.every((s) => M.sel.has(s.key));
+  $("#m-table").innerHTML = `<thead><tr>${can ? `<th class="ck"><input type="checkbox" id="m-pickall" aria-label="选择本页全部"${allPicked ? " checked" : ""}></th>` : ""}<th class="l">会话</th><th class="l mst">状态</th><th>大小</th><th class="l">能否清理</th><th class="l">目录</th><th>最后活动</th></tr></thead>
+    <tbody>${rows.join("") || `<tr><td colspan="7" class="dim" style="text-align:center;padding:28px">没有匹配的会话</td></tr>`}</tbody>`;
+  $("#m-selbar").hidden = !can;
+  $("#m-selall").hidden = !can;
+  $("#m-clear").hidden = !can;
+  renderSel();
+}
+function renderSel() {
+  const picked = [...M.sel];
+  const known = picked.map((k) => M.preview.get(k)).filter(Boolean);
+  const ok = known.filter((c) => c.eligible);
+  $("#m-selinfo").innerHTML = picked.length
+    ? `已选 <b>${picked.length}</b> 个会话 · 其中 <b>${ok.length}</b> 个可清理，可释放约 <b>${bytes(ok.reduce((a, c) => a + c.bytes, 0))}</b>`
+    : "勾选要清理的会话，或用过滤条件批量选择";
+  $("#m-plan").disabled = !picked.length;
+}
+async function makePlan(keys) {
+  const btn = $("#m-plan");
+  btn.disabled = true;
+  try {
+    M.plan = await write("POST", "/v1/cleanup/plan", { sessions: keys });
+    M.report = null;
+    renderReview();
+    viewEnter.manage();
+  } catch (e) { toast("生成计划失败：" + e.message, true); }
+  finally { btn.disabled = !M.sel.size; }
+}
+function sessionTitle(key, fallback) { return fallback || label(sessions.get(key) || { id: key }); }
+function renderReview() {
+  const p = M.plan, box = $("#m-review");
+  if (!p) { box.innerHTML = ""; return; }
+  const ok = p.sessions.filter((c) => c.eligible), no = p.sessions.filter((c) => !c.eligible);
+  const files = (c) => (c.targets || []).reduce((a, t) => a + t.files, 0);
+  const done = M.report;
+  const res = done ? new Map(done.results.map((r) => [r.key, r])) : null;
+  const item = (c, extra) => `<div class="ritem" data-key="${esc(c.key)}">${hicon(c.harness)}<div class="t"><b class="txt">${esc(sessionTitle(c.key, c.title))}</b><span class="mono">${esc(c.key)}${c.children?.length ? ` · 含 ${c.children.length} 个子代理` : ""}</span></div><div class="r">${extra}</div></div>`;
+  const resTag = (r) => !r ? "" : r.status === "archived" ? `<span class="tag ok" data-status="archived">${icon("check")}已归档 · 释放 ${bytes(r.freed_bytes)}</span>`
+    : r.status === "failed" ? `<span class="tag bad" data-status="failed" title="${esc(r.message || "")}">${icon("x")}失败：${esc(r.message || r.reason)}</span>` : `<span class="tag" data-status="skipped">跳过：${esc(r.message || r.reason || "")}</span>`;
+  box.innerHTML = `
+    <div class="page-h"><div><h1 style="font-size:var(--fs-lg)">${done ? "清理结果" : "审阅清理计划"}</h1><p>${done ? `计划 ${esc(p.plan_id.slice(0, 8))} 已执行。源文件移入了回收站，可以从回收站还原。` : `计划在 ${new Date(p.expires_at).toLocaleTimeString("zh-CN", { hour12: false })} 前有效；执行时会重新核对文件，变化过的会话会被跳过。`}</p></div></div>
+    <div class="kpis" id="m-plan-kpis">
+      <div class="kpi" data-k="freed_bytes" data-v="${done ? done.freed_bytes : p.freed_bytes}"><span>${done ? "已释放" : "可释放空间"}</span><b>${bytes(done ? done.freed_bytes : p.freed_bytes)}</b><small>源文件移入回收站</small></div>
+      <div class="kpi" data-k="archive_bytes" data-v="${done ? done.archive_bytes : p.archive_bytes}"><span>${done ? "归档大小" : "预计归档大小"}</span><b>${bytes(done ? done.archive_bytes : p.archive_bytes)}</b><small>${p.freed_bytes ? `约为原大小的 ${Math.max(1, Math.round((done ? done.archive_bytes : p.archive_bytes) * 100 / Math.max(1, p.freed_bytes)))}%` : "&nbsp;"}</small></div>
+      <div class="kpi"><span>可清理</span><b>${ok.length}</b><small>${ok.reduce((a, c) => a + files(c), 0)} 个文件</small></div>
+      <div class="kpi"><span>不可清理</span><b>${no.length}</b><small>不会被改动</small></div>
+    </div>
+    ${ok.length ? `<div class="panel" id="m-ok"><div class="panel-h"><h2>${done ? "执行结果" : "将要清理"}</h2></div><div class="panel-b rlist">${ok.map((c) => item(c, done ? resTag(res.get(c.key)) : `${bytes(c.bytes)} → ${bytes(c.archive_bytes)}`)).join("")}</div></div>` : ""}
+    ${no.length ? `<div class="panel" id="m-no"><div class="panel-h"><h2>不可清理<small>原因如下，这些会话保持不变</small></h2></div><div class="panel-b rlist">${no.map((c) => item(c, `<span class="tag warn" data-reason="${esc(c.reason || "")}">${esc(c.message || REASON[c.reason] || c.reason)}</span>`)).join("")}</div></div>` : ""}
+    <div class="confirm-row">${done
+      ? `<button class="btn primary" id="m-done">完成</button>`
+      : `<button class="btn" id="m-back">返回修改</button><button class="btn danger" id="m-exec" ${ok.length ? "" : "disabled"}>${icon("trash")}确认清理 ${ok.length} 个会话</button>`}</div>`;
+}
+async function executePlan() {
+  const btn = $("#m-exec");
+  btn.disabled = true;
+  btn.textContent = "正在清理…";
+  try {
+    M.report = await write("POST", `/v1/cleanup/plans/${encodeURIComponent(M.plan.plan_id)}/execute`);
+    for (const r of M.report.results) M.preview.delete(r.key);
+    M.sel.clear();
+    renderReview();
+  } catch (e) {
+    toast(e.status === 410 ? "计划已过期，请重新生成" : "执行失败：" + e.message, true);
+    btn.disabled = false;
+    btn.textContent = "确认清理";
+  }
+}
+function closeReview() {
+  M.plan = null;
+  M.report = null;
+  $("#m-review").innerHTML = "";
+  viewEnter.manage();
+}
+async function loadArchives(render) {
+  try {
+    const a = await getJson("/v1/archive");
+    $("#m-arch-count").textContent = a.archives.length || "";
+    if (!render) return;
+    const can = !READ_ONLY;
+    $("#m-arch-status").textContent = a.archives.length ? `${a.archives.length} 个归档会话 · 共 ${bytes(a.bytes)}` : "";
+    $("#m-arch-table").innerHTML = `<thead><tr><th class="l">会话</th><th class="l">归档时间</th><th>原大小</th><th>归档大小</th><th class="l">状态</th>${can ? "<th></th>" : ""}</tr></thead><tbody>${a.archives.map((x) => `<tr data-key="${esc(x.key)}">
+      <td class="l name"><span class="cellname">${hicon(x.harness)}<button class="linkish" data-open="${esc(x.key)}">${esc(x.title || x.key)}</button>${x.root && x.root !== x.key ? '<span class="sub2">子代理</span>' : ""}</span></td>
+      <td class="l dim">${stamp(x.archived_at)}</td><td>${bytes(x.source_bytes)}</td><td data-v="${x.bytes}">${bytes(x.bytes)}</td>
+      <td class="l">${x.restored ? '<span class="tag ok" title="源文件已从回收站还原">已还原</span>' : '<span class="tag acc">已归档</span>'}</td>
+      ${can ? `<td><button class="btn sm ghost" data-del="${esc(x.key)}">${icon("trash")}删除归档</button></td>` : ""}</tr>`).join("") || `<tr><td colspan="6" class="dim" style="text-align:center;padding:28px">还没有归档。在"会话"标签里清理会话后，精简归档会出现在这里。</td></tr>`}</tbody>`;
+  } catch (e) {
+    if (render) $("#m-arch-status").textContent = e.status === 503 ? "这个守护进程没有数据目录，没有归档。" : `加载归档失败：${e.message}`;
+  }
+}
+async function deleteArchive(btn) {
+  if (btn.dataset.confirm !== "1") {
+    btn.dataset.confirm = "1";
+    btn.classList.remove("ghost");
+    btn.classList.add("danger");
+    btn.innerHTML = `${icon("trash")}确认永久删除`;
+    setTimeout(() => { if (btn.isConnected && btn.dataset.confirm === "1") { btn.dataset.confirm = ""; btn.classList.add("ghost"); btn.classList.remove("danger"); btn.innerHTML = `${icon("trash")}删除归档`; } }, 4000);
+    return;
+  }
+  try {
+    const r = await write("DELETE", `/v1/archive/${encodeURIComponent(btn.dataset.del)}`);
+    toast(`已删除 ${r.removed.length} 个归档，释放 ${bytes(r.bytes)}`);
+    loadArchives(true);
+  } catch (e) { toast("删除失败：" + e.message, true); }
+}
+function cleanupSession(key) {
+  M.sel = new Set([key]);
+  setp({ view: "manage", mtab: null }, true);
+  showView("manage");
+  makePlan([key]);
+}
+
+// ---------------------------------------------------------------- insights view
+const IN = { seq: 0, data: null };
+const METRIC = {
+  sessions: { name: "会话", v: (r) => r.sessions || 0, f: full },
+  prompts: { name: "提示", v: (r) => r.prompts || 0, f: full },
+  tokens: { name: "Token", v: tokensOf, f: tok },
+  cost: { name: "费用", v: (r) => r.cost_usd || 0, f: money },
+  steps: { name: "步数", v: (r) => r.steps || 0, f: full },
+};
+function yearStart() {
+  const d = addDays(new Date(), -364);
+  return addDays(d, -((d.getDay() + 6) % 7)); // back to Monday
+}
+async function loadInsights() {
+  const mine = ++IN.seq, metric = getp("metric"), rank = getp("rank");
+  for (const b of $$("#i-metric button")) b.setAttribute("aria-pressed", String(b.dataset.metric === metric));
+  for (const b of $$("#i-rank button")) b.setAttribute("aria-pressed", String(b.dataset.rank === rank));
+  const since = dayKey(yearStart()), w = { since, tz: TZ || undefined };
+  const status = $("#i-status");
+  status.className = "status-line";
+  status.textContent = IN.data ? "" : "加载中…";
+  try {
+    const [day, wh, wd, hr, pj, md, hs] = await Promise.all([
+      getJson("/v1/usage", { ...w, group_by: "day" }), getJson("/v1/usage", { ...w, group_by: "weekday_hour" }),
+      getJson("/v1/usage", { ...w, group_by: "weekday" }), getJson("/v1/usage", { ...w, group_by: "hour" }),
+      ...["project", "model", "harness"].map((g) => getJson("/v1/usage", { ...w, group_by: g, sort: rank, limit: 5 })),
+    ]);
+    if (mine !== IN.seq) return;
+    IN.data = { since, day, wh, wd, hr, ranks: { project: pj, model: md, harness: hs } };
+    status.textContent = "";
+    renderInsights();
+    $("#v-insights").dataset.since = since;
+  } catch (e) {
+    if (mine !== IN.seq) return;
+    status.className = "status-line bad";
+    status.textContent = `加载失败：${e.message}${IN.data ? "。下面显示的是上一次的数据。" : ""}`;
+  }
+}
+// Five-step sequential ramp: zero, then quartiles of the non-zero values.
+function levels(values) {
+  const nz = values.filter((v) => v > 0).sort((a, b) => a - b);
+  const q = [0.25, 0.5, 0.75].map((p) => nz[Math.floor(p * (nz.length - 1))] ?? 0);
+  return (v) => (v <= 0 ? 0 : v <= q[0] ? 1 : v <= q[1] ? 2 : v <= q[2] ? 3 : 4);
+}
+function renderInsights() {
+  const d = IN.data, metric = getp("metric"), M_ = METRIC[metric] || METRIC.sessions, rank = METRIC[getp("rank")] || METRIC.cost;
+  $("#i-heat-title").textContent = `每日${M_.name}`;
+  $("#i-punch-title").textContent = `星期 × 小时 · ${M_.name}`;
+  // Heatmap: 53 Monday-first week columns ending this week.
+  const start = new Date(d.since + "T00:00:00"), today = new Date();
+  const byDay = new Map(d.day.rows.map((r) => [r.key, r]));
+  const days = daysBetween(start, today);
+  const vals = days.map((k) => (byDay.has(k) ? M_.v(byDay.get(k)) : 0));
+  const lv = levels(vals);
+  const wrap = $("#i-heat");
+  const weeks = Math.ceil(days.length / 7);
+  const cell = Math.max(10, Math.min(22, Math.floor((wrap.clientWidth - 32 - 34 - 24) / weeks) - 3)), gap = 3, pitch = cell + gap, L = 30, Tp = 18;
+  // 24 px on the right keep the last month label inside the drawing.
+  let svg = `<svg width="${L + weeks * pitch + 24}" height="${Tp + 7 * pitch}" role="img" aria-label="最近一年每日${M_.name}热力图">`;
+  ["一", "三", "五"].forEach((t, i) => (svg += `<text x="0" y="${Tp + (i * 2) * pitch + cell - 1}">周${t}</text>`));
+  let lastMonth = -1;
+  days.forEach((k, i) => {
+    const col = Math.floor(i / 7), row = i % 7, dt = new Date(k + "T00:00:00");
+    if (row === 0 && dt.getMonth() !== lastMonth && dt.getDate() <= 7) { lastMonth = dt.getMonth(); svg += `<text x="${L + col * pitch}" y="11">${dt.getMonth() + 1}月</text>`; }
+    svg += `<rect class="cell l${lv(vals[i])}" data-day="${k}" data-v="${vals[i]}" x="${L + col * pitch}" y="${Tp + row * pitch}" width="${cell}" height="${cell}" rx="2.5"><title>${dayLabel(k)} · ${M_.f(vals[i])}${metric === "cost" ? "（API 等价）" : ` ${M_.name === "Token" ? "token" : "个" + M_.name}`}</title></rect>`;
+  });
+  wrap.innerHTML = svg + "</svg>";
+  wrap.scrollLeft = wrap.scrollWidth;
+  const totalV = vals.reduce((a, b) => a + b, 0), active = vals.filter((v) => v > 0).length;
+  const best = vals.reduce((bi, v, i) => (v > vals[bi] ? i : bi), 0);
+  $("#i-heat-foot").innerHTML = `<span>一年合计 <b>${M_.f(totalV)}</b>${metric === "cost" ? "（API 等价）" : ""} · 活跃 <b>${active}</b> 天${vals[best] > 0 ? ` · 最多的一天 <b>${dayLabel(days[best])}</b>（${M_.f(vals[best])}）` : ""}</span>
+    <span class="scale">少 ${[0, 1, 2, 3, 4].map((i) => `<i class="cell" style="background:var(--heat-${i})"></i>`).join("")} 多</span>`;
+  renderPunch(M_);
+  // Rankings: top five of each dimension by the rank metric, as the API sorted them.
+  const dims = [["project", "项目"], ["model", "模型"], ["harness", "Harness"]];
+  $("#i-ranks").innerHTML = dims.map(([g, n]) => {
+    const rows = d.ranks[g].rows.filter((r) => r.key !== "(other)");
+    const max = Math.max(1e-9, ...rows.map(rank.v));
+    return `<section class="rank" data-dim="${g}"><h3>${n}</h3>${rows.length ? `<ol>${rows.map((r, i) => `<li data-key="${esc(r.key)}" data-v="${rank.v(r)}"><span class="n">${i + 1}</span>
+      <span class="nm" title="${esc(r.key)}">${g === "harness" ? hicon(r.key) : ""}<span class="${g === "model" ? "mono" : ""}">${esc(g === "harness" ? hname(r.key) : g === "project" ? base(r.key) || r.label : r.key ? r.label : "（未记录模型）")}</span></span>
+      <span class="v">${rank.f(rank.v(r))}</span><span class="rb"><i style="width:${(rank.v(r) / max) * 100}%"></i></span></li>`).join("")}</ol>` : '<p class="none">没有数据</p>'}</section>`;
+  }).join("");
+}
+function renderPunch(M_) {
+  const d = IN.data, box = $("#i-punch");
+  const cells = new Map(d.wh.rows.map((r) => [r.key, M_.v(r)]));
+  const wdv = new Map(d.wd.rows.map((r) => [r.key, M_.v(r)])), hrv = new Map(d.hr.rows.map((r) => [r.key, M_.v(r)]));
+  const all = [...cells.values()], lv = levels(all);
+  const avail = box.clientWidth - 32;
+  // Narrow screens: one-character weekday labels and cells narrower than tall, so all 24 hours fit.
+  const narrow = avail < 480, L = narrow ? 20 : 40, side = narrow ? 40 : 64, gap = narrow ? 2 : 3, Tp = 4, bottom = 46;
+  const cell = Math.max(6, Math.min(30, Math.floor((avail - L - side - 8) / 24) - gap)), ch = Math.max(cell, 13), pitch = cell + gap, rowp = ch + gap;
+  const W = L + 24 * pitch + 8 + side, H = Tp + 7 * rowp + bottom;
+  const maxW = Math.max(1e-9, ...wdv.values()), maxH = Math.max(1e-9, ...hrv.values());
+  let svg = `<svg width="${W}" height="${H}" role="img" aria-label="星期与小时分布">`;
+  for (let wd = 1; wd <= 7; wd++) {
+    const y = Tp + (wd - 1) * rowp;
+    svg += `<text x="0" y="${y + ch / 2 + 4}">${narrow ? WEEK[wd % 7].slice(1) : WEEK[wd % 7]}</text>`;
+    for (let h = 0; h < 24; h++) {
+      const k = `${wd}-${pad2(h)}`, v = cells.get(k) || 0;
+      svg += `<rect class="cell l${lv(v)}" data-cell="${k}" data-v="${v}" x="${L + h * pitch}" y="${y}" width="${cell}" height="${ch}" rx="${narrow ? 1.5 : 2.5}"><title>${WEEK[wd % 7]} ${pad2(h)}:00–${pad2(h + 1)}:00 · ${M_.f(v)}</title></rect>`;
+    }
+    const v = wdv.get(String(wd)) || 0, bw = (v / maxW) * (side - 8);
+    svg += `<rect class="mbar" data-weekday="${wd}" data-v="${v}" x="${L + 24 * pitch + 8}" y="${y + 2}" width="${Math.max(v ? 2 : 0, bw)}" height="${ch - 4}" rx="2"><title>${WEEK[wd % 7]}合计 · ${M_.f(v)}</title></rect>`;
+  }
+  const by = Tp + 7 * rowp + 6, bh = 22;
+  for (let h = 0; h < 24; h++) {
+    const v = hrv.get(pad2(h)) || 0, hh = (v / maxH) * bh;
+    svg += `<rect class="mbar" data-hour="${pad2(h)}" data-v="${v}" x="${L + h * pitch}" y="${by + bh - hh}" width="${cell}" height="${Math.max(v ? 2 : 0, hh)}" rx="2"><title>${pad2(h)}:00 合计 · ${M_.f(v)}</title></rect>`;
+    if (h % (narrow ? 6 : 3) === 0) svg += `<text x="${L + h * pitch}" y="${H - 4}">${h}时</text>`;
+  }
+  box.innerHTML = svg + "</svg>";
+  $("#i-punch-foot").innerHTML = `<span>格子是每个时段的${M_.name}，右侧条形是星期合计，下方条形是小时合计</span>
+    <span class="scale">少 ${[0, 1, 2, 3, 4].map((i) => `<i class="cell" style="background:var(--heat-${i})"></i>`).join("")} 多</span>`;
+}
+viewEnter.insights = loadInsights;
 
 // ---------------------------------------------------------------- interaction
 document.addEventListener("click", (e) => {
-  const chip = e.target.closest(".chip[data-tok]");
+  const t = e.target;
+  if (!t.closest("#menu") && !t.closest("#resume-btn")) closeMenu();
+  const nav = t.closest("#nav [data-view]");
+  if (nav) return showView(nav.dataset.view, true);
+  const chip = t.closest(".chip[data-tok]");
   if (chip) {
     const tok = chip.dataset.tok;
     let toks = $("#q").value.split(/\s+/).filter(Boolean);
-    toks = toks.includes(tok) ? toks.filter((t) => t !== tok) : [...toks, tok];
+    toks = toks.includes(tok) ? toks.filter((x) => x !== tok) : [...toks, tok];
     $("#q").value = toks.join(" ");
+    setp({ q: $("#q").value.trim() });
     syncFilters();
     queueSearch(0);
     return;
   }
-  const row = e.target.closest(".row[data-key]");
+  const row = t.closest(".row[data-key]");
   if (row) return select(row.dataset.key);
-  if (e.target.closest("#more")) return loadEarlier(e.target.closest("#more"));
-  const tb = e.target.closest("#transport button");
+  if (t.closest("#more")) return loadEarlier(t.closest("#more"));
+  if (t.closest("#newer")) return select(T.key, false);
+  const tb = t.closest("#transport button");
   if (tb && tb.dataset.transport !== transport) {
     transport = tb.dataset.transport;
     localStorage.setItem("uniflo.transport", transport);
@@ -1770,27 +3157,128 @@ document.addEventListener("click", (e) => {
     probeTransports();
     return;
   }
-  const copy = e.target.closest("[data-copy]");
+  const copy = t.closest("[data-copy]");
   if (copy) {
     navigator.clipboard?.writeText(copy.closest(".code").querySelector("code").textContent);
     copy.textContent = "已复制";
     setTimeout(() => (copy.textContent = "复制"), 1200);
     return;
   }
-  const key = e.target.closest("[data-copy-text]");
-  if (key) navigator.clipboard?.writeText(key.dataset.copyText);
+  const key = t.closest("[data-copy-text]");
+  if (key) { navigator.clipboard?.writeText(key.dataset.copyText); toast("已复制会话 key"); return; }
+  if (t.closest("#notify")) return toggleNotify();
+  if (t.closest("#steps-toggle")) {
+    const b = t.closest("#steps-toggle"), on = b.getAttribute("aria-expanded") !== "true";
+    b.setAttribute("aria-expanded", String(on));
+    $("#steps-panel").hidden = !on;
+    setp({ steps: on });
+    if (on) loadSteps(selected);
+    return;
+  }
+  if (t.closest("#resume-btn")) return openResume(t.closest("#resume-btn"));
+  const act = t.closest("#menu [data-act]");
+  if (act) return act.dataset.act === "copy-resume" ? copyResume() : openTerminal(act.dataset.term);
+  if (t.closest("#clean-btn")) return cleanupSession(selected);
+  // usage
+  const rg = t.closest("#u-range [data-range]");
+  if (rg) { setp({ range: rg.dataset.range, from: null, to: null }); return loadUsage(); }
+  const gr = t.closest("#u-group [data-group]");
+  if (gr) { setp({ group: gr.dataset.group, under: null, sort: null, asc: null }, true); return loadUsage(); }
+  const sk = t.closest("#u-stack [data-stack]");
+  if (sk) { setp({ stack: sk.dataset.stack }); return loadUsage(); }
+  const so = t.closest("#u-table [data-sort]");
+  if (so) {
+    const st = uState(), k = so.dataset.sort;
+    setp({ sort: k, asc: st.sort === k ? !st.asc : k === "label" });
+    U.data.st = uState();
+    return renderUsageTable();
+  }
+  const ex = t.closest("#u-table [data-expand]");
+  if (ex) return toggleDir(ex.dataset.expand);
+  const un = t.closest("#v-usage [data-under]");
+  if (un) { setp({ under: un.dataset.under || null }, true); return loadUsage(); }
+  if (t.closest("#u-unpriced-btn")) { setp({ unpriced: !uState().unpriced }); U.data.st = uState(); return renderKpis(U.data.kpi.totals, U.data.kpi.rows, U.data.st); }
+  if (t.closest("#u-csv")) return exportCsv();
+  // search
+  const hit = t.closest(".hit[data-event]");
+  if (hit) return openSession(hit.dataset.session, hit.dataset.event);
+  if (t.closest("#s-more")) return runFts(true);
+  // manage
+  const mt = t.closest("[data-mtab]");
+  if (mt) { setp({ mtab: mt.dataset.mtab }, true); return viewEnter.manage(); }
+  const op = t.closest("[data-open]");
+  if (op) return openSession(op.dataset.open);
+  const pick = t.closest("[data-pick]");
+  if (pick) {
+    const keys = M.list.map((s) => s.key), k = pick.dataset.pick;
+    if (e.shiftKey && M.lastClick && keys.includes(M.lastClick)) {
+      const [a, b] = [keys.indexOf(M.lastClick), keys.indexOf(k)].sort((x, y) => x - y);
+      for (const kk of keys.slice(a, b + 1)) pick.checked ? M.sel.add(kk) : M.sel.delete(kk);
+      renderManage();
+    } else {
+      pick.checked ? M.sel.add(k) : M.sel.delete(k);
+      renderSel();
+    }
+    M.lastClick = k;
+    return;
+  }
+  if (t.closest("#m-pickall")) { const on = t.closest("#m-pickall").checked; for (const s of M.list) on ? M.sel.add(s.key) : M.sel.delete(s.key); return renderManage(); }
+  if (t.closest("#m-selall")) { for (const s of M.list) M.sel.add(s.key); return renderManage(); }
+  if (t.closest("#m-clear")) { M.sel.clear(); return renderManage(); }
+  if (t.closest("#m-plan")) return makePlan([...M.sel]);
+  if (t.closest("#m-back")) return closeReview();
+  if (t.closest("#m-exec")) return executePlan();
+  if (t.closest("#m-done")) { closeReview(); return loadManage(); }
+  const del = t.closest("[data-del]");
+  if (del) return deleteArchive(del);
+  // insights
+  const mm = t.closest("#i-metric [data-metric]");
+  if (mm) { setp({ metric: mm.dataset.metric }); return IN.data ? renderInsights() : loadInsights(); }
+  const rk = t.closest("#i-rank [data-rank]");
+  if (rk) { setp({ rank: rk.dataset.rank }); return loadInsights(); }
 });
 document.addEventListener("toggle", (e) => {
   const id = e.target.dataset?.openId;
   if (!id || !T) return;
   e.target.open ? T.open.add(id) : T.open.delete(id);
 }, true);
-$("#q").addEventListener("input", () => { syncFilters(); queueSearch(); });
+$("#q").addEventListener("input", () => { setp({ q: $("#q").value.trim() }); syncFilters(); queueSearch(); });
+$("#s-form").addEventListener("submit", (e) => { e.preventDefault(); clearTimeout(ftsTimer); runFts(); });
+$("#s-q").addEventListener("input", queueFts);
+$("#s-f").addEventListener("input", queueFts);
+let mTimer = null;
+$("#m-q").addEventListener("input", () => { clearTimeout(mTimer); mTimer = setTimeout(() => { setp({ mq: $("#m-q").value.trim() }); loadManage(); }, 250); });
+for (const id of ["u-h", "u-m", "u-p"]) $("#" + id).addEventListener("change", (e) => {
+  setp({ [id.replace("-", "")]: e.target.value || null, ...(id === "u-p" ? { under: null } : {}) });
+  loadUsage();
+});
+for (const id of ["u-from", "u-to"]) $("#" + id).addEventListener("change", () => {
+  if (!$("#u-from").value) return;
+  setp({ range: "custom", from: $("#u-from").value, to: $("#u-to").value || null });
+  loadUsage();
+});
+const chart = $("#u-chart");
+chart.addEventListener("pointermove", (e) => {
+  const b = e.target.closest?.(".band");
+  if (b) showDayTip(Number(b.dataset.i), e.clientX, e.clientY);
+});
+chart.addEventListener("pointerleave", hideTip);
+chart.addEventListener("keydown", (e) => {
+  if (!chartModel) return;
+  const d = e.key === "ArrowRight" ? 1 : e.key === "ArrowLeft" ? -1 : 0;
+  if (e.key === "Escape") return hideTip();
+  if (!d) return;
+  e.preventDefault();
+  const i = chartModel.active < 0 ? (d > 0 ? 0 : chartModel.days.length - 1) : Math.max(0, Math.min(chartModel.days.length - 1, chartModel.active + d));
+  showDayTip(i);
+});
+chart.addEventListener("blur", hideTip);
 $("#recheck").addEventListener("click", async () => {
   await refreshMeta().catch(() => {});
   await runSearch().catch(() => {});
   if (selected) select(selected, false);
   probeTransports();
+  probeServices();
 });
 $("#rail-toggle").addEventListener("click", (e) => {
   const hidden = $("#app").classList.toggle("norail");
@@ -1802,25 +3290,48 @@ function showList() {
   $("#q").focus();
 }
 $("#show-list").addEventListener("click", showList);
+$("#nav").addEventListener("keydown", (e) => {
+  const d = e.key === "ArrowRight" ? 1 : e.key === "ArrowLeft" ? -1 : 0;
+  if (!d) return;
+  e.preventDefault();
+  const v = VIEWS[(VIEWS.indexOf(view) + d + VIEWS.length) % VIEWS.length];
+  showView(v, true);
+  $(`#nav [data-view="${v}"]`).focus();
+});
+$("#menu").addEventListener("keydown", (e) => {
+  const items = $$("#menu button:not(:disabled)");
+  const i = items.indexOf(document.activeElement);
+  if (e.key === "Escape") { const b = menuFor; closeMenu(); b?.focus(); }
+  else if (e.key === "ArrowDown" || e.key === "ArrowUp") { e.preventDefault(); items[(i + (e.key === "ArrowDown" ? 1 : -1) + items.length) % items.length]?.focus(); }
+});
 document.addEventListener("keydown", (e) => {
-  if (e.target.closest(".ts-wrapper, .ts-dropdown")) return;
-  const typing = e.target.matches?.("input, textarea");
+  if (e.target.closest(".ts-wrapper, .ts-dropdown, #menu")) return;
+  const typing = e.target.matches?.("input, textarea, select");
+  if (!typing && !e.metaKey && !e.ctrlKey && !e.altKey && /^[1-5]$/.test(e.key)) {
+    showView(VIEWS[Number(e.key) - 1], true);
+    return;
+  }
   if ((e.key === "/" && !typing) || (e.key === "k" && (e.metaKey || e.ctrlKey))) {
     e.preventDefault();
+    const box = view === "search" ? $("#s-q") : view === "manage" ? $("#m-q") : null;
+    if (box) { box.focus(); box.select(); return; }
+    if (view !== "sessions") showView("sessions", true);
     $("#app").classList.remove("thread-open");
     $("#q").focus();
     $("#q").select();
     return;
   }
+  if (e.key === "Escape") { closeMenu(); hideTip(); }
   if (typing) {
     if (e.key === "Escape") e.target.blur();
-    if (e.key === "Enter" && shown.length) {
+    if (e.key === "Enter" && e.target.id === "q" && shown.length) {
       e.preventDefault();
       e.target.blur();
       select(shown[0]);
     }
     return;
   }
+  if (view !== "sessions") return;
   if (e.key === "Escape" && narrowLayout.matches && $("#app").classList.contains("thread-open")) {
     showList();
     return;
@@ -1835,6 +3346,20 @@ document.addEventListener("keydown", (e) => {
     requestAnimationFrame(() => document.querySelector(`.row[data-key="${CSS.escape(next)}"]`)?.scrollIntoView({ block: "nearest" }));
   }
 });
+window.addEventListener("popstate", () => {
+  $("#q").value = getp("q");
+  showView(getp("view"));
+  if (view === "sessions" && getp("select") && getp("select") !== selected) select(getp("select"), false, getp("at") || null);
+});
+let resizeTimer = null;
+window.addEventListener("resize", () => {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => {
+    if (view === "usage" && U.data) drawStack();
+    if (view === "insights" && IN.data) renderInsights();
+  }, 150);
+});
+window.addEventListener("scroll", () => { closeMenu(); hideTip(); }, true);
 
 setInterval(() => {
   document.querySelectorAll(".age[data-ts]").forEach((n) => (n.textContent = age(Number(n.dataset.ts))));
@@ -1849,8 +3374,11 @@ setInterval(() => refreshMeta().catch(() => {}), 5000);
 
 (async function main() {
   renderChecks();
+  renderNotify();
   skeletonList();
   setConn("idle", "未连接");
+  $("#q").value = getp("q");
+  showView(getp("view"));
   API = await resolveApi();
   try {
     await refreshMeta();
@@ -1859,8 +3387,11 @@ setInterval(() => refreshMeta().catch(() => {}), 5000);
     $("#m-seq").textContent = lastSeq;
     connect();
     const first = P.get("select") || (r.body.find((s) => s.status === "work") || r.body[0])?.key;
-    if (first) select(first, P.has("select"));
+    if (first) select(first, P.has("select"), P.get("at"));
+    ready = true;
+    if (view !== "sessions") viewEnter[view]?.();
     probeTransports();
+    probeServices();
   } catch (e) {
     setConn("retry", "无法连接");
     $("#list").innerHTML = `<div class="empty"><h3>连不上 ${esc(API)}</h3><p>先运行 <kbd>uniflo daemon</kbd></p></div>`;
