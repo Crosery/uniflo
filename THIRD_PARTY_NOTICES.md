@@ -7962,3 +7962,44 @@ SOFTWARE.
 - `crosery`：自家 harness（产品 Everebb），仓库里只有位图和 `.icns`，没有矢量标识，不描摹。
 - `prime`（Prime Intellect 的 Prime Agent）：其仓库没有矢量标识，官方站点在本次核对时连接超时，取不到，不凭记忆描摹。
 - `kodu`：官方仓库 `kodu-ai/claude-coder` 带 `kodu-logo.svg`，但仓库是 AGPL-3.0，标识没有单独授权，不并入本仓库（MIT / Apache-2.0）；`kodu.ai` 域名已挂牌出售，项目已停止维护。
+
+## 网页演示内嵌的交互组件
+
+网页演示 `examples/web/index.html` 与其内嵌副本 `crates/uniflo-gateway/src/index.html` 原样内嵌下列组件的 dist 文件（压缩版，无外链、无运行时联网）。
+
+### Tom Select
+
+- 版本与来源：2.6.2，[tom-select.js.org](https://tom-select.js.org/)；用在 harness、模型、项目下拉（侧栏与用量视图共用同一个封装）。
+- 许可：Apache License 2.0；完整许可证文本与包校验值保留在 HTML 里 `<script data-library="tom-select">` 之前的注释中。
+- 包完整性：`sha512-eiXIkk82XzzUTOVQDFpy+ZGejuqdTvMukyUyeZBQaKnqW42UoTiTZnrod/eX0rkqJEc4rZY9DZ3zdjV07i29wQ==`
+
+### Air Datepicker
+
+- 版本与来源：3.6.0，[air-datepicker.com](https://air-datepicker.com/)，npm 包 `air-datepicker`，源码 [t1m0n/air-datepicker](https://github.com/t1m0n/air-datepicker)；用在用量视图的自定义日期范围。
+- 许可：MIT，版权归 t1m0n（包内 `package.json` 声明）。
+- 包完整性（npm registry `dist.integrity`，下载后已核对）：`sha512-+txUkqa949rXBJDmkQAIb/GehZECJYF4rm9XJxVYtEX22C9WvBpE/XwCUQZBopKIkpg4ycAySJ9lH3JOg9qQTw==`
+- 内嵌文件：`air-datepicker.js` SHA-256 `24be9285f8a7b00ec14ca94a954f54383ea6a507067f7d3c3f1c2c2280462185`，`air-datepicker.css` SHA-256 `110391f897ba0abc6c563bc8d1e7afa135b26955ae57a5fc0a1228e79c394f73`，均未改动；中文区域设置与主题变量在页面自己的脚本和样式里。
+
+```text
+MIT License
+
+Copyright (c) t1m0n
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
