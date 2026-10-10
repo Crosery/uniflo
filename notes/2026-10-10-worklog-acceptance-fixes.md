@@ -42,3 +42,11 @@
 - 没有开真实 Terminal / iTerm / Ghostty 窗口。Ghostty 首次用 `-e` 会弹它自带的确认框，且有已知的「命令执行两次」上游报告，需手测。
 - 「建立中」「就绪」的真实守护进程路径只在桩数据下验证（合成数据索引瞬间完成）。
 - `workbuddy`、`factory` 的标识取自官网，没有单独许可文件。
+
+## 返工：移除 tempfile 运行时依赖
+
+- 验收发现 `uniflo-gateway` 把 `tempfile` 提升为运行时依赖，不在批准清单内。
+- `write_script` 改用 `agent.rs::private_dir`：`DirBuilder` 0700 独占 `create`（不用 `create_dir_all`），目录名取 `RandomState` + pid + 纳秒时间的哈希，`AlreadyExists` 最多重试 16 次；脚本仍以 `create_new` + 0700 写入，失败时清理目录。`tempfile` 回到 `[dev-dependencies]`。
+- `node scripts/third-party-notices.mjs`：194 个 crate，`THIRD_PARTY_NOTICES.md` 已更新。
+- `cargo tree -p uniflo-gateway -e normal | grep -c tempfile` → 0。
+- `CHROME=/Users/crosery/.local/bin/chrome-headless-shell scripts/verify.sh --e2e` → `{"ok":true,"passed":107,"failed":0}`，`verify: all checks passed`。

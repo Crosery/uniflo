@@ -136,11 +136,7 @@ fn terminal_name(t: Terminal) -> &'static str {
 /// The directory name is random, so the path cannot be guessed or pre-created by another user.
 fn write_script(root: &std::path::Path, script: &str) -> std::io::Result<(std::path::PathBuf, std::path::PathBuf)> {
     use std::io::Write;
-    let mut b = tempfile::Builder::new();
-    b.prefix("uniflo-open-");
-    #[cfg(unix)]
-    b.permissions(std::os::unix::fs::PermissionsExt::from_mode(0o700));
-    let dir = b.tempdir_in(root)?.keep();
+    let dir = private_dir(root)?;
     let path = dir.join("resume.command");
     let mut opts = std::fs::OpenOptions::new();
     opts.write(true).create_new(true);
@@ -152,6 +148,27 @@ fn write_script(root: &std::path::Path, script: &str) -> std::io::Result<(std::p
         return Err(e);
     }
     Ok((dir, path))
+}
+
+/// Exclusively creates a 0700 directory with an unguessable name under `root`.
+fn private_dir(root: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+    use std::hash::{BuildHasher, Hasher};
+    let mut last = None;
+    for _ in 0..16 {
+        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+        h.write_u32(std::process::id());
+        h.write_u128(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos()));
+        let dir = root.join(format!("uniflo-open-{:016x}", h.finish()));
+        let mut b = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        std::os::unix::fs::DirBuilderExt::mode(&mut b, 0o700);
+        match b.create(&dir) {
+            Ok(()) => return Ok(dir),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => last = Some(e),
+            Err(e) => return Err(e),
+        }
+    }
+    Err(last.unwrap_or_else(|| std::io::Error::other("无法创建临时目录")))
 }
 
 fn system_launcher() -> Launcher {
