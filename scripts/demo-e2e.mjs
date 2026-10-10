@@ -151,6 +151,10 @@ for (let d = 0; d < 60; d++) {
     writeFileSync(join(dir, `rollout-${iso(t).slice(0, 19).replace(/:/g, "-")}-${id}.jsonl`), x);
   }
 }
+// A second project called "web" at another path: the project filter must keep both distinguishable.
+for (let i = 0; i < 3; i++) writeClaude("-w-beta-web", `dup-${i}`, "/w/beta/web", `beta web #${i}`, [{
+  ts: now0 - (1 + i) * DAY - 7_200_000, prompt: `beta/web 第 ${i} 个页面`, steps: [{ model: "claude-opus-4-5", u: [900 + i * 100, 200, 4000, 0] }],
+}]);
 // Full-text target: a unique phrase in the middle of a long session.
 const SEARCH_WORD = "量子退火调度器";
 writeClaude("-w-search", "search-target", "/w/search", "检索目标会话", Array.from({ length: 30 }, (_, i) => ({
@@ -684,6 +688,131 @@ async function runNotify() {
   report("[notify] no page errors", cdp.errors.length === 0, cdp.errors.slice(0, 3).join(" | "));
 }
 
+const openCombo = async (id) => {
+  await click(`#${id} + .ts-wrapper .ts-control`);
+  await waitFor(`document.querySelector('#${id}').tomselect.isOpen`, 3_000, `${id} open`);
+};
+const comboRows = (id) => cdp.eval(`[...document.querySelector('#${id}').tomselect.dropdown.querySelectorAll('.option')].map((o) => ({ v: o.dataset.value, name: o.querySelector('.h-name')?.textContent, sub: o.querySelector('.c-sub')?.textContent || '', sessions: o.querySelector('.h-count')?.textContent, cost: o.querySelector('.h-cost')?.textContent, icon: !!o.querySelector('svg.hi, .hi') }))`);
+const typeInto = async (text) => { await cdp.send("Input.insertText", { text }); await sleep(150); };
+const dayStr = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+async function runUsageControls() {
+  const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const since = dayStr(new Date(Date.now() - 29 * 86400_000));
+  const api30 = (g, extra = "") => apiJson(api, `/v1/usage?group_by=${g}&since=${since}&tz=${enc(tz)}${extra}`);
+  const money = (v) => (v == null ? "—" : v === 0 ? "$0.00" : v < 0.01 ? "<$0.01" : "$" + v.toLocaleString("en-US", { minimumFractionDigits: v >= 1000 ? 0 : 2, maximumFractionDigits: v >= 1000 ? 0 : 2 }));
+  const costOrder = (rows) => rows.filter((r) => r.key).sort((a, b) => (b.cost_usd ?? -1) - (a.cost_usd ?? -1) || b.sessions - a.sessions);
+  await scheme(null);
+  await viewport(1480, 920);
+  await load(`${api}/demo?token=${TOKEN}&view=usage&range=30d`);
+  await waitFor(`!!document.querySelector('#v-usage').dataset.query && !document.querySelector('#v-usage').hidden && ['u-h','u-m','u-p'].every((i) => document.querySelector('#' + i).tomselect.options[''] && Object.keys(document.querySelector('#' + i).tomselect.options).length > 1)`, 10_000, "usage filters");
+  const native = await cdp.eval(`[...document.querySelectorAll('#v-usage select, #v-usage input[type=date], #v-usage input[type=time], #v-usage input[type=checkbox], #v-usage input[type=number], #v-usage input[type=range]')].filter((n) => { const r = n.getBoundingClientRect(); return r.width > 2 && r.height > 2; }).map((n) => n.id || n.type)`);
+  const wrappers = await cdp.eval(`['u-h','u-m','u-p'].map((i) => !!document.querySelector('#' + i + ' + .ts-wrapper.combo'))`);
+  report("[usage-ui] filters are Tom Select combos; no visible native select or date input", native.length === 0 && wrappers.every(Boolean), `native=${native.join(",") || "none"} wrappers=${wrappers}`);
+
+  // harness: options ranked by cost with icon, sessions and cost
+  const hApi = costOrder((await api30("harness")).rows);
+  await openCombo("u-h");
+  const hRows = await comboRows("u-h");
+  const hGood = hRows.length === hApi.length + 1 && hRows[0].v === "" && hRows[0].name === "全部 harness"
+    && hApi.every((r, i) => hRows[i + 1].v === r.key && hRows[i + 1].sessions === String(r.sessions) && hRows[i + 1].cost === money(r.cost_usd) && hRows[i + 1].icon);
+  report("[usage-ui] harness options: brand icon, sessions and cost for the range, sorted by cost", hGood, hRows.slice(0, 4).map((r) => `${r.v}:${r.sessions}/${r.cost}`).join(" "));
+  await shot("usage-ui-harness-open.png");
+  await typeInto("claud");
+  const hNarrow = (await comboRows("u-h")).map((r) => r.v);
+  report("[usage-ui] typing narrows the harness options", hNarrow.length >= 1 && hNarrow.includes("claude") && hNarrow.length < hApi.length, hNarrow.join(","));
+  await cdp.eval(`document.querySelector('#u-h').tomselect.dropdown.querySelector('.option[data-value="claude"]').click(); true`);
+  await waitFor(`location.search.includes('uh=claude') && document.querySelector('#v-usage').dataset.query.includes('q=h%3Aclaude')`, 5_000, "harness chosen");
+  const claudeTotals = (await api30("model", "&q=h:claude")).totals, allTotals = (await api30("model")).totals;
+  await usageAgrees("harness = claude");
+  report("[usage-ui] choosing a harness moves the KPI totals to that harness", claudeTotals.sessions < allTotals.sessions && claudeTotals.sessions > 0, `claude ${claudeTotals.sessions} < all ${allTotals.sessions} sessions`);
+
+  // model
+  await openCombo("u-m");
+  const mRows = await comboRows("u-m");
+  await typeInto("opus");
+  const mNarrow = (await comboRows("u-m")).map((r) => r.v);
+  report("[usage-ui] model options list every model with cost; typing narrows", mRows.length > 2 && mRows.every((r) => r.cost) && mNarrow.length >= 1 && mNarrow.every((v) => v.includes("opus")), `${mRows.length} options · ${mNarrow.join(",")}`);
+  await cdp.eval(`document.querySelector('#u-m').tomselect.dropdown.querySelector('.option[data-value="claude-opus-4-5"]').click(); true`);
+  await waitFor(`document.querySelector('#v-usage').dataset.query.includes('model=claude-opus-4-5')`, 5_000, "model chosen");
+  await usageAgrees("claude + opus");
+  // reset both through the "全部" rows
+  await openCombo("u-m");
+  await cdp.eval(`document.querySelector('#u-m').tomselect.dropdown.querySelector('.option[data-value=""]').click(); true`);
+  await openCombo("u-h");
+  await cdp.eval(`document.querySelector('#u-h').tomselect.dropdown.querySelector('.option[data-value=""]').click(); true`);
+  await waitFor(`!location.search.includes('uh=') && !location.search.includes('um=') && !document.querySelector('#v-usage').dataset.query.includes('model=')`, 5_000, "reset");
+  report("[usage-ui] the 全部 rows reset the filters (URL and data)", true);
+
+  // projects: same basename, different paths
+  const pApi = costOrder((await api30("project")).rows);
+  await openCombo("u-p");
+  const pRows = await comboRows("u-p");
+  const webs = pRows.filter((r) => r.name === "web");
+  report("[usage-ui] same-named projects appear once each and differ by path", webs.length >= 2 && new Set(webs.map((r) => r.sub)).size === webs.length && webs.some((r) => r.sub === "/w/alpha/web") && webs.some((r) => r.sub === "/w/beta/web") && pRows.length === new Set(pRows.map((r) => r.v)).size && pRows.length === pApi.length + 1, JSON.stringify(webs.map((r) => r.sub)));
+  await shot("usage-ui-project-open.png");
+  await typeInto("beta");
+  const pNarrow = (await comboRows("u-p")).map((r) => r.v);
+  report("[usage-ui] project search matches the path", pNarrow.includes("/w/beta/web") && pNarrow.length < pApi.length && pNarrow.every((v) => v.includes("beta")), pNarrow.join(","));
+  await cdp.eval(`document.querySelector('#u-p').tomselect.dropdown.querySelector('.option[data-value="/w/beta/web"]').click(); true`);
+  await waitFor(`document.querySelector('#v-usage').dataset.query.includes('under=%2Fw%2Fbeta%2Fweb')`, 5_000, "project chosen");
+  const { table } = await usageAgrees("project = /w/beta/web");
+  const betaSessions = (await api30("model", "&under=%2Fw%2Fbeta%2Fweb")).totals.sessions;
+  report("[usage-ui] choosing a project scopes the KPI totals to its three sessions", betaSessions === 3 && table.totals.sessions === 3, `${betaSessions} sessions`);
+  await cdp.eval(`document.querySelector('#u-p').tomselect.setValue('', false); true`);
+  await waitFor(`!location.search.includes('up=')`, 5_000, "project reset");
+
+  // keyboard: arrow + enter picks an option
+  await openCombo("u-h");
+  await cdp.send("Input.dispatchKeyEvent", { type: "keyDown", key: "ArrowDown", code: "ArrowDown", windowsVirtualKeyCode: 40 });
+  await cdp.send("Input.dispatchKeyEvent", { type: "keyUp", key: "ArrowDown", code: "ArrowDown", windowsVirtualKeyCode: 40 });
+  await cdp.send("Input.dispatchKeyEvent", { type: "keyDown", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13, text: "\r" });
+  await cdp.send("Input.dispatchKeyEvent", { type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
+  await waitFor(`/[?&]uh=/.test(location.search)`, 3_000, "keyboard pick").catch(() => {});
+  const kb = await cdp.eval(`new URLSearchParams(location.search).get('uh')`);
+  report("[usage-ui] keyboard navigation picks an option", !!kb, `uh=${kb}`);
+  await cdp.eval(`document.querySelector('#u-h').tomselect.setValue('', false); true`);
+  await waitFor(`!location.search.includes('uh=')`, 5_000, "harness reset");
+
+  // date range
+  await click('#u-range [data-range="custom"]');
+  await waitFor(`!!document.querySelector('.air-datepicker.-active-')`, 3_000, "date picker opens");
+  const cells = await cdp.eval(`[...document.querySelectorAll('.air-datepicker.-active- .air-datepicker-cell.-day-:not(.-disabled-):not(.-other-month-)')].map((c) => c.dataset.year + '-' + String(+c.dataset.month + 1).padStart(2, '0') + '-' + String(c.dataset.date).padStart(2, '0'))`);
+  const a = cells[0], b = cells[Math.min(cells.length - 1, 3)];
+  await shot("usage-ui-date-open.png");
+  for (const d of [a, b]) await cdp.eval(`(() => { const [y, m, dd] = '${d}'.split('-').map(Number); const c = [...document.querySelectorAll('.air-datepicker.-active- .air-datepicker-cell.-day-')].find((n) => +n.dataset.year === y && +n.dataset.month === m - 1 && +n.dataset.date === dd && !n.classList.contains('-other-month-')); c.click(); return true; })()`);
+  const [from, to] = [a, b].sort();
+  await waitFor(`location.search.includes('range=custom') && location.search.includes('from=${from}') && location.search.includes('to=${to}')`, 5_000, "range in URL");
+  const until1 = dayStr(new Date(new Date(to + "T00:00:00").getTime() + 86400_000 + 3600_000));
+  await waitFor(`document.querySelector('#v-usage').dataset.query.includes('since=${from}') && document.querySelector('#v-usage').dataset.query.includes('until=${until1}')`, 5_000, "range in query");
+  await usageAgrees(`custom ${from}..${to}`);
+  const shown = await cdp.eval(`document.querySelector('#u-dates').value`);
+  report("[usage-ui] date picker applies a start-end range to URL, query and input", shown === `${from} 至 ${to}` && !(await cdp.eval(`!!document.querySelector('.air-datepicker.-active-')`)), shown);
+  const noDate = await cdp.eval(`document.querySelectorAll('#v-usage input[type=date]').length`);
+  report("[usage-ui] no native date input remains", noDate === 0);
+  report("[usage-ui] no page errors", cdp.errors.length === 0, cdp.errors.slice(0, 3).join(" | "));
+
+  // Evidence screenshots: dropdown and picker open, both themes, wide and narrow
+  for (const [w, h, mobile] of [[1480, 920, false], [390, 844, true]]) {
+    await viewport(w, h, mobile);
+    for (const theme of ["dark", "light"]) {
+      await scheme(theme);
+      await load(`${api}/demo?token=${TOKEN}&view=usage&range=30d`);
+      await waitFor(`!!document.querySelector('#v-usage').dataset.query && Object.keys(document.querySelector('#u-p').tomselect.options).length > 1`, 10_000, "usage ready");
+      await sleep(400);
+      await openCombo("u-p");
+      await sleep(250);
+      await shot(`usage-${w}-${theme}-project.png`);
+      await cdp.eval(`document.querySelector('#u-p').tomselect.close(); true`);
+      await click('#u-range [data-range="custom"]');
+      await waitFor(`!!document.querySelector('.air-datepicker.-active-')`, 3_000, "picker");
+      await sleep(400);
+      await shot(`usage-${w}-${theme}-date.png`);
+    }
+  }
+  await viewport(1480, 920);
+  await scheme(null);
+}
+
 async function runManage() {
   // Keep `busy` inside its working window however long the earlier steps took.
   appendFileSync(join(home, ".claude/projects/-w-clean/busy.jsonl"), cu("busy-u2", Date.now(), "还在迁移", "/w/clean"));
@@ -693,6 +822,10 @@ async function runManage() {
     return { size: Number(r.querySelector('[data-k=bytes]').dataset.v), sizeText: r.querySelector('[data-k=bytes]').textContent, busy: b.querySelector('[data-k=eligible]').textContent.trim() }; })()`);
   report("[manage] list shows each session's size and whether it can be cleaned", row.size > 0 && row.busy === "会话运行中", `${row.sizeText} · busy: ${row.busy}`);
   await click('[data-pick="claude:cleanme"]');
+  const partial = await cdp.eval(`(() => { const all = [...document.querySelectorAll('#m-table input[type=checkbox]')], p = document.querySelector('#m-pickall');
+    return { n: all.length, custom: all.every((c) => c.classList.contains('cb') && getComputedStyle(c).appearance === 'none'), one: document.querySelector('[data-pick="claude:cleanme"]').checked && !document.querySelector('[data-pick="claude:busy"]').checked,
+      indeterminate: p.indeterminate, checked: p.checked }; })()`);
+  report("[manage] checkboxes use the component style and select-all turns indeterminate on a partial pick", partial.n >= 3 && partial.custom && partial.one && partial.indeterminate && !partial.checked, JSON.stringify(partial));
   await click('[data-pick="claude:busy"]');
   await click("#m-plan");
   await sleep(300);
@@ -907,7 +1040,7 @@ try {
     for (const transport of ["sse", "ws", "ndjson"]) await runTransport(transport);
     await runCrossOrigin();
   }
-  for (const step of [runIdentity, runIcons, runUsage, runDetail, runFts, runSearchHelp, runInsights, runNotify, runVisual, runManage, runReadOnly]) {
+  for (const step of [runIdentity, runIcons, runUsage, runUsageControls, runDetail, runFts, runSearchHelp, runInsights, runNotify, runVisual, runManage, runReadOnly]) {
     if (only.length && !only.includes(step.name)) continue;
     try { await step(); } catch (e) { report(`${step.name}`, false, String(e.message || e)); }
   }
