@@ -1,4 +1,5 @@
 //! Request guard: loopback Host (DNS-rebinding defense), Origin allow-list, optional token.
+//! Every write request (any method but GET / HEAD / OPTIONS) must also pass [`crate::write::check`].
 
 use axum::extract::{Request, State};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
@@ -12,18 +13,20 @@ pub struct GuardOptions {
     pub token: Option<String>,
     /// Extra browser origins allowed besides loopback ones (`*` allows any).
     pub cors_origins: Vec<String>,
-    /// Extra Host header values accepted besides loopback names.
+    /// Extra Host header values accepted besides loopback names (read endpoints only).
     pub allowed_hosts: Vec<String>,
+    /// `--read-only`: every write endpoint answers 403.
+    pub read_only: bool,
 }
 
-fn host_name(host: &str) -> &str {
+pub(crate) fn host_name(host: &str) -> &str {
     if let Some(rest) = host.strip_prefix('[') {
         return rest.split(']').next().unwrap_or(rest);
     }
     host.rsplit_once(':').map_or(host, |(h, port)| if port.chars().all(|c| c.is_ascii_digit()) { h } else { host })
 }
 
-fn is_loopback(name: &str) -> bool {
+pub(crate) fn is_loopback(name: &str) -> bool {
     matches!(name, "localhost" | "127.0.0.1" | "::1") || name.ends_with(".localhost")
 }
 
@@ -37,7 +40,7 @@ fn origin_allowed(origin: &str, g: &GuardOptions) -> bool {
     }
 }
 
-fn token_ok(req: &Request, want: &str) -> bool {
+pub(crate) fn token_ok(req: &Request, want: &str) -> bool {
     let bearer = req
         .headers()
         .get(header::AUTHORIZATION)
@@ -54,17 +57,21 @@ fn constant_eq(a: &str, b: &str) -> bool {
     a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
-fn deny(code: StatusCode, msg: &str) -> Response {
+fn is_write(m: &Method) -> bool {
+    !matches!(*m, Method::GET | Method::HEAD | Method::OPTIONS)
+}
+
+pub(crate) fn deny(code: StatusCode, msg: &str) -> Response {
     (code, axum::Json(serde_json::json!({ "error": msg }))).into_response()
 }
 
 fn cors_headers(h: &mut HeaderMap, origin: &HeaderValue) {
     h.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin.clone());
     h.insert(header::VARY, HeaderValue::from_static("Origin"));
-    h.insert(header::ACCESS_CONTROL_ALLOW_METHODS, HeaderValue::from_static("GET, OPTIONS"));
+    h.insert(header::ACCESS_CONTROL_ALLOW_METHODS, HeaderValue::from_static("GET, POST, DELETE, OPTIONS"));
     h.insert(
         header::ACCESS_CONTROL_ALLOW_HEADERS,
-        HeaderValue::from_static("authorization, last-event-id, content-type"),
+        HeaderValue::from_static("authorization, last-event-id, content-type, x-uniflo-write"),
     );
     h.insert(header::ACCESS_CONTROL_EXPOSE_HEADERS, HeaderValue::from_static("x-uniflo-seq"));
 }
@@ -91,7 +98,14 @@ pub async fn guard(State(g): State<Arc<GuardOptions>>, req: Request, next: Next)
     if let Some(want) = &g.token
         && !token_ok(&req, want)
     {
-        return deny(StatusCode::UNAUTHORIZED, "missing or wrong token");
+        // Writes are refused, not challenged: one status for every failed write condition.
+        let code = if req.method().is_safe() { StatusCode::UNAUTHORIZED } else { StatusCode::FORBIDDEN };
+        return deny(code, "missing or wrong token");
+    }
+    if is_write(req.method())
+        && let Err(why) = crate::write::check(&g, &req)
+    {
+        return deny(StatusCode::FORBIDDEN, why);
     }
     let mut resp = next.run(req).await;
     if let Some(o) = &origin {

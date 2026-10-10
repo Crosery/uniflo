@@ -71,6 +71,10 @@ impl LineDecoder for Gemini {
             && p.extension().is_some_and(|e| e == "jsonl" || e == "json")
     }
 
+    fn cleanup_targets(&self, src: &Path) -> Option<Vec<PathBuf>> {
+        uniflo_core::cleanup::targets::file(src)
+    }
+
     fn identify(&self, p: &Path) -> Option<SourceId> {
         Some(SourceId { id: p.file_stem()?.to_str()?.to_owned(), parent: None })
     }
@@ -143,7 +147,7 @@ fn gemini_msg(m: &Value, id: &str, t: i64, cx: &mut Cx<'_, ()>) {
     }
     let text = text_of(m.get("content").unwrap_or(&Value::Null));
     if !text.is_empty() {
-        cx.emit(id.to_owned(), t, Body::AssistantMessage { text, model });
+        cx.emit(id.to_owned(), t, Body::AssistantMessage { text, model: model.clone() });
     }
     let calls = m.get("toolCalls").and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default();
     for (i, tc) in calls.iter().enumerate() {
@@ -174,18 +178,22 @@ fn gemini_msg(m: &Value, id: &str, t: i64, cx: &mut Cx<'_, ()>) {
             );
         }
     }
+    // `input` (prompt) includes `cached`; `tool` is prompt-side too; `output` excludes `thoughts`.
     if let Some(tok) = m.get("tokens").filter(|t| t.is_object()) {
         let n = |k: &str| tok.get(k).and_then(Value::as_u64).unwrap_or(0);
         let cached = n("cached");
+        let thoughts = n("thoughts");
         cx.emit(
             format!("{id}:u"),
             t,
             Body::Usage(Usage {
-                input: n("input").saturating_sub(cached),
-                output: n("output"),
+                input: (n("input") + n("tool")).saturating_sub(cached),
+                output: n("output") + thoughts,
                 cache_read: cached,
                 cache_write: 0,
-                reasoning: n("thoughts"),
+                reasoning: thoughts,
+                model: model.clone(),
+                cost_usd: None,
             }),
         );
     }
@@ -256,7 +264,9 @@ mod tests {
         );
         assert!(!h[2].partial, "upsert replaced the partial tool call");
         assert!(matches!(&h[3].body, Body::ToolResult { output, is_error: false, .. } if output == "a.txt"));
-        assert!(matches!(&h[4].body, Body::Usage(u) if u.input == 40 && u.reasoning == 9));
+        // Usage contract: cached out of input, thoughts inside output.
+        assert!(matches!(&h[4].body, Body::Usage(u)
+            if (u.input, u.cache_read, u.output, u.reasoning) == (40, 60, 14, 9) && u.model.as_deref() == Some("gemini-x")));
     }
 
     #[test]

@@ -1,7 +1,14 @@
 //! `uniflo` — daemon and command line for the unified agent-harness session gateway.
 
+mod agent;
+mod clean;
 mod client;
+mod grep;
+mod mcp;
 mod render;
+mod setup;
+mod update;
+mod usage;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
@@ -9,10 +16,12 @@ use client::Client;
 use render::Style;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use uniflo_core::cleanup::{Cleanup, CleanupOptions};
 use uniflo_core::util::now_ms;
-use uniflo_core::{Engine, EngineOptions, HistoryQuery};
+use uniflo_core::{Engine, EngineOptions, HistoryQuery, PriceSync};
 use uniflo_gateway::GuardOptions;
 use uniflo_schema::{Envelope, Event, Harness, Session, Status};
+use uniflo_search::fts::{Fts, FtsOptions};
 use uniflo_search::{Query, search};
 
 const DEFAULT_URL: &str = "http://127.0.0.1:7311";
@@ -54,8 +63,21 @@ enum Cmd {
         /// Skip the periodic crates.io update check (checks are opt-out; one HTTPS GET per interval).
         #[arg(long)]
         no_update_check: bool,
+        /// Never fetch the price catalog (embedded snapshot + local files only).
+        #[arg(long)]
+        no_price_sync: bool,
+        /// Seconds after startup before the first price sync (tests).
+        #[arg(long, default_value_t = 60, hide = true)]
+        price_sync_delay: u64,
+        /// Do not build or serve the full-text index (`/v1/search` answers 503, no index file is created).
+        #[arg(long)]
+        no_fts: bool,
+        /// Disable every write endpoint (cleanup, archive deletion): they answer 403.
+        #[arg(long)]
+        read_only: bool,
     },
-    /// Check crates.io for a newer stable release, or install it (`cargo install uniflo --force`).
+    /// Check crates.io for a newer stable release, or install it the way this executable was
+    /// installed (`cargo install`, or the prebuilt release package for an install-script install).
     Update {
         /// Only report; do not install.
         #[arg(long)]
@@ -64,6 +86,7 @@ enum Cmd {
         /// prereleases do not guarantee stability).
         #[arg(long = "pre")]
         prerelease: bool,
+        /// The check result plus `method` (cargo|binary|unknown); exit code 10 = update available.
         #[arg(long)]
         json: bool,
     },
@@ -125,24 +148,97 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Token usage and API-equivalent cost by harness / model / project / day …, or per step
+    /// of one session (`uniflo usage <key>`).
+    Usage(usage::UsageArgs),
+    /// Price catalog status; `uniflo pricing sync` fetches it now.
+    Pricing(usage::PricingArgs),
+    /// Full-text search over message, reasoning and tool text (Chinese and code substrings).
+    Grep {
+        /// Terms are ANDed; `"two words"` is a phrase, `-term` excludes (quote the whole query,
+        /// e.g. `'deploy -rollback'`, or put terms after `--`).
+        #[arg(required = true)]
+        terms: Vec<String>,
+        /// Session filter in the `uniflo ls` syntax, e.g. `h:claude in:work since:7d`.
+        #[arg(long)]
+        filter: Option<String>,
+        /// Sessions to show.
+        #[arg(short = 'n', long, default_value_t = 20)]
+        limit: usize,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Archive sessions, then move their files to the trash (plan first; asks unless --yes).
+    Clean(clean::CleanArgs),
+    /// Archived (cleaned-up) sessions: `ls` (default) or `rm <key>`.
+    Archive(clean::ArchiveArgs),
+    /// stdio MCP server for agents (what `uniflo setup --mcp` registers).
+    Mcp,
+    /// The agent Skill shipped with this binary.
+    Skill {
+        #[command(subcommand)]
+        action: agent::SkillAction,
+    },
+    /// Connect the agent harnesses on this machine: MCP server and/or Skill (asks first).
+    Setup(setup::SetupArgs),
+    /// Continue a session in its own harness from its cwd; `--print` only prints the command.
+    Resume {
+        key: String,
+        #[arg(long)]
+        print: bool,
+    },
+    /// This project's recent sessions as short Markdown for an agent (empty without a daemon).
+    Context(agent::ContextArgs),
 }
 
 fn main() -> Result<()> {
+    #[cfg(windows)]
+    if let Ok(exe) = std::env::current_exe() {
+        uniflo_core::install::remove_aside(&exe);
+    }
     let cli = Cli::parse();
+    if !matches!(
+        cli.cmd,
+        Cmd::Daemon { .. } | Cmd::Mcp | Cmd::Setup(_) | Cmd::Skill { .. } | Cmd::Context(_) | Cmd::Update { .. }
+    ) {
+        setup::first_run();
+    }
     match cli.cmd {
-        Cmd::Daemon { ref bind, ref cors_origins, ref allow_hosts, stale_after, no_cache, no_update_check } => {
+        Cmd::Daemon {
+            ref bind,
+            ref cors_origins,
+            ref allow_hosts,
+            stale_after,
+            no_cache,
+            no_update_check,
+            no_price_sync,
+            price_sync_delay,
+            no_fts,
+            read_only,
+        } => {
             let guard = GuardOptions {
                 token: cli.token.clone(),
                 cors_origins: cors_origins.clone(),
                 allowed_hosts: allow_hosts.clone(),
+                read_only,
             };
             if !allow_hosts.is_empty() && guard.token.is_none() {
                 bail!("--allow-host exposes transcripts beyond loopback; set --token as well");
             }
-            daemon(bind, guard, stale_after, no_cache, !no_update_check)
+            let price_sync = (!no_price_sync)
+                .then(|| PriceSync { delay: Duration::from_secs(price_sync_delay), ..Default::default() });
+            daemon(bind, guard, stale_after, no_cache, !no_update_check, price_sync, !no_fts)
         }
         Cmd::Scan { json, no_cache } => scan(json, no_cache),
-        Cmd::Update { check, prerelease, json } => update(check, prerelease, json),
+        Cmd::Update { check, prerelease, json } => update::run(check, prerelease, json),
+        Cmd::Pricing(ref a) => usage::pricing(&cli, a),
+        Cmd::Mcp => mcp::run(&cli),
+        Cmd::Skill { ref action } => {
+            agent::skill(action);
+            Ok(())
+        }
+        Cmd::Setup(ref a) => setup::run(a),
+        Cmd::Context(ref a) => agent::context(&cli, a),
         ref cmd => Source::open(&cli)?.run(cmd),
     }
 }
@@ -155,7 +251,15 @@ fn engine_opts(no_cache: bool, stale_after: u64) -> EngineOptions {
     }
 }
 
-fn daemon(bind: &str, guard: GuardOptions, stale_after: u64, no_cache: bool, update_check: bool) -> Result<()> {
+fn daemon(
+    bind: &str,
+    guard: GuardOptions,
+    stale_after: u64,
+    no_cache: bool,
+    update_check: bool,
+    price_sync: Option<PriceSync>,
+    fts: bool,
+) -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "uniflo=info,warn".into()),
@@ -165,6 +269,7 @@ fn daemon(bind: &str, guard: GuardOptions, stale_after: u64, no_cache: bool, upd
     let mut opts = engine_opts(no_cache, stale_after);
     // Background crates.io check: hourly; the first one fires right after startup.
     opts.update_check = update_check.then(|| Duration::from_secs(3600));
+    opts.price_sync = price_sync;
     let engine = Engine::new(uniflo_adapters::all(), opts);
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     rt.block_on(async move {
@@ -178,17 +283,40 @@ fn daemon(bind: &str, guard: GuardOptions, stale_after: u64, no_cache: bool, upd
             report.sessions, report.files, report.ms, report.read, report.restored
         );
         let _ = engine.save_cache();
+        let fts = fts.then(|| start_fts(&engine)).flatten();
+        let cleanup = Cleanup::new(engine.clone(), CleanupOptions::from_env()).ok().map(Arc::new);
         let runner = tokio::spawn(engine.clone().run());
-        let router = uniflo_gateway::router(engine.clone(), guard);
+        let router = uniflo_gateway::router_with(engine.clone(), guard, uniflo_gateway::Services { fts, cleanup });
         uniflo_gateway::serve(listener, router, async {
             let _ = tokio::signal::ctrl_c().await;
         })
         .await?;
         runner.abort();
         engine.save_cache()?;
+        engine.save_usage_cache()?;
         eprintln!("uniflo: index cache saved, bye");
         Ok(())
     })
+}
+
+/// The index builds in its own thread; failing to open it only disables `/v1/search`.
+fn start_fts(engine: &Arc<Engine>) -> Option<Arc<Fts>> {
+    match Fts::start(engine.clone(), FtsOptions::default()) {
+        Ok(f) => {
+            let st = f.status();
+            eprintln!(
+                "uniflo: full-text index {} · {} of {} sessions to index in the background",
+                st.path,
+                st.progress.total - st.progress.done,
+                st.progress.total
+            );
+            Some(Arc::new(f))
+        }
+        Err(err) => {
+            tracing::warn!("full-text index unavailable, /v1/search disabled: {err:#}");
+            None
+        }
+    }
 }
 
 fn scan(json: bool, no_cache: bool) -> Result<()> {
@@ -233,103 +361,8 @@ fn scan(json: bool, no_cache: bool) -> Result<()> {
     Ok(())
 }
 
-/// Check crates.io, and unless `--check`, install the new version with cargo and restart the
-/// daemon. The default target is the newest **stable** release; a prerelease is only ever
-/// announced, and installed solely via the explicit `--pre` opt-in.
-fn update(check: bool, prerelease: bool, json: bool) -> Result<()> {
-    let info = uniflo_core::update::check();
-    if json {
-        println!("{}", serde_json::to_string_pretty(&info)?);
-        if info.available {
-            std::process::exit(10);
-        }
-        return Ok(());
-    }
-    if let Some(err) = &info.error {
-        println!("uniflo {}: 无法检查更新 — {err}", info.current);
-        return Ok(());
-    }
-    // Decide what (if anything) to install.
-    let target: Option<(&str, bool)> = if prerelease {
-        info.latest_prerelease.as_deref().map(|v| (v, true))
-    } else {
-        info.available.then(|| (info.latest.as_deref().unwrap_or("?"), false))
-    };
-    if prerelease && target.is_none() {
-        println!("uniflo {}：crates.io 上没有比你更新的预发布版。", info.current);
-        return Ok(());
-    }
-    match (&info.latest, target) {
-        (_, Some((v, true))) => println!("uniflo {} → 预发布版 {}（不保证稳定，已按 --pre 显式选择）", info.current, v),
-        (_, Some((v, _))) => println!("uniflo {} → 新版本 {} 可用（正式版）", info.current, v),
-        (Some(latest), None) if info.current.contains('-') => {
-            println!("uniflo {} 为预发布版；最新正式版 {}。", info.current, latest)
-        }
-        (Some(latest), None) => println!("uniflo {} 已是最新（crates.io 最新正式版 {}）", info.current, latest),
-        (None, None) => println!("uniflo {}: crates.io 没有已发布版本", info.current),
-    }
-    if !prerelease && let Some(pre) = &info.latest_prerelease {
-        println!("检测到预发布 {pre}（不保证稳定）；如需试用：`uniflo update --pre`。");
-    }
-    let Some((version, is_pre)) = target else { return Ok(()) };
-    if check {
-        return Ok(());
-    }
-    let status = std::process::Command::new("cargo")
-        .args(["install", "uniflo", "--force", "--version", version])
-        .status()
-        .with_context(|| format!("cargo 不可用；手动运行 `cargo install uniflo --force --version {version}`"))?;
-    if !status.success() {
-        bail!("cargo install 失败（exit {:?}）", status.code());
-    }
-    println!("已安装 uniflo {}{}。", version, if is_pre { "（预发布版）" } else { "" });
-    // Replace the running daemon so the new binary actually serves requests.
-    #[cfg(target_os = "macos")]
-    {
-        let loaded = std::process::Command::new("launchctl")
-            .args(["list"])
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .output()
-            .map(|o| String::from_utf8_lossy(&o.stdout).contains("com.crosery.uniflo"))
-            .unwrap_or(false);
-        if loaded {
-            let uid = std::process::Command::new("id")
-                .arg("-u")
-                .output()
-                .ok()
-                .and_then(|o| String::from_utf8(o.stdout).ok())
-                .map(|s| s.trim().to_owned());
-            let ok = uid.is_some_and(|uid| {
-                std::process::Command::new("launchctl")
-                    .args(["kickstart", "-k", &format!("gui/{uid}/com.crosery.uniflo")])
-                    .status()
-                    .map(|s| s.success())
-                    .unwrap_or(false)
-            });
-            println!(
-                "{}",
-                if ok {
-                    "launchd 服务已重启（KeepAlive），新守护进程在跑。"
-                } else {
-                    "launchd 服务在跑但自动重启失败：`launchctl kickstart -k gui/$(id -u)/com.crosery.uniflo`"
-                }
-            );
-        } else {
-            println!("守护进程若正在运行，重启后生效：`uniflo daemon`（旧进程仍是旧版本）。");
-        }
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        println!(
-            "守护进程若正在运行，请先停掉再启动新版（Windows 上运行中的二进制无法被覆盖，建议 update 前停 daemon）。"
-        );
-    }
-    Ok(())
-}
-
 /// Query commands run against the daemon, or an in-process engine when none answers.
-enum Source {
+pub(crate) enum Source {
     Daemon(Client),
     Local(Arc<Engine>),
 }
@@ -471,7 +504,19 @@ impl Source {
                 }
                 Ok(())
             }
-            Cmd::Daemon { .. } | Cmd::Scan { .. } | Cmd::Update { .. } => unreachable!(),
+            Cmd::Usage(a) => usage::usage(self, a),
+            Cmd::Grep { terms, filter, limit, json } => grep::run(self, terms, filter.as_deref(), *limit, *json),
+            Cmd::Clean(a) => clean::clean(self, a),
+            Cmd::Archive(a) => clean::archive(self, a),
+            Cmd::Resume { key, print } => agent::resume(self, key, *print),
+            Cmd::Daemon { .. }
+            | Cmd::Scan { .. }
+            | Cmd::Update { .. }
+            | Cmd::Pricing(_)
+            | Cmd::Mcp
+            | Cmd::Skill { .. }
+            | Cmd::Setup(_)
+            | Cmd::Context(_) => unreachable!(),
         }
     }
 }
@@ -519,7 +564,7 @@ fn print_sessions(st: &Style, list: &[Session], json: bool, tsv: bool) -> Result
 }
 
 /// Percent-encode a query/path component.
-fn enc(s: &str) -> String {
+pub(crate) fn enc(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
         match b {

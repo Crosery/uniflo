@@ -6,7 +6,8 @@
 
 use serde::Serialize;
 
-/// crates.io sparse-index path for the `uniflo` crate (2-letter namespace).
+/// crates.io sparse-index path for the `uniflo` crate (2-letter namespace);
+/// `UNIFLO_UPDATE_INDEX_URL` replaces it (tests).
 pub const INDEX_URL: &str = "https://index.crates.io/un/if/uniflo";
 
 pub fn current_version() -> &'static str {
@@ -93,8 +94,10 @@ pub fn fetch_releases() -> Result<Releases, String> {
     let bin = "curl.exe";
     #[cfg(not(windows))]
     let bin = "curl";
+    let url = std::env::var("UNIFLO_UPDATE_INDEX_URL").ok().filter(|s| !s.is_empty());
     let out = std::process::Command::new(bin)
-        .args(["-fsS", "--max-time", "15", "--user-agent", &format!("uniflo/{}", current_version()), INDEX_URL])
+        .args(["-fsS", "--max-time", "15", "--user-agent", &format!("uniflo/{}", current_version())])
+        .arg(url.as_deref().unwrap_or(INDEX_URL))
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .output()

@@ -1,12 +1,14 @@
-//! WorkBuddy (Tencent CodeBuddy-derived) transcripts.
+//! WorkBuddy (Tencent CodeBuddy-derived) transcripts; CodeBuddy Code shares the kernel and
+//! the format (see `codebuddy.rs`).
 //!
 //! Layout: `~/.workbuddy/projects/<cwd-slug>/<session>.jsonl`, sub-agents under
 //! `<cwd-slug>/<session>/subagents/agent-<id>.jsonl`. Every record carries `id`, `timestamp`
 //! (ms) and `cwd`; messages, tool calls, tool results and reasoning are separate records.
 //! There is no explicit turn end: a completed assistant `message` ends the turn, and any
-//! following tool call flips the status back to work.
+//! following tool call flips the status back to work. Titles: `custom-title` (user) >
+//! `ai-title` > `topic`, placeholders skipped.
 
-use crate::common::under_any;
+use crate::common::{output_with_reasoning, under_any};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -15,24 +17,40 @@ use uniflo_core::{Adapter, Cx, HarnessInfo, JsonlAdapter, LineDecoder, LiveSessi
 use uniflo_schema::{Body, Usage};
 
 pub struct WorkBuddy {
+    info: HarnessInfo,
     roots: Vec<PathBuf>,
-    /// `~/.workbuddy/sessions/<pid>.json` registry of running processes.
+    /// `<base>/sessions/<pid>.json` registry of running processes.
     live_dir: PathBuf,
 }
 
+impl WorkBuddy {
+    /// A harness of this kernel whose data lives under `base` (`projects/`, `sessions/`).
+    pub fn new(info: HarnessInfo, base: &Path) -> Self {
+        WorkBuddy { info, roots: vec![base.join("projects")], live_dir: base.join("sessions") }
+    }
+}
+
 pub fn adapters() -> Vec<Arc<dyn Adapter>> {
-    let base = home().join(".workbuddy");
-    vec![Arc::new(JsonlAdapter::new(WorkBuddy { roots: vec![base.join("projects")], live_dir: base.join("sessions") }))]
+    let info = HarnessInfo { id: "workbuddy", name: "WorkBuddy" };
+    vec![Arc::new(JsonlAdapter::new(WorkBuddy::new(info, &home().join(".workbuddy"))))]
 }
 
 /// Record types that carry nothing for the unified stream.
-const IGNORED: &[&str] = &["file-history-snapshot", "session-meta", "resend-fork-notice"];
+const IGNORED: &[&str] = &["file-history-snapshot", "session-meta", "resend-fork-notice", "summary", "turn-metrics"];
+
+/// Generated titles that say nothing about the session.
+fn placeholder_title(t: &str) -> bool {
+    let t = t.trim();
+    t == "(No content)"
+        || t == "/compact"
+        || (t.starts_with("<image_local_path>") && t.ends_with("</image_local_path>"))
+}
 
 impl LineDecoder for WorkBuddy {
     type State = ();
 
     fn info(&self) -> HarnessInfo {
-        HarnessInfo { id: "workbuddy", name: "WorkBuddy" }
+        self.info
     }
 
     fn roots(&self) -> Vec<PathBuf> {
@@ -41,6 +59,11 @@ impl LineDecoder for WorkBuddy {
 
     fn is_source(&self, p: &Path) -> bool {
         p.extension().is_some_and(|e| e == "jsonl") && under_any(p, &self.roots)
+    }
+
+    /// <id>.jsonl, its <id>/ directory and <id>.* sidecars (meta, file rollback).
+    fn cleanup_targets(&self, src: &Path) -> Option<Vec<PathBuf>> {
+        uniflo_core::cleanup::targets::with_siblings(src, src.file_stem()?.to_str()?)
     }
 
     fn identify(&self, p: &Path) -> Option<SourceId> {
@@ -62,6 +85,10 @@ impl LineDecoder for WorkBuddy {
             "message" => match str_of(v, "role").unwrap_or("") {
                 "user" => user(v, id, t, cx),
                 "assistant" => assistant(v, id, t, cx),
+                "system" => {
+                    let text = text_of(v.get("content").unwrap_or(&Value::Null));
+                    cx.emit(id, t, Body::System { subtype: "system".into(), text });
+                }
                 other => cx.unknown(format!("message.role={other}")),
             },
             "function_call" => {
@@ -70,7 +97,8 @@ impl LineDecoder for WorkBuddy {
                     name: str_of(v, "name").unwrap_or("").to_owned(),
                     input: json_arg(v.get("arguments").unwrap_or(&Value::Null)),
                 };
-                cx.emit(id, t, body);
+                cx.emit(id.clone(), t, body);
+                usage(v, &id, t, cx);
             }
             "function_call_result" => {
                 let mut output = match v.get("output") {
@@ -96,9 +124,14 @@ impl LineDecoder for WorkBuddy {
                 let text = text_of(v.get("rawContent").unwrap_or(&Value::Null));
                 cx.emit(id, t, Body::Reasoning { text });
             }
-            "ai-title" => {
-                if let Some(title) = string_of(v, "aiTitle") {
-                    cx.meta().title = Some((2, title));
+            "custom-title" | "ai-title" | "topic" => {
+                let (rank, key) = match ty {
+                    "custom-title" => (3, "customTitle"),
+                    "ai-title" => (2, "aiTitle"),
+                    _ => (1, "topic"),
+                };
+                if let Some(title) = string_of(v, key).filter(|t| rank == 3 || !placeholder_title(t)) {
+                    cx.meta().title = Some((rank, title));
                 }
             }
             _ if IGNORED.contains(&ty) => {}
@@ -191,7 +224,8 @@ fn user(v: &Value, id: String, t: i64, cx: &mut Cx<'_, ()>) {
 }
 
 fn assistant(v: &Value, id: String, t: i64, cx: &mut Cx<'_, ()>) {
-    let model = v.pointer("/providerData/model").and_then(Value::as_str).filter(|m| !m.is_empty()).map(str::to_owned);
+    let pd = v.get("providerData").unwrap_or(&Value::Null);
+    let model = string_of(pd, "model").or_else(|| string_of(pd, "requestModelName"));
     if let Some(m) = &model {
         cx.meta().model = Some(m.clone());
     }
@@ -200,15 +234,58 @@ fn assistant(v: &Value, id: String, t: i64, cx: &mut Cx<'_, ()>) {
     if !text.is_empty() {
         cx.emit(id.clone(), t, Body::AssistantMessage { text, model }).partial = !completed;
     }
-    if let Some(u) = v.pointer("/providerData/usage").filter(|u| u.is_object()) {
-        let n = |k: &str| u.get(k).and_then(Value::as_u64).unwrap_or(0);
-        let usage = Usage { input: n("inputTokens"), output: n("outputTokens"), ..Default::default() };
-        if usage.input + usage.output > 0 {
-            cx.emit(format!("{id}:usage"), t, Body::Usage(usage));
-        }
-    }
+    usage(v, &id, t, cx);
     if completed {
         cx.emit(format!("{id}:end"), t, Body::TurnEnd { reason: Some("completed".into()) });
+    }
+}
+
+/// The model call that produced this record (assistant message or tool call). OpenAI
+/// completions shape: the prompt count includes cached tokens, and the output count includes
+/// reasoning. `providerData.usage` (camelCase, detail arrays) is WorkBuddy's; without it the
+/// provider's raw `providerData.rawUsage` (`prompt_tokens` …) is used (CodeBuddy).
+fn usage(v: &Value, id: &str, t: i64, cx: &mut Cx<'_, ()>) {
+    let pd = v.get("providerData").unwrap_or(&Value::Null);
+    let (input, output, cached, reasoning) = if let Some(u) = pd.get("usage").filter(|u| u.is_object()) {
+        let n = |k: &str| u.get(k).and_then(Value::as_u64).unwrap_or(0);
+        let detail = |k: &str, f: &str| -> u64 {
+            u.get(k)
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|d| d.get(f).and_then(Value::as_u64))
+                .sum()
+        };
+        (
+            n("inputTokens"),
+            n("outputTokens"),
+            detail("inputTokensDetails", "cached_tokens"),
+            detail("outputTokensDetails", "reasoning_tokens"),
+        )
+    } else if let Some(u) = pd.get("rawUsage").filter(|u| u.is_object()) {
+        let n = |p: &str| u.pointer(p).and_then(Value::as_u64).unwrap_or(0);
+        let cached =
+            u.get("cached_tokens").and_then(Value::as_u64).unwrap_or_else(|| n("/prompt_tokens_details/cached_tokens"));
+        let reasoning = u
+            .pointer("/completion_tokens_details/reasoning_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or_else(|| n("/completion_thinking_tokens"));
+        (n("/prompt_tokens"), n("/completion_tokens"), cached, reasoning)
+    } else {
+        return;
+    };
+    let model = string_of(pd, "model").or_else(|| string_of(pd, "requestModelName")).filter(|m| !m.trim().is_empty());
+    let usage = Usage {
+        input: input.saturating_sub(cached),
+        output: output_with_reasoning(output, reasoning),
+        cache_read: cached,
+        cache_write: 0,
+        reasoning,
+        model,
+        cost_usd: None,
+    };
+    if usage.input + usage.output + usage.cache_read > 0 {
+        cx.emit(format!("{id}:usage"), t, Body::Usage(usage));
     }
 }
 
@@ -220,7 +297,7 @@ mod tests {
     use uniflo_schema::Status;
 
     fn wb(fx: &Fixture) -> JsonlAdapter<WorkBuddy> {
-        JsonlAdapter::new(WorkBuddy { roots: vec![fx.root().join("projects")], live_dir: fx.root().join("sessions") })
+        JsonlAdapter::new(WorkBuddy::new(HarnessInfo { id: "workbuddy", name: "WorkBuddy" }, fx.root()))
     }
 
     fn l(v: Value) -> String {
@@ -286,11 +363,30 @@ mod tests {
             matches!(&r.events[3].body, Body::ToolResult { output, is_error: false, name: Some(n), .. } if output == "a.txt" && n == "Bash")
         );
         assert!(matches!(&r.events[4].body, Body::ToolResult { output, is_error: true, .. } if output == "boom"));
-        assert!(matches!(&r.events[6].body, Body::Usage(u) if u.input == 7 && u.output == 3));
+        assert!(
+            matches!(&r.events[6].body, Body::Usage(u) if u.input == 7 && u.output == 3 && u.model.as_deref() == Some("m-1"))
+        );
         assert_eq!(r.events[0].ts, 1790942400000);
         assert_eq!(r.meta.title.as_deref(), Some("A title"));
         assert_eq!(r.meta.cwd.as_deref(), Some("/w"));
         assert_eq!(r.meta.model.as_deref(), Some("m-1"));
+    }
+
+    #[test]
+    fn completions_usage_splits_cache_out_of_prompt() {
+        let fx = Fixture::new();
+        let a = wb(&fx);
+        let usage = json!({"inputTokens":1000,"inputTokensDetails":[{"cached_tokens":600}],"outputTokens":50,
+            "outputTokensDetails":[{"reasoning_tokens":20}],"totalTokens":1050});
+        let s = rec(
+            "f1",
+            json!({"type":"function_call","callId":"c1","name":"Bash","arguments":"{}","providerData":{"model":"m-2","usage":usage}}),
+        );
+        let p = fx.write("projects/-w/s2.jsonl", &s);
+        let r = fx.index(&a, &p);
+        assert_eq!(kinds(&r.events), vec!["tool_call", "usage"]);
+        assert!(matches!(&r.events[1].body, Body::Usage(u)
+            if (u.input, u.cache_read, u.output, u.reasoning) == (400, 600, 50, 20) && u.model.as_deref() == Some("m-2")));
     }
 
     #[test]

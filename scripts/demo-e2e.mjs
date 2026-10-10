@@ -1,18 +1,18 @@
 #!/usr/bin/env bun
-// End-to-end check of the web demo (examples/web/index.html) in headless Chrome against a
-// throwaway daemon fed with synthetic sessions. Never touches real harness data:
-// UNIFLO_HOME points at a temp dir and the index cache is disabled.
+// End-to-end check of the web demo (examples/web/index.html) in headless Chrome against
+// throwaway daemons fed with synthetic sessions (every harness, 60 days of usage). Never touches
+// real harness data: UNIFLO_HOME points at temp dirs, cleanup moves files into a temp
+// UNIFLO_TRASH_DIR, the index cache is disabled, notifications and open-terminal are stubbed.
 //
-//   cargo build --release && bun scripts/demo-e2e.mjs
+//   cargo build --release && CHROME=<chrome-headless-shell> bun scripts/demo-e2e.mjs
 //
-// Env: UNIFLO_BIN (default target/release/uniflo), CHROME (Chrome/Chromium binary),
-// E2E_SHOTS (dir for screenshots, default target/demo-e2e).
+// Env: UNIFLO_BIN, CHROME, E2E_SHOTS (default target/demo-e2e; visual matrix in visual/), E2E_ONLY.
 
-import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
-
+import { writeAllHarnesses } from "./e2e-fixtures.mjs";
 const ROOT = new URL("..", import.meta.url).pathname;
 const BIN = process.env.UNIFLO_BIN || join(ROOT, "target/release/uniflo");
 const CHROME = process.env.CHROME || "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
@@ -20,12 +20,15 @@ const SHOTS = process.env.E2E_SHOTS || join(ROOT, "target/demo-e2e");
 const PORT = 20000 + Math.floor(Math.random() * 20000);
 const CDP_PORT = PORT + 1;
 const STATIC_PORT = PORT + 2;
+const RO_PORT = PORT + 3;
+const NOFTS_PORT = PORT + 4;
 const TOKEN = "e2e-not-a-secret";
 const LATENCY_BUDGET_MS = 300;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const iso = (ms) => new Date(ms).toISOString();
 const line = (v) => JSON.stringify(v) + "\n";
+const enc = encodeURIComponent;
 const results = [];
 let failed = false;
 function report(name, ok, detail = "") {
@@ -36,16 +39,19 @@ function report(name, ok, detail = "") {
 
 // ---------------------------------------------------------------- synthetic data
 const home = mkdtempSync(join(tmpdir(), "uniflo-e2e-home-"));
+const roHome = mkdtempSync(join(tmpdir(), "uniflo-e2e-ro-"));
+const trash = mkdtempSync(join(tmpdir(), "uniflo-e2e-trash-"));
 const claudeFile = join(home, ".claude/projects/-w-demo/sess-1.jsonl");
 const ompFile = join(home, ".omp/agent/sessions/-w-demo/2026-10-02T12-00-00-000Z_omp1.jsonl");
 mkdirSync(join(home, ".claude/projects/-w-demo"), { recursive: true });
 mkdirSync(join(home, ".omp/agent/sessions/-w-demo"), { recursive: true });
 
 const t0 = Date.now() - 2 * 3600_000;
-const cu = (uuid, ts, content) =>
-  line({ type: "user", uuid, timestamp: iso(ts), cwd: "/w/demo", origin: { kind: "human" }, message: { role: "user", content } });
-const ca = (uuid, ts, content, stop) =>
-  line({ type: "assistant", uuid, timestamp: iso(ts), message: { id: "m-" + uuid, model: "demo-model", content, stop_reason: stop } });
+const cu = (uuid, ts, content, cwd = "/w/demo") =>
+  line({ type: "user", uuid, timestamp: iso(ts), cwd, origin: { kind: "human" }, message: { role: "user", content } });
+const ca = (uuid, ts, content, stop, model = "demo-model", usage) =>
+  line({ type: "assistant", uuid, timestamp: iso(ts), message: { id: "m-" + uuid, model, content, stop_reason: stop, ...(usage ? { usage } : {}) } });
+const cuse = (u) => ({ input_tokens: u[0], output_tokens: u[1], cache_read_input_tokens: u[2], cache_creation_input_tokens: u[3] });
 let claude = "";
 for (let i = 0; i < 80; i++) {
   claude += cu(`u${i}`, t0 + i * 60_000, `synthetic question ${i}`);
@@ -62,7 +68,7 @@ claude += ca("rich-e", tr + 6_000, [{ type: "tool_use", id: "toolu_edit", name: 
 claude += cu("rich-er", tr + 6_300, [{ type: "tool_result", tool_use_id: "toolu_edit", content: "The file has been updated." }]);
 claude += ca("rich-b", tr + 8_000, [{ type: "tool_use", id: "toolu_bash", name: "Bash", input: { command: "cargo test -p gateway", description: "Run gateway tests" } }], "tool_use");
 claude += cu("rich-br", tr + 19_500, [{ type: "tool_result", tool_use_id: "toolu_bash", content: "running 6 tests\ntest demo_page_is_served ... ok\ntest result: ok. 6 passed; 0 failed" }]);
-claude += line({ type: "assistant", uuid: "rich-a", timestamp: iso(tr + 21_000), message: { id: "m-rich-a", model: "demo-model", usage, stop_reason: "end_turn", content: [{ type: "text", text:
+claude += line({ type: "assistant", uuid: "rich-a", timestamp: iso(tr + 21_000), message: { id: "m-rich-a", model: "claude-sonnet-4-5", usage, stop_reason: "end_turn", content: [{ type: "text", text:
   "已加上 `/demo` 路由，页面用 `include_str!` 编译进二进制。\n\n### 改动\n\n- `router()` 注册 **GET /demo**，返回 `text/html`\n- 新增测试 `demo_page_is_served`，校验页面引用了全部 `/v1/*` 接口\n\n```rust\nasync fn demo() -> Html<&'static str> {\n    Html(include_str!(\"../../../examples/web/index.html\"))\n}\n```\n\n| 检查 | 结果 |\n|---|---|\n| cargo test | 6 passed |\n| clippy | 0 warnings |\n\n> 打开 http://127.0.0.1:7311/demo 即可查看。" }] } });
 claude += line({ type: "ai-title", aiTitle: "网关新增 /demo 演示页" });
 writeFileSync(claudeFile, claude);
@@ -102,10 +108,81 @@ writeFileSync(
     line({ type: "message", id: "o4", timestamp: iso(t0 + 4000), message: { role: "assistant", content: [{ type: "text", text: "done" }], stopReason: "stop" } }),
 );
 
+// Every supported harness once (idle, ~400 days old, so it stays out of the usage windows).
+const FIXTURES = writeAllHarnesses(home, Date.now() - 400 * 86400_000);
+
+// Sixty days of usage across projects (cwds below /w) and models: two priced Claude models, a
+// priced Codex model, and `demo-model`, which no catalog prices.
+const DAY = 86400_000;
+const CWDS = ["/w/alpha/api/v1", "/w/alpha/api", "/w/alpha/web", "/w/beta", "/w/gamma"];
+const writeClaude = (dir, id, cwd, title, turns) => {
+  mkdirSync(join(home, ".claude/projects", dir), { recursive: true });
+  let s = "";
+  turns.forEach((t, i) => {
+    s += cu(`${id}-u${i}`, t.ts, t.prompt, cwd);
+    t.steps.forEach((st, j) => (s += ca(`${id}-a${i}-${j}`, t.ts + 2_000 + j * 1_500, [{ type: "text", text: st.text || "完成了这一步。" }], j === t.steps.length - 1 ? "end_turn" : "tool_use", st.model, cuse(st.u))));
+  });
+  if (title) s += line({ type: "ai-title", aiTitle: title });
+  writeFileSync(join(home, ".claude/projects", dir, `${id}.jsonl`), s);
+};
+const now0 = Date.now();
+for (let d = 0; d < 60; d++) {
+  if (d % 6 === 5) continue;
+  const cwd = CWDS[d % CWDS.length], name = cwd.split("/").slice(2).join("/");
+  const model = d % 4 === 0 ? "claude-opus-4-5" : d % 7 === 3 ? "demo-model" : "claude-sonnet-4-5";
+  const ts = now0 - d * DAY - ((d * 37) % 9) * 3600_000 - 600_000;
+  const turns = Array.from({ length: d % 3 === 0 ? 2 : 1 }, (_, i) => ({
+    ts: ts + i * 600_000,
+    prompt: `继续 ${name} 的分页逻辑重构，第 ${d}-${i} 步`,
+    steps: Array.from({ length: 1 + ((d + i) % 3) }, (_, j) => ({ model, u: [1200 + d * 37 + j * 90, 240 + d * 11, 6000 + d * 101 + j * 2000, d % 3 ? 0 : 900] })),
+  }));
+  writeClaude("-w-proj", `proj-${d}`, cwd, `${name} 分页重构 #${d}`, turns);
+  if (d % 4 === 1) {
+    const id = `0199c0de-0000-7000-8000-${String(d).padStart(12, "0")}`, t = now0 - d * DAY - 3 * 3600_000;
+    const dt = new Date(t), dir = join(home, ".codex/sessions", String(dt.getUTCFullYear()), String(dt.getUTCMonth() + 1).padStart(2, "0"), String(dt.getUTCDate()).padStart(2, "0"));
+    mkdirSync(dir, { recursive: true });
+    const cwdx = d % 8 === 1 ? "/w/beta" : "/w/gamma";
+    let x = cx(t, "session_meta", { id, timestamp: iso(t), cwd: cwdx, source: "cli" }) + cx(t, "turn_context", { turn_id: "t1", cwd: cwdx, model: "gpt-5" });
+    x += cx(t, "event_msg", { type: "task_started", turn_id: "t1" });
+    x += cx(t + 300, "response_item", { type: "message", id: `u-${d}`, role: "user", content: [{ type: "input_text", text: `为 ${cwdx} 补分页逻辑的集成测试` }] });
+    x += cx(t + 900, "token_usage_record", { response_id: `r-${d}`, usage: { input_tokens: 9000 + d * 50, cached_input_tokens: 4000, output_tokens: 700 + d * 9, reasoning_output_tokens: 200, total_tokens: 9700 + d * 59 } });
+    x += cx(t + 1_200, "response_item", { type: "message", id: `a-${d}`, role: "assistant", content: [{ type: "output_text", text: "测试已补上。" }] });
+    x += cx(t + 1_500, "event_msg", { type: "task_complete", turn_id: "t1" });
+    writeFileSync(join(dir, `rollout-${iso(t).slice(0, 19).replace(/:/g, "-")}-${id}.jsonl`), x);
+  }
+}
+// A second project called "web" at another path: the project filter must keep both distinguishable.
+for (let i = 0; i < 3; i++) writeClaude("-w-beta-web", `dup-${i}`, "/w/beta/web", `beta web #${i}`, [{
+  ts: now0 - (1 + i) * DAY - 7_200_000, prompt: `beta/web 第 ${i} 个页面`, steps: [{ model: "claude-opus-4-5", u: [900 + i * 100, 200, 4000, 0] }],
+}]);
+// Full-text target: a unique phrase in the middle of a long session.
+const SEARCH_WORD = "量子退火调度器";
+writeClaude("-w-search", "search-target", "/w/search", "检索目标会话", Array.from({ length: 30 }, (_, i) => ({
+  ts: now0 - 5 * DAY + i * 120_000,
+  prompt: i === 12 ? `请把 ${SEARCH_WORD} 的超时改成可配置，并保留 frob_quux_42 的旧行为` : `第 ${i} 轮：继续整理检索目标会话`,
+  steps: [{ model: "claude-sonnet-4-5", u: [800, 120, 3000, 0], text: `第 ${i} 轮已处理。` }],
+})));
+// Cleanup: one idle session that can be cleaned and one still waiting for its reply (working).
+writeClaude("-w-clean", "cleanme", "/w/clean", "可以清理的旧会话", Array.from({ length: 12 }, (_, i) => ({
+  ts: now0 - 9 * DAY + i * 60_000, prompt: `旧会话第 ${i} 轮：整理日志输出`.repeat(4), steps: [{ model: "claude-sonnet-4-5", u: [500, 80, 0, 0], text: "整理好了。".repeat(20) }],
+})));
+writeFileSync(join(home, ".claude/projects/-w-clean/busy.jsonl"), cu("busy-u", now0 - 15_000, "正在跑的任务：迁移数据库", "/w/clean") + line({ type: "ai-title", aiTitle: "运行中的会话" }));
+// Turn-end notifications: two more idle sessions that the test flips work → idle.
+for (const id of ["notify2", "notify3"]) writeClaude("-w-notify", id, "/w/notify", `通知测试 ${id}`, [{ ts: now0 - 3_600_000, prompt: "准备好了吗", steps: [{ model: "claude-sonnet-4-5", u: [100, 10, 0, 0] }] }]);
+// Read-only daemon: its own small home.
+mkdirSync(join(roHome, ".claude/projects/-w-ro"), { recursive: true });
+writeFileSync(join(roHome, ".claude/projects/-w-ro/ro-1.jsonl"),
+  cu("r1", now0 - DAY, "只读模式下的会话", "/w/ro") + ca("r2", now0 - DAY + 2000, [{ type: "text", text: "好的。" }], "end_turn", "claude-sonnet-4-5", cuse([400, 50, 0, 0])));
+
 // ---------------------------------------------------------------- processes
 const procs = [];
+// Adapter location overrides must not point the test daemons at real data.
+const SCRUB = ["CLAUDE_CONFIG_DIR", "CODEX_HOME", "KIMI_CODE_HOME", "COPILOT_HOME", "OPENCLAW_STATE_DIR", "CODEBUDDY_CONFIG_DIR", "XDG_DATA_HOME", "XDG_CONFIG_HOME",
+  "UNIFLO_DATA_DIR", "UNIFLO_CONFIG_DIR", "UNIFLO_CACHE_DIR", "UNIFLO_TRASH_DIR"];
 function start(cmd, args, env = {}) {
-  const p = spawn(cmd, args, { env: { ...process.env, ...env }, stdio: ["ignore", "ignore", "pipe"] });
+  const e = { ...process.env, ...env };
+  if (env.UNIFLO_HOME) for (const k of SCRUB) if (!(k in env)) delete e[k];
+  const p = spawn(cmd, args, { env: e, stdio: ["ignore", "ignore", "pipe"] });
   let err = "";
   p.stderr.on("data", (d) => (err = (err + d).slice(-4000)));
   p.lastErr = () => err;
@@ -123,6 +200,10 @@ async function until(fn, ms, what) {
     await sleep(50);
   }
 }
+const apiJson = async (base, path) => {
+  const r = await fetch(`${base}${path}${path.includes("?") ? "&" : "?"}token=${TOKEN}`);
+  return r.json();
+};
 
 // ---------------------------------------------------------------- scenarios
 async function load(url) {
@@ -130,6 +211,11 @@ async function load(url) {
   await cdp.send("Page.navigate", { url });
   await until(() => cdp.eval("document.readyState === 'complete'"), 10_000, "page load");
 }
+const waitFor = (expr, ms = 8_000, what = expr) => until(() => cdp.eval(expr), ms, what);
+const click = (sel) => cdp.eval(`(() => { const n = document.querySelector(${JSON.stringify(sel)}); if (!n) return false; n.click(); return true; })()`);
+const shot = async (name) => writeFileSync(join(SHOTS, name), Buffer.from((await cdp.send("Page.captureScreenshot", { format: "png" })).data, "base64"));
+const scheme = (value) => cdp.send("Emulation.setEmulatedMedia", { features: value ? [{ name: "prefers-color-scheme", value }] : [] });
+const viewport = (width, height, mobile = false) => cdp.send("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 2, mobile });
 
 const allChecksOk = `(() => { const r = [...document.querySelectorAll('[data-check]')];
   return r.length >= 10 && r.every((x) => x.dataset.ok === 'true'); })()`;
@@ -142,15 +228,15 @@ async function runTransport(t) {
   await load(`${api}/demo?token=${TOKEN}&transport=${t}&select=claude:sess-1`);
   try {
     await until(() => cdp.eval(allChecksOk), 10_000, "self-check");
-    report(`[${t}] all 10 endpoint checks pass`, true);
+    report(`[${t}] all endpoint checks pass`, true, `${await cdp.eval(`document.querySelectorAll('[data-check]').length`)} checks`);
   } catch {
-    report(`[${t}] all 10 endpoint checks pass`, false, JSON.stringify(await cdp.eval(badChecks)));
+    report(`[${t}] all endpoint checks pass`, false, JSON.stringify(await cdp.eval(badChecks)));
   }
   const rows = await cdp.eval(`[...document.querySelectorAll('[data-key]')].map((n) => n.dataset.key + '=' + n.dataset.status)`);
   const codexWork = rows.includes(`codex:${CODEX_ID}=work`);
   const allHarnesses = ["claude:sess-1=", "omp:omp1=", "codex:"].every((k) => rows.some((r) => r.startsWith(k)));
   const sub = rows.filter((r) => r.startsWith("claude:")).length >= 2;
-  report(`[${t}] list: claude + sub-agent + omp + codex, codex working`, allHarnesses && sub && codexWork, rows.join(" "));
+  report(`[${t}] list: claude + sub-agent + omp + codex, codex working`, allHarnesses && sub && codexWork, `${rows.length} rows`);
   if (t === "sse") await showcase();
   await until(() => cdp.eval(`${evCount} >= 150`), 5_000, "first page").catch(() => {});
   const first = await cdp.eval(evCount);
@@ -184,8 +270,7 @@ async function runTransport(t) {
   const idle = await until(() => cdp.eval(`${rowStatus("claude:sess-1")} === 'idle'`), 3_000, "idle").catch(() => false);
   report(`[${t}] turn end flips to idle`, !!idle);
 
-  const shot = await cdp.send("Page.captureScreenshot", { format: "png" });
-  writeFileSync(join(SHOTS, `${t}.png`), Buffer.from(shot.data, "base64"));
+  await shot(`${t}.png`);
   report(`[${t}] no page errors`, cdp.errors.length === 0, cdp.errors.slice(0, 3).join(" | "));
 }
 
@@ -196,8 +281,6 @@ async function showcase() {
   report("[sse] markdown, code block, reasoning and paired tool cards render", !!rich);
   const paired = await cdp.eval(`[...document.querySelectorAll('#timeline .tool')].filter((n) => n.querySelector('[data-kind=tool_result]')).length`);
   report("[sse] tool results fold into their call cards", paired >= 3, `${paired} paired`);
-  const shot = async (name) => writeFileSync(join(SHOTS, name), Buffer.from((await cdp.send("Page.captureScreenshot", { format: "png" })).data, "base64"));
-  const scheme = (value) => cdp.send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value }] });
   await scheme("dark");
   await cdp.eval(`[...document.querySelectorAll('.tool > summary')].find((s) => s.textContent.includes('cargo test'))?.click();
     [...document.querySelectorAll('#timeline [data-kind=user_message]')].find((n) => n.textContent.includes('/demo'))?.scrollIntoView({ block: 'start' });
@@ -208,13 +291,13 @@ async function showcase() {
   await sleep(300);
   await shot("showcase-light.png");
   await scheme("dark");
-  await cdp.eval(`document.querySelector('[data-key^="codex:"]').click(); true`);
+  await cdp.eval(`document.querySelector('[data-key^="codex:${CODEX_ID}"]').click(); true`);
   await until(() => cdp.eval(`!!document.querySelector('#timeline .tool .spin')`), 5_000, "running tool").catch(() => {});
   await sleep(400);
   await shot("working-dark.png");
   const running = await cdp.eval(`!!document.querySelector('#timeline .tool .spin') && document.querySelector('#detail-head .badge.work') !== null`);
   report("[sse] working session shows running tool + work badge", running);
-  await cdp.send("Emulation.setEmulatedMedia", { features: [] });
+  await scheme(null);
   await cdp.eval(`document.querySelector('[data-key="claude:sess-1"]').click(); true`);
 }
 
@@ -228,10 +311,656 @@ async function runCrossOrigin() {
   }
   const omp = await until(() => cdp.eval(`${hasText("list files")} && ${hasText("bash")}`), 3_000, "omp transcript").catch(() => false);
   report("[cross-origin] omp transcript rendered", !!omp);
-  const shot = await cdp.send("Page.captureScreenshot", { format: "png" });
-  writeFileSync(join(SHOTS, "cross-origin.png"), Buffer.from(shot.data, "base64"));
+  await shot("cross-origin.png");
   report("[cross-origin] no page errors", cdp.errors.length === 0, cdp.errors.slice(0, 3).join(" | "));
 }
+
+// The two copies of the page are one file, and the daemon under test serves exactly it.
+async function runIdentity() {
+  const page = readFileSync(join(ROOT, "examples/web/index.html"));
+  const copy = readFileSync(join(ROOT, "crates/uniflo-gateway/src/index.html"));
+  report("[page] examples/web/index.html equals the gateway's embedded copy", page.equals(copy), `${page.length} bytes`);
+  const served = Buffer.from(await (await fetch(`${api}/demo?token=${TOKEN}`)).arrayBuffer());
+  report("[page] daemon /demo serves that page", served.equals(page), served.equals(page) ? "" : "rebuild the release binary");
+}
+
+async function runIcons() {
+  const hs = await apiJson(api, "/v1/harnesses");
+  const claudeH = hs.find((h) => h.id === "claude");
+  const svg = await fetch(`${api}${claudeH?.icon}?token=${TOKEN}`);
+  const body = await svg.text();
+  report("[icons] /v1/harnesses carries icon; icon.svg is image/svg+xml", claudeH?.icon === "/v1/harnesses/claude/icon.svg" && svg.headers.get("content-type") === "image/svg+xml" && body.startsWith("<svg"),
+    `${hs.filter((h) => h.icon).length} with icon, ${hs.filter((h) => !h.icon).length} without`);
+  const missing = Object.keys(FIXTURES).filter((id) => !hs.some((h) => h.id === id && h.sessions > 0));
+  report("[icons] synthetic data covers every supported harness", hs.length >= 33 && !missing.length, missing.join(",") || `${hs.length} harnesses`);
+  await load(`${api}/demo?token=${TOKEN}`);
+  await waitFor(`document.querySelectorAll('.row[data-key]').length >= ${Object.keys(FIXTURES).length}`, 10_000, "rows");
+  const spec = JSON.stringify(hs.map((h) => [h.id, !!h.icon]));
+  const check = `(() => ${spec}.map(([id, has]) => {
+    const row = document.querySelector('.row[data-key^="' + id + ':"]');
+    if (!row) return id + ':missing';
+    const use = row.querySelector('.ricon svg.hi use'), letters = row.querySelector('.ricon .hi.hl');
+    if (has) return use && use.getAttribute('href') === '#hi-' + id ? '' : id + ':no-icon';
+    return letters && /^[A-Za-z]{2}$/.test(letters.textContent) ? '' : id + ':no-letters';
+  }).filter(Boolean))()`;
+  const bad = await cdp.eval(check);
+  report("[icons] every row shows its harness icon, letter block when there is none", bad.length === 0, bad.join(" ") || `${hs.filter((h) => h.icon).length} icons + ${hs.filter((h) => !h.icon).length} letter blocks`);
+  const NEW_ICONS = ["pi", "omp", "workbuddy", "factory", "reasonix", "dsh", "zcode", "craft"], LETTERS = ["crosery", "prime", "kodu"];
+  const wrong = [...NEW_ICONS.filter((id) => !hs.find((h) => h.id === id)?.icon), ...LETTERS.filter((id) => hs.find((h) => h.id === id)?.icon)];
+  const fallbacks = await cdp.eval(`${JSON.stringify(NEW_ICONS)}.filter((id) => document.querySelector('.row[data-key^="' + id + ':"] .ricon .hi.hl'))`);
+  report("[icons] pi, omp, workbuddy, factory, reasonix, dsh, zcode, craft draw brand icons; only crosery, prime, kodu keep the letter block", !wrong.length && !fallbacks.length, [...wrong, ...fallbacks].join(" ") || "8 icons, 3 letter blocks");
+  for (const theme of ["dark", "light"]) {
+    await scheme(theme);
+    await sleep(150);
+    const low = await cdp.eval(`[...document.querySelectorAll('.ricon .hi')].map((n) => [n.closest('.row').dataset.key, __e2e.contrastOf(n, n.classList.contains('hl') ? null : n.closest('.row'))]).filter(([, c]) => c < 3)`);
+    report(`[icons] icons stay visible in ${theme} theme (≥ 3:1 against the row)`, low.length === 0, low.slice(0, 4).map(([k, c]) => `${k} ${c.toFixed(2)}`).join(" "));
+    await shot(`icons-${theme}.png`);
+  }
+  await scheme(null);
+}
+
+const usageMatches = (domRows, apiRows, keys) => {
+  const byKey = new Map(apiRows.map((r) => [r.key, r]));
+  const bad = [];
+  for (const [key, vals] of domRows) {
+    const r = byKey.get(key);
+    if (!r) { bad.push(`${key}:not-in-api`); continue; }
+    for (const k of keys) {
+      const want = k === "cost_usd" ? (r.cost_usd ?? "") : r[k];
+      const got = k === "cost_usd" ? (vals[k] === "" ? "" : Number(vals[k])) : Number(vals[k]);
+      if (k === "cost_usd" && want !== "" && Math.abs(got - want) > 1e-9) bad.push(`${key}.${k}`);
+      else if (k !== "cost_usd" && got !== want) bad.push(`${key}.${k}:${got}≠${want}`);
+    }
+  }
+  if (domRows.length !== apiRows.length) bad.push(`rows ${domRows.length}≠${apiRows.length}`);
+  return bad;
+};
+const METRIC_KEYS = ["sessions", "prompts", "steps", "input", "output", "cache_read", "cache_write", "cost_usd", "unpriced_steps"];
+const domTable = `[...document.querySelectorAll('#u-table tbody tr[data-depth="0"]')].map((tr) => [tr.dataset.key, Object.fromEntries([...tr.querySelectorAll('td[data-k]')].map((td) => [td.dataset.k, td.dataset.v]))])`;
+const domKpi = `Object.fromEntries([...document.querySelectorAll('#u-kpis [data-k]')].map((n) => [n.dataset.k, n.dataset.v]))`;
+async function usageAgrees(label) {
+  const q = await cdp.eval(`document.querySelector('#v-usage').dataset.query`);
+  const kq = await cdp.eval(`document.querySelector('#v-usage').dataset.kpiQuery`);
+  const [table, kpi] = await Promise.all([apiJson(api, `/v1/usage?${q}`), apiJson(api, `/v1/usage?${kq}`)]);
+  const bad = usageMatches(await cdp.eval(domTable), table.rows, METRIC_KEYS);
+  const foot = await cdp.eval(`Object.fromEntries([...document.querySelectorAll('#u-table tfoot td[data-k]')].map((td) => [td.dataset.k, td.dataset.v]))`);
+  bad.push(...usageMatches([["total", foot]], [table.totals], METRIC_KEYS).filter((x) => !x.startsWith("rows")));
+  const k = await cdp.eval(domKpi);
+  for (const f of ["input", "output", "cache_read", "cache_write", "steps", "sessions", "unpriced_steps"]) if (Number(k[f]) !== kpi.totals[f]) bad.push(`kpi.${f}`);
+  if (Math.abs(Number(k.cost_usd) - kpi.totals.cost_usd) > 1e-9) bad.push("kpi.cost");
+  report(`[usage] ${label}: KPI and table equal /v1/usage`, bad.length === 0, bad.slice(0, 6).join(" ") || `${table.rows.length} rows · ${q}`);
+  return { q, table };
+}
+async function runUsage() {
+  await load(`${api}/demo?token=${TOKEN}&view=usage`);
+  await waitFor(`!!document.querySelector('#v-usage').dataset.query && !document.querySelector('#v-usage').hidden`, 10_000, "usage view");
+  const today = new Date(), d7 = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 6);
+  const since7 = `${d7.getFullYear()}-${String(d7.getMonth() + 1).padStart(2, "0")}-${String(d7.getDate()).padStart(2, "0")}`;
+  await click('#u-range [data-range="7d"]');
+  await waitFor(`document.querySelector('#v-usage').dataset.query.includes('since=${since7}')`, 5_000, "7d");
+  await click('#u-group [data-group="model"]');
+  await waitFor(`document.querySelector('#v-usage').dataset.query.includes('group_by=model')`, 5_000, "model group");
+  await usageAgrees("7d by model");
+  const unpricedBtn = await click("#u-unpriced-btn");
+  const models = unpricedBtn ? await waitFor(`!document.querySelector('#u-unpriced').hidden && [...document.querySelectorAll('#u-unpriced-list [data-model]')].map((n) => n.dataset.model)`, 3_000, "unpriced list").catch(() => []) : [];
+  const kq = await cdp.eval(`document.querySelector('#v-usage').dataset.kpiQuery`);
+  const want = (await apiJson(api, `/v1/usage?${kq}`)).rows.filter((r) => r.unpriced_steps > 0).map((r) => r.key).sort();
+  report("[usage] unpriced steps expand into the unpriced model list", unpricedBtn && JSON.stringify([...models].sort()) === JSON.stringify(want) && want.includes("demo-model"), models.join(","));
+  const note = await cdp.eval(`document.querySelector('#u-kpis [data-k=cost_usd]').textContent.includes('API 等价成本') && [...document.querySelectorAll('#u-table th')].some((th) => th.textContent.includes('API 等价'))`);
+  report('[usage] costs are labelled "API 等价成本"', note);
+  await click('#u-group [data-group="dir"]');
+  await waitFor(`document.querySelector('#v-usage').dataset.query.includes('group_by=dir') && !!document.querySelector('#u-table [data-under="/w/alpha"]')`, 5_000, "dir group");
+  await click('#u-table [data-under="/w/alpha"]');
+  await waitFor(`document.querySelector('#v-usage').dataset.query.includes('under=%2Fw%2Falpha&') && !!document.querySelector('#u-table [data-under="/w/alpha/api"]')`, 5_000, "drill 1");
+  await click('#u-table [data-under="/w/alpha/api"]');
+  await waitFor(`document.querySelector('#v-usage').dataset.query.includes('under=%2Fw%2Falpha%2Fapi&')`, 5_000, "drill 2");
+  const crumbs = await cdp.eval(`[...document.querySelectorAll('#u-crumbs button')].map((b) => b.dataset.under + '|' + (b.getAttribute('aria-current') || ''))`);
+  report("[usage] directory drill-down two levels shows the breadcrumb", JSON.stringify(crumbs) === JSON.stringify(["|", "/w/alpha|", "/w/alpha/api|page"]), crumbs.join(" › "));
+  await click('#u-table [data-sort="cost_usd"]');
+  await waitFor(`location.search.includes('sort=cost_usd') && location.search.includes('asc=1')`, 3_000, "sort");
+  const order = await cdp.eval(`[...document.querySelectorAll('#u-table tbody tr[data-depth="0"] td[data-k=cost_usd]')].map((td) => td.dataset.v === '' ? -1 : Number(td.dataset.v))`);
+  report("[usage] cost column sorts ascending", order.length >= 2 && order.every((v, i) => !i || order[i - 1] <= v), order.join(" ≤ "));
+  const before = { url: await cdp.eval("location.search"), keys: await cdp.eval(`[...document.querySelectorAll('#u-table tbody tr')].map((tr) => tr.dataset.key).join()`) };
+  await cdp.send("Page.reload");
+  await waitFor(`document.readyState === 'complete' && (document.querySelector('#v-usage').dataset.query || '').includes('group_by=dir')`, 10_000, "reload");
+  const after = await cdp.eval(`({ url: location.search, keys: [...document.querySelectorAll('#u-table tbody tr')].map((tr) => tr.dataset.key).join(),
+    visible: !document.querySelector('#v-usage').hidden, range: document.querySelector('#u-range [aria-pressed=true]')?.dataset.range,
+    group: document.querySelector('#u-group [aria-pressed=true]')?.dataset.group, crumbs: [...document.querySelectorAll('#u-crumbs button')].map((b) => b.dataset.under).join(),
+    sort: document.querySelector('#u-table th[aria-sort]')?.getAttribute('aria-sort') + ':' + document.querySelector('#u-table th[aria-sort] button')?.dataset.sort })`);
+  const restored = after.url === before.url && after.keys === before.keys && after.visible && after.range === "7d" && after.group === "dir"
+    && after.crumbs === ",/w/alpha,/w/alpha/api" && after.sort === "ascending:cost_usd";
+  report("[usage] refresh restores view, range, grouping, drill-down and sort", restored, after.url);
+  await usageAgrees("after refresh, dir /w/alpha/api");
+  await shot("usage.png");
+  report("[usage] no page errors", cdp.errors.length === 0, cdp.errors.slice(0, 3).join(" | "));
+}
+
+async function runDetail() {
+  const key = "claude:proj-0";
+  await cdp.send("Browser.grantPermissions", { permissions: ["clipboardReadWrite", "clipboardSanitizedWrite"], origin: api }).catch(() => {});
+  await load(`${api}/demo?token=${TOKEN}&select=${enc(key)}`);
+  await waitFor(`!!document.querySelector('#steps-toggle') && !!document.querySelector('#ctx-bar')`, 8_000, "detail head");
+  await click("#steps-toggle");
+  const detail = await apiJson(api, `/v1/sessions/${enc(key)}/usage`);
+  await waitFor(`document.querySelectorAll('#steps-table tbody tr').length === ${detail.steps.length}`, 5_000, "steps table");
+  const dom = await cdp.eval(`[...document.querySelectorAll('#steps-table tbody tr')].map((tr) => [tr.dataset.event, Object.fromEntries([...tr.querySelectorAll('td[data-k]')].map((td) => [td.dataset.k, td.dataset.v]))])`);
+  const bad = [];
+  dom.forEach(([ev, v], i) => {
+    const s = detail.steps[i];
+    if (ev !== s.event) bad.push(`#${i}.event`);
+    for (const k of ["input", "output", "cache_read", "cache_write", "reasoning"]) if (Number(v[k]) !== s[k]) bad.push(`#${i}.${k}`);
+    for (const k of ["cost_usd", "context_pct"]) if (Math.abs(Number(v[k]) - s[k]) > 1e-9) bad.push(`#${i}.${k}`);
+  });
+  report("[detail] per-step table equals /v1/sessions/{key}/usage", detail.steps.length >= 2 && bad.length === 0, bad.join(" ") || `${detail.steps.length} steps`);
+  const pct = Number(await cdp.eval(`document.querySelector('#ctx-bar').dataset.pct`));
+  const lastPct = detail.steps.at(-1).context_pct;
+  report("[detail] context bar shows the last step's share", Math.abs(pct - lastPct) < 1e-9, `${pct.toFixed(2)}%`);
+  const head = await cdp.eval(`document.querySelector('#sh-usage').textContent`);
+  report('[detail] session totals show five token kinds and "API 等价成本"', ["输入", "输出", "缓存读", "缓存写", "思考", "API 等价成本"].every((t) => head.includes(t)));
+  await click("#resume-btn");
+  await waitFor(`!document.querySelector('#menu').hidden`, 3_000, "resume menu");
+  const items = await cdp.eval(`[...document.querySelectorAll('#menu button')].map((b) => b.textContent.trim())`);
+  const mac = process.platform === "darwin";
+  report("[detail] resume menu offers \"在终端打开\" on macOS", mac ? items.includes("在 Terminal 中打开") : !items.some((t) => t.includes("终端")), items.join(" / "));
+  await cdp.send("Emulation.setFocusEmulationEnabled", { enabled: true }).catch(() => {});
+  await click('#menu [data-act="copy-resume"]');
+  await sleep(300);
+  const clip = await cdp.eval(`navigator.clipboard.readText()`).catch((e) => "ERR " + e.message);
+  const resume = await apiJson(api, `/v1/sessions/${enc(key)}/resume`);
+  report("[detail] copy resume command puts the resume command on the clipboard", clip === resume.command && !!resume.command, clip);
+  // Never open a real terminal window: intercept the write request inside the page.
+  await cdp.eval(`window.__term = []; const f0 = window.fetch; window.fetch = (u, o) => { if (String(u).includes('/open-terminal')) {
+    window.__term.push({ url: String(u), method: o?.method, write: o?.headers?.['X-Uniflo-Write'] });
+    if (window.__termFail) return Promise.resolve(new Response(JSON.stringify({ error: '无法打开 Terminal：stub', reason: '无法打开 Terminal：stub', command: 'cd /w && claude --resume s1' }), { status: 500, headers: { 'content-type': 'application/json' } }));
+    return Promise.resolve(new Response(JSON.stringify({ opened: true, terminal: 'terminal' }), { status: 200, headers: { 'content-type': 'application/json' } })); }
+    return f0(u, o); }; true`);
+  if (mac) {
+    await click("#resume-btn");
+    await waitFor(`!document.querySelector('#menu').hidden`, 3_000, "resume menu again");
+    await click('#menu [data-term="terminal"]');
+    const term = await waitFor(`window.__term.length && window.__term[0]`, 3_000, "open-terminal call").catch(() => null);
+    report("[detail] \"在 Terminal 中打开\" posts open-terminal with X-Uniflo-Write (stubbed, no window)",
+      !!term && term.method === "POST" && term.write === "1" && term.url.includes(`/v1/sessions/${enc(key)}/open-terminal`) && term.url.includes("terminal=terminal"), term?.url || "");
+  }
+  if (mac) {
+    await cdp.eval(`window.__termFail = true`);
+    await click("#resume-btn");
+    await waitFor(`!document.querySelector('#menu').hidden`, 3_000, "resume menu for failure");
+    await click('#menu [data-term="terminal"]');
+    const failed = await waitFor(`document.querySelector('#toasts .toast.sticky [data-act="copy-recover"]') && document.querySelector('#toasts .toast.sticky').textContent`, 3_000, "failure toast").catch(() => "");
+    await sleep(3_600);
+    const kept = await cdp.eval(`!!document.querySelector('#toasts .toast.sticky')`);
+    await click('#toasts .toast.sticky [data-act="copy-recover"]');
+    await sleep(300);
+    const clip2 = await cdp.eval(`navigator.clipboard.readText()`).catch((e) => "ERR " + e.message);
+    report("[detail] open-terminal failure keeps a toast with the reason and a working \"复制恢复命令\"",
+      failed.includes("无法打开 Terminal：stub") && kept && clip2 === "cd /w && claude --resume s1", `${failed} | kept=${kept} | ${clip2}`);
+    await cdp.eval(`window.__termFail = false`);
+  }
+  await shot("detail.png");
+  report("[detail] no page errors", cdp.errors.length === 0, cdp.errors.slice(0, 3).join(" | "));
+}
+
+async function runFts() {
+  await until(async () => { const s = await apiJson(api, "/v1/stats"); return s.fts && !s.fts.indexing; }, 30_000, "fts index").catch(() => {});
+  await load(`${api}/demo?token=${TOKEN}&view=search`);
+  await waitFor(`!document.querySelector('#v-search').hidden`, 5_000, "search view");
+  await cdp.eval(`document.querySelector('#s-q').focus(); true`);
+  await cdp.send("Input.insertText", { text: SEARCH_WORD });
+  await cdp.eval(`document.querySelector('#s-q').form.requestSubmit(); true`);
+  const hit = await waitFor(`(() => { const h = document.querySelector('.hit[data-event]'); return h && { s: h.dataset.session, e: h.dataset.event, mark: h.querySelector('mark')?.textContent }; })()`, 8_000, "search hit").catch(() => null);
+  const api_ = await apiJson(api, `/v1/search?q=${enc(SEARCH_WORD)}`);
+  const want = api_.results[0];
+  report("[search] hit shows a highlighted snippet in its session group",
+    !!hit && hit.s === "claude:search-target" && hit.e === want?.hits[0]?.event && hit.mark === SEARCH_WORD, JSON.stringify(hit));
+  report("[search] query is in the URL", (await cdp.eval("location.search")).includes(`sq=${enc(SEARCH_WORD).replace(/%20/g, "+")}`));
+  await click(".hit[data-event]");
+  const at = await waitFor(`(() => { const n = document.querySelector('#timeline .hit-target[data-id="${hit?.e}"]'); if (!n) return null;
+    const r = n.getBoundingClientRect(), t = document.querySelector('#timeline').getBoundingClientRect();
+    return { inView: r.top >= t.top - 1 && r.bottom <= t.bottom + 1, before: !!n.previousElementSibling?.dataset?.id, after: !!n.nextElementSibling?.dataset?.id,
+      selected: document.querySelector('.row.sel')?.dataset.key, view: !document.querySelector('#app').hidden, url: location.search }; })()`, 8_000, "jump").catch(() => null);
+  report("[search] clicking the hit opens the session, scrolls to the event and highlights it",
+    !!at && at.inView && at.before && at.after && at.selected === "claude:search-target" && at.view && at.url.includes(`at=${hit?.e}`), JSON.stringify(at));
+  await shot("search-jump.png");
+  report("[search] no page errors", cdp.errors.length === 0, cdp.errors.slice(0, 3).join(" | "));
+}
+
+// The view has to explain itself and say what state the index is in (ready / building / off).
+async function runSearchHelp() {
+  await load(`${api}/demo?token=${TOKEN}&view=search`);
+  await waitFor(`!document.querySelector('#v-search').hidden && document.querySelector('#s-index').dataset.state === 'ready'`, 10_000, "index ready state");
+  const help = await cdp.eval(`({ text: document.querySelector('#v-search .page-h').textContent, chips: [...document.querySelectorAll('.s-ex [data-example]')].map((c) => c.dataset.example),
+    index: document.querySelector('#s-index').textContent })`);
+  report("[search-help] the view says what it searches and how it differs from the sidebar search",
+    help.text.includes("会话里说过的话") && help.text.includes("侧栏的搜索框") && help.text.includes("工具参数与工具输出"), help.text.slice(0, 80));
+  report("[search-help] ready state names the index and its size", /全文索引已就绪 · \d+(\.\d+)? (KB|MB|GB)/.test(help.index), help.index);
+  report("[search-help] two example queries are offered", help.chips.length === 2 && help.chips[1].startsWith('"'), help.chips.join(" | "));
+  const home = await cdp.eval(`({ vis: !document.querySelector('#s-home').hidden, sec: document.querySelector('#h-sessions h2').textContent, rows: document.querySelectorAll('#h-sessions .hrow[data-open]').length,
+    running: [...document.querySelectorAll('#h-sessions .hrow .age.work')].length, tries: document.querySelectorAll('#s-home .s-try').length,
+    idx: document.querySelector('#h-index').textContent, syn: document.querySelector('#s-home .hsyn').textContent })`);
+  const runningNow = (await apiJson(api, "/v1/sessions?q=s:work&limit=50")).length;
+  report("[search-home] empty state lists what is running (or recent sessions) as clickable rows",
+    home.vis && home.rows > 0 && (runningNow ? home.sec.includes("正在运行") && home.running > 0 : home.sec.includes("最近会话")), `${home.sec} · ${home.rows} rows · ${runningNow} running`);
+  report("[search-home] empty state has the index card, several examples and the syntax cheat sheet",
+    /已索引会话/.test(home.idx) && /索引大小/.test(home.idx) && home.tries >= 6 && home.syn.includes("-a") && home.syn.includes("h:claude") && home.syn.includes("since:7d"), `${home.tries} examples`);
+  for (const [w, h, mobile] of [[1480, 920, false], [390, 844, true]]) {
+    await viewport(w, h, mobile);
+    for (const theme of ["dark", "light"]) {
+      await scheme(theme);
+      await sleep(200);
+      const audit = await cdp.eval(`__e2e.audit('#v-search')`);
+      report(`[search-home] ${w}px ${theme}: no overflow, no overlap, AA contrast`, !audit.overflow.length && !audit.overlap.length && !audit.contrast.length, [...audit.overflow, ...audit.overlap, ...audit.contrast].slice(0, 4).join(" | "));
+      await shot(`search-home-${w}-${theme}.png`);
+    }
+  }
+  await viewport(1480, 920);
+  await scheme(null);
+  await click('#h-sessions .hrow[data-open]');
+  const opened = await waitFor(`!document.querySelector('#app').hidden && !!document.querySelector('.row.sel')`, 5_000, "open session").catch(() => false);
+  report("[search-home] clicking a session row opens it", !!opened);
+  await load(`${api}/demo?token=${TOKEN}&view=search`);
+  await waitFor(`!document.querySelector('#s-home').hidden && document.querySelector('#s-index').dataset.state === 'ready'`, 10_000, "home again");
+  await click('#s-home .s-try[data-filter="since:7d"]');
+  const withFilter = await waitFor(`(() => { const st = document.querySelector('#s-status').textContent; return st && !st.startsWith('搜索中') && !st.startsWith('输入要找的词') ? { q: document.querySelector('#s-q').value, f: document.querySelector('#s-f').value } : null; })()`, 8_000, "try chip").catch(() => null);
+  report("[search-home] clicking a \"试试这些\" example fills query and filter and runs the search", withFilter?.q === "refactor" && withFilter?.f === "since:7d", JSON.stringify(withFilter));
+  await load(`${api}/demo?token=${TOKEN}&view=search`);
+  await waitFor(`!document.querySelector('#h-recent').hidden`, 8_000, "recent searches").catch(() => {});
+  const rec = await cdp.eval(`({ shown: !document.querySelector('#h-recent').hidden, text: document.querySelector('#h-recent').textContent })`);
+  report("[search-home] recent searches are kept in this browser and listed", rec.shown && rec.text.includes("refactor"), rec.text.slice(0, 60));
+  await click('#h-recent [data-clear-recent]');
+  report("[search-home] \"清除\" empties the recent searches", await cdp.eval(`document.querySelector('#h-recent').hidden && !localStorage.getItem('uniflo.recentSearches') || document.querySelector('#h-recent').hidden`));
+  await waitFor(`document.querySelector('#s-index').dataset.state === 'ready'`, 5_000).catch(() => {});
+  await click('.s-ex [data-example]');
+  const ran = await waitFor(`(() => { const q = document.querySelector('#s-q').value, st = document.querySelector('#s-status').textContent;
+    return st && !st.startsWith('搜索中') && !st.startsWith('输入要找的词') ? { q, st, url: location.search } : null; })()`, 8_000, "example search").catch(() => null);
+  report("[search-help] clicking an example fills the input and runs the search",
+    !!ran && ran.q === help.chips[0] && ran.url.includes(`sq=${enc(help.chips[0])}`) && /个会话命中|没有找到/.test(ran.st + (await cdp.eval(`document.querySelector('#s-results').textContent`))), JSON.stringify(ran));
+  await shot("search-help.png");
+
+  // Building: stub /v1/stats so the progress, the "estimating" ETA and the switch to ready are deterministic.
+  await cdp.eval(`window.__done = 0; const f1 = window.fetch; window.fetch = async (u, o) => { const r = await f1(u, o);
+    if (!String(u).includes('/v1/stats')) return r;
+    const j = await r.json(); window.__done += 20; const building = window.__done < 100;
+    j.fts = { ...(j.fts || {}), indexing: building, progress: { done: Math.min(window.__done, 100), total: 100 } };
+    return new Response(JSON.stringify(j), { status: 200, headers: { 'content-type': 'application/json' } }); }; true`);
+  await cdp.eval(`document.querySelector('[data-view=sessions]').click(); true`);
+  await sleep(100);
+  await cdp.eval(`document.querySelector('[data-view=search]').click(); true`);
+  const first = await waitFor(`document.querySelector('#s-index[data-state=building]')?.textContent`, 5_000, "building state").catch(() => "");
+  report("[search-help] building state shows done/total and \"估算中\" before two samples", /20 \/ 100/.test(first) && first.includes("估算中") && first.includes("结果可能不全"), first.slice(0, 120));
+  const eta = await waitFor(`(() => { const t = document.querySelector('#s-index[data-state=building]')?.textContent || ''; return /剩余时间约/.test(t) ? t : null; })()`, 12_000, "eta").catch(() => "");
+  report("[search-help] ETA appears once the rate is known and the page refreshes by itself", /剩余时间约 \d+ (秒|分钟)/.test(eta), eta.slice(0, 120));
+  await shot("search-building.png");
+  const done = await waitFor(`document.querySelector('#s-index').dataset.state === 'ready' && document.querySelector('#s-index').textContent`, 15_000, "ready again").catch(() => "");
+  report("[search-help] the notice turns into the ready line when the index finishes", done.includes("全文索引已就绪"), done);
+
+  report("[search-help] no page errors", cdp.errors.length === 0, cdp.errors.slice(0, 3).join(" | "));
+  // Off (the page's own search self-check gets the expected 503 there): a daemon started with --no-fts.
+  await load(`${noFtsApi}/demo?token=${TOKEN}&view=search`);
+  await waitFor(`document.querySelector('#s-index').dataset.state === 'off'`, 10_000, "off state").catch(() => {});
+  const off = await cdp.eval(`({ text: document.querySelector('#s-index').textContent, q: document.querySelector('#s-q').disabled, chip: document.querySelector('.s-ex .chip').disabled })`);
+  report("[search-help] --no-fts daemon: says search is off and how to turn it on, and disables the form",
+    off.text.includes("全文检索未启用") && off.text.includes("--no-fts") && off.text.includes("重启守护进程") && off.q && off.chip, off.text.slice(0, 120));
+  await shot("search-off.png");
+}
+
+const METRICS = { sessions: (r) => r.sessions, prompts: (r) => r.prompts, tokens: (r) => r.input + r.output + r.cache_read + r.cache_write, cost: (r) => r.cost_usd || 0, steps: (r) => r.steps };
+async function runInsights() {
+  await load(`${api}/demo?token=${TOKEN}&view=insights`);
+  await waitFor(`document.querySelectorAll('#i-heat rect[data-day]').length > 300 && document.querySelectorAll('#i-ranks li').length > 0`, 10_000, "insights");
+  const since = await cdp.eval(`document.querySelector('#v-insights').dataset.since`);
+  const tz = await cdp.eval(`Intl.DateTimeFormat().resolvedOptions().timeZone`);
+  const q = (g, extra = "") => apiJson(api, `/v1/usage?group_by=${g}&since=${since}&tz=${enc(tz)}${extra}`);
+  const [day, wh, wd, hr] = await Promise.all([q("day"), q("weekday_hour"), q("weekday"), q("hour")]);
+  const cells = (sel, attr) => cdp.eval(`[...document.querySelectorAll('${sel}')].map((n) => [n.dataset.${attr}, Number(n.dataset.v)])`);
+  const compare = (dom, rows, f) => { const m = new Map(rows.map((r) => [r.key, f(r)])); return dom.filter(([k, v]) => Math.abs((m.get(k) || 0) - v) > 1e-9).map(([k]) => k); };
+  const nonzero = day.rows.filter((r) => r.key).length;
+  for (const metric of ["sessions", "tokens"]) {
+    if (metric !== "sessions") {
+      await click(`#i-metric [data-metric="${metric}"]`);
+      await waitFor(`location.search.includes('metric=${metric}')`, 3_000, metric);
+      await sleep(200);
+    }
+    const heat = await cells("#i-heat rect[data-day]", "day");
+    const badHeat = compare(heat, day.rows, METRICS[metric]);
+    const activeDom = heat.filter(([, v]) => v > 0).length;
+    report(`[insights] heatmap (${metric}) equals /v1/usage?group_by=day`, badHeat.length === 0 && activeDom === day.rows.filter((r) => METRICS[metric](r) > 0).length && nonzero >= 40,
+      badHeat.slice(0, 5).join(" ") || `${activeDom} active days of ${heat.length}`);
+    const badCells = compare(await cells("#i-punch rect[data-cell]", "cell"), wh.rows, METRICS[metric]);
+    const badWd = compare(await cells("#i-punch rect[data-weekday]", "weekday"), wd.rows, METRICS[metric]);
+    const badHr = compare(await cells("#i-punch rect[data-hour]", "hour"), hr.rows, METRICS[metric]);
+    report(`[insights] weekday × hour (${metric}) equals weekday_hour, weekday and hour groups`, !badCells.length && !badWd.length && !badHr.length,
+      [...badCells, ...badWd, ...badHr].slice(0, 5).join(" ") || `${wh.rows.length} cells`);
+  }
+  for (const rank of ["cost", "tokens"]) {
+    if (rank !== "cost") {
+      await click(`#i-rank [data-rank="${rank}"]`);
+      await waitFor(`location.search.includes('rank=${rank}')`, 3_000, rank);
+      await sleep(400);
+    }
+    const bad = [];
+    for (const g of ["project", "model", "harness"]) {
+      const r = await q(g, `&sort=${rank}&limit=5`);
+      const want = r.rows.filter((x) => x.key !== "(other)").map((x) => `${x.key}=${METRICS[rank](x)}`);
+      const got = await cdp.eval(`[...document.querySelectorAll('#i-ranks [data-dim="${g}"] li')].map((li) => li.dataset.key + '=' + Number(li.dataset.v))`);
+      if (JSON.stringify(got) !== JSON.stringify(want)) bad.push(`${g}: ${got.join(",")} ≠ ${want.join(",")}`);
+    }
+    report(`[insights] top-5 rankings by ${rank} equal the grouped /v1/usage`, bad.length === 0, bad.join(" | "));
+  }
+  await shot("insights.png");
+  report("[insights] no page errors", cdp.errors.length === 0, cdp.errors.slice(0, 3).join(" | "));
+}
+
+async function runNotify() {
+  await load(`${api}/demo?token=${TOKEN}`);
+  await waitFor(`!!document.querySelector('.row[data-key="claude:notify2"]') && document.querySelector('#conn').dataset.state === 'live'`, 8_000, "list");
+  await cdp.eval(`window.__notes = [];
+    window.Notification = class { constructor(title, opts) { this.title = title; this.opts = opts; window.__notes.push(this); } close() {}
+      static requestPermission() { window.Notification.permission = 'granted'; return Promise.resolve('granted'); } };
+    window.Notification.permission = 'default';
+    Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'hidden' }); true`);
+  const notes = () => cdp.eval(`window.__notes.map((n) => n.title)`);
+  const flip = async (file, key, id) => {
+    appendFileSync(file, cu(`${id}-u`, Date.now(), "再跑一轮", "/w/notify"));
+    await waitFor(`document.querySelector('.row[data-key="${key}"]')?.dataset.status === 'work'`, 4_000, `${key} work`);
+    appendFileSync(file, ca(`${id}-a`, Date.now(), [{ type: "text", text: "好了。" }], "end_turn", "claude-sonnet-4-5"));
+    await waitFor(`document.querySelector('.row[data-key="${key}"]')?.dataset.status === 'idle'`, 4_000, `${key} idle`);
+    await sleep(400);
+  };
+  const n2 = join(home, ".claude/projects/-w-notify/notify2.jsonl"), n3 = join(home, ".claude/projects/-w-notify/notify3.jsonl");
+  await flip(claudeFile, "claude:sess-1", "nt-a");
+  report("[notify] off by default: no notification", (await notes()).length === 0);
+  await click("#notify");
+  await waitFor(`document.querySelector('#notify').getAttribute('aria-pressed') === 'true'`, 3_000, "notify on");
+  await flip(claudeFile, "claude:sess-1", "nt-b");
+  await flip(claudeFile, "claude:sess-1", "nt-c");
+  await flip(n2, "claude:notify2", "nt-d");
+  const got = await notes();
+  report("[notify] one per session within 30 s, titled with the session title", JSON.stringify(got) === JSON.stringify(["网关新增 /demo 演示页", "通知测试 notify2"]), got.join(" | "));
+  const icon = await cdp.eval(`window.__notes[0]?.opts.icon.startsWith('data:image/svg+xml') && window.__notes[0].opts.body.includes('用时')`);
+  report("[notify] carries the harness icon and the turn duration", icon);
+  await cdp.eval(`window.__notes[1].onclick(); true`);
+  const opened = await waitFor(`document.querySelector('.row.sel')?.dataset.key === 'claude:notify2' && location.search.includes('select=claude:notify2')`, 3_000, "click opens").catch(() => false);
+  report("[notify] clicking the notification opens that session", !!opened);
+  await click("#notify");
+  await flip(n3, "claude:notify3", "nt-e");
+  report("[notify] switched off: no further notifications", (await notes()).length === 2);
+  report("[notify] no page errors", cdp.errors.length === 0, cdp.errors.slice(0, 3).join(" | "));
+}
+
+const openCombo = async (id) => {
+  await click(`#${id} + .ts-wrapper .ts-control`);
+  await waitFor(`document.querySelector('#${id}').tomselect.isOpen`, 3_000, `${id} open`);
+};
+const comboRows = (id) => cdp.eval(`[...document.querySelector('#${id}').tomselect.dropdown.querySelectorAll('.option')].map((o) => ({ v: o.dataset.value, name: o.querySelector('.h-name')?.textContent, sub: o.querySelector('.c-sub')?.textContent || '', sessions: o.querySelector('.h-count')?.textContent, cost: o.querySelector('.h-cost')?.textContent, icon: !!o.querySelector('svg.hi, .hi') }))`);
+const typeInto = async (text) => { await cdp.send("Input.insertText", { text }); await sleep(150); };
+const dayStr = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+async function runUsageControls() {
+  const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const since = dayStr(new Date(Date.now() - 29 * 86400_000));
+  const api30 = (g, extra = "") => apiJson(api, `/v1/usage?group_by=${g}&since=${since}&tz=${enc(tz)}${extra}`);
+  const money = (v) => (v == null ? "—" : v === 0 ? "$0.00" : v < 0.01 ? "<$0.01" : "$" + v.toLocaleString("en-US", { minimumFractionDigits: v >= 1000 ? 0 : 2, maximumFractionDigits: v >= 1000 ? 0 : 2 }));
+  const costOrder = (rows) => rows.filter((r) => r.key).sort((a, b) => (b.cost_usd ?? -1) - (a.cost_usd ?? -1) || b.sessions - a.sessions);
+  await scheme(null);
+  await viewport(1480, 920);
+  await load(`${api}/demo?token=${TOKEN}&view=usage&range=30d`);
+  await waitFor(`!!document.querySelector('#v-usage').dataset.query && !document.querySelector('#v-usage').hidden && ['u-h','u-m','u-p'].every((i) => document.querySelector('#' + i).tomselect.options[''] && Object.keys(document.querySelector('#' + i).tomselect.options).length > 1)`, 10_000, "usage filters");
+  const native = await cdp.eval(`[...document.querySelectorAll('#v-usage select, #v-usage input[type=date], #v-usage input[type=time], #v-usage input[type=checkbox], #v-usage input[type=number], #v-usage input[type=range]')].filter((n) => { const r = n.getBoundingClientRect(); return r.width > 2 && r.height > 2; }).map((n) => n.id || n.type)`);
+  const wrappers = await cdp.eval(`['u-h','u-m','u-p'].map((i) => !!document.querySelector('#' + i + ' + .ts-wrapper.combo'))`);
+  report("[usage-ui] filters are Tom Select combos; no visible native select or date input", native.length === 0 && wrappers.every(Boolean), `native=${native.join(",") || "none"} wrappers=${wrappers}`);
+
+  // harness: options ranked by cost with icon, sessions and cost
+  const hApi = costOrder((await api30("harness")).rows);
+  await openCombo("u-h");
+  const hRows = await comboRows("u-h");
+  const hGood = hRows.length === hApi.length + 1 && hRows[0].v === "" && hRows[0].name === "全部 harness"
+    && hApi.every((r, i) => hRows[i + 1].v === r.key && hRows[i + 1].sessions === String(r.sessions) && hRows[i + 1].cost === money(r.cost_usd) && hRows[i + 1].icon);
+  report("[usage-ui] harness options: brand icon, sessions and cost for the range, sorted by cost", hGood, hRows.slice(0, 4).map((r) => `${r.v}:${r.sessions}/${r.cost}`).join(" "));
+  await shot("usage-ui-harness-open.png");
+  await typeInto("claud");
+  const hNarrow = (await comboRows("u-h")).map((r) => r.v);
+  report("[usage-ui] typing narrows the harness options", hNarrow.length >= 1 && hNarrow.includes("claude") && hNarrow.length < hApi.length, hNarrow.join(","));
+  await cdp.eval(`document.querySelector('#u-h').tomselect.dropdown.querySelector('.option[data-value="claude"]').click(); true`);
+  await waitFor(`location.search.includes('uh=claude') && document.querySelector('#v-usage').dataset.query.includes('q=h%3Aclaude')`, 5_000, "harness chosen");
+  const claudeTotals = (await api30("model", "&q=h:claude")).totals, allTotals = (await api30("model")).totals;
+  await usageAgrees("harness = claude");
+  report("[usage-ui] choosing a harness moves the KPI totals to that harness", claudeTotals.sessions < allTotals.sessions && claudeTotals.sessions > 0, `claude ${claudeTotals.sessions} < all ${allTotals.sessions} sessions`);
+
+  // model
+  await openCombo("u-m");
+  const mRows = await comboRows("u-m");
+  await typeInto("opus");
+  const mNarrow = (await comboRows("u-m")).map((r) => r.v);
+  report("[usage-ui] model options list every model with cost; typing narrows", mRows.length > 2 && mRows.every((r) => r.cost) && mNarrow.length >= 1 && mNarrow.every((v) => v.includes("opus")), `${mRows.length} options · ${mNarrow.join(",")}`);
+  await cdp.eval(`document.querySelector('#u-m').tomselect.dropdown.querySelector('.option[data-value="claude-opus-4-5"]').click(); true`);
+  await waitFor(`document.querySelector('#v-usage').dataset.query.includes('model=claude-opus-4-5')`, 5_000, "model chosen");
+  await usageAgrees("claude + opus");
+  // reset both through the "全部" rows
+  await openCombo("u-m");
+  await cdp.eval(`document.querySelector('#u-m').tomselect.dropdown.querySelector('.option[data-value=""]').click(); true`);
+  await openCombo("u-h");
+  await cdp.eval(`document.querySelector('#u-h').tomselect.dropdown.querySelector('.option[data-value=""]').click(); true`);
+  await waitFor(`!location.search.includes('uh=') && !location.search.includes('um=') && !document.querySelector('#v-usage').dataset.query.includes('model=')`, 5_000, "reset");
+  report("[usage-ui] the 全部 rows reset the filters (URL and data)", true);
+
+  // projects: same basename, different paths
+  const pApi = costOrder((await api30("project")).rows);
+  await openCombo("u-p");
+  const pRows = await comboRows("u-p");
+  const webs = pRows.filter((r) => r.name === "web");
+  report("[usage-ui] same-named projects appear once each and differ by path", webs.length >= 2 && new Set(webs.map((r) => r.sub)).size === webs.length && webs.some((r) => r.sub === "/w/alpha/web") && webs.some((r) => r.sub === "/w/beta/web") && pRows.length === new Set(pRows.map((r) => r.v)).size && pRows.length === pApi.length + 1, JSON.stringify(webs.map((r) => r.sub)));
+  await shot("usage-ui-project-open.png");
+  await typeInto("beta");
+  const pNarrow = (await comboRows("u-p")).map((r) => r.v);
+  report("[usage-ui] project search matches the path", pNarrow.includes("/w/beta/web") && pNarrow.length < pApi.length && pNarrow.every((v) => v.includes("beta")), pNarrow.join(","));
+  await cdp.eval(`document.querySelector('#u-p').tomselect.dropdown.querySelector('.option[data-value="/w/beta/web"]').click(); true`);
+  await waitFor(`document.querySelector('#v-usage').dataset.query.includes('under=%2Fw%2Fbeta%2Fweb')`, 5_000, "project chosen");
+  const { table } = await usageAgrees("project = /w/beta/web");
+  const betaSessions = (await api30("model", "&under=%2Fw%2Fbeta%2Fweb")).totals.sessions;
+  report("[usage-ui] choosing a project scopes the KPI totals to its three sessions", betaSessions === 3 && table.totals.sessions === 3, `${betaSessions} sessions`);
+  await cdp.eval(`document.querySelector('#u-p').tomselect.setValue('', false); true`);
+  await waitFor(`!location.search.includes('up=')`, 5_000, "project reset");
+
+  // keyboard: arrow + enter picks an option
+  await openCombo("u-h");
+  await cdp.send("Input.dispatchKeyEvent", { type: "keyDown", key: "ArrowDown", code: "ArrowDown", windowsVirtualKeyCode: 40 });
+  await cdp.send("Input.dispatchKeyEvent", { type: "keyUp", key: "ArrowDown", code: "ArrowDown", windowsVirtualKeyCode: 40 });
+  await cdp.send("Input.dispatchKeyEvent", { type: "keyDown", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13, text: "\r" });
+  await cdp.send("Input.dispatchKeyEvent", { type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
+  await waitFor(`/[?&]uh=/.test(location.search)`, 3_000, "keyboard pick").catch(() => {});
+  const kb = await cdp.eval(`new URLSearchParams(location.search).get('uh')`);
+  report("[usage-ui] keyboard navigation picks an option", !!kb, `uh=${kb}`);
+  await cdp.eval(`document.querySelector('#u-h').tomselect.setValue('', false); true`);
+  await waitFor(`!location.search.includes('uh=')`, 5_000, "harness reset");
+
+  // date range
+  await click('#u-range [data-range="custom"]');
+  await waitFor(`!!document.querySelector('.air-datepicker.-active-')`, 3_000, "date picker opens");
+  const cells = await cdp.eval(`[...document.querySelectorAll('.air-datepicker.-active- .air-datepicker-cell.-day-:not(.-disabled-):not(.-other-month-)')].map((c) => c.dataset.year + '-' + String(+c.dataset.month + 1).padStart(2, '0') + '-' + String(c.dataset.date).padStart(2, '0'))`);
+  const a = cells[0], b = cells[Math.min(cells.length - 1, 3)];
+  await shot("usage-ui-date-open.png");
+  for (const d of [a, b]) await cdp.eval(`(() => { const [y, m, dd] = '${d}'.split('-').map(Number); const c = [...document.querySelectorAll('.air-datepicker.-active- .air-datepicker-cell.-day-')].find((n) => +n.dataset.year === y && +n.dataset.month === m - 1 && +n.dataset.date === dd && !n.classList.contains('-other-month-')); c.click(); return true; })()`);
+  const [from, to] = [a, b].sort();
+  await waitFor(`location.search.includes('range=custom') && location.search.includes('from=${from}') && location.search.includes('to=${to}')`, 5_000, "range in URL");
+  const until1 = dayStr(new Date(new Date(to + "T00:00:00").getTime() + 86400_000 + 3600_000));
+  await waitFor(`document.querySelector('#v-usage').dataset.query.includes('since=${from}') && document.querySelector('#v-usage').dataset.query.includes('until=${until1}')`, 5_000, "range in query");
+  await usageAgrees(`custom ${from}..${to}`);
+  const shown = await cdp.eval(`document.querySelector('#u-dates').value`);
+  report("[usage-ui] date picker applies a start-end range to URL, query and input", shown === `${from} 至 ${to}` && !(await cdp.eval(`!!document.querySelector('.air-datepicker.-active-')`)), shown);
+  const noDate = await cdp.eval(`document.querySelectorAll('#v-usage input[type=date]').length`);
+  report("[usage-ui] no native date input remains", noDate === 0);
+  report("[usage-ui] no page errors", cdp.errors.length === 0, cdp.errors.slice(0, 3).join(" | "));
+
+  // Evidence screenshots: dropdown and picker open, both themes, wide and narrow
+  for (const [w, h, mobile] of [[1480, 920, false], [390, 844, true]]) {
+    await viewport(w, h, mobile);
+    for (const theme of ["dark", "light"]) {
+      await scheme(theme);
+      await load(`${api}/demo?token=${TOKEN}&view=usage&range=30d`);
+      await waitFor(`!!document.querySelector('#v-usage').dataset.query && Object.keys(document.querySelector('#u-p').tomselect.options).length > 1`, 10_000, "usage ready");
+      await sleep(400);
+      await openCombo("u-p");
+      await sleep(250);
+      await shot(`usage-${w}-${theme}-project.png`);
+      await cdp.eval(`document.querySelector('#u-p').tomselect.close(); true`);
+      await click('#u-range [data-range="custom"]');
+      await waitFor(`!!document.querySelector('.air-datepicker.-active-')`, 3_000, "picker");
+      await sleep(400);
+      await shot(`usage-${w}-${theme}-date.png`);
+    }
+  }
+  await viewport(1480, 920);
+  await scheme(null);
+}
+
+async function runManage() {
+  // Keep `busy` inside its working window however long the earlier steps took.
+  appendFileSync(join(home, ".claude/projects/-w-clean/busy.jsonl"), cu("busy-u2", Date.now(), "还在迁移", "/w/clean"));
+  await load(`${api}/demo?token=${TOKEN}&view=manage&mq=${enc("in:/w/clean")}`);
+  await waitFor(`document.querySelector('#m-table tr[data-key="claude:cleanme"]')?.dataset.eligible === 'true' && document.querySelector('#m-table tr[data-key="claude:busy"]')?.dataset.eligible === 'false'`, 10_000, "manage list");
+  const row = await cdp.eval(`(() => { const r = document.querySelector('#m-table tr[data-key="claude:cleanme"]'); const b = document.querySelector('#m-table tr[data-key="claude:busy"]');
+    return { size: Number(r.querySelector('[data-k=bytes]').dataset.v), sizeText: r.querySelector('[data-k=bytes]').textContent, busy: b.querySelector('[data-k=eligible]').textContent.trim() }; })()`);
+  report("[manage] list shows each session's size and whether it can be cleaned", row.size > 0 && row.busy === "会话运行中", `${row.sizeText} · busy: ${row.busy}`);
+  await click('[data-pick="claude:cleanme"]');
+  const partial = await cdp.eval(`(() => { const all = [...document.querySelectorAll('#m-table input[type=checkbox]')], p = document.querySelector('#m-pickall');
+    return { n: all.length, custom: all.every((c) => c.classList.contains('cb') && getComputedStyle(c).appearance === 'none'), one: document.querySelector('[data-pick="claude:cleanme"]').checked && !document.querySelector('[data-pick="claude:busy"]').checked,
+      indeterminate: p.indeterminate, checked: p.checked }; })()`);
+  report("[manage] checkboxes use the component style and select-all turns indeterminate on a partial pick", partial.n >= 3 && partial.custom && partial.one && partial.indeterminate && !partial.checked, JSON.stringify(partial));
+  await click('[data-pick="claude:busy"]');
+  await click("#m-plan");
+  await sleep(300);
+  const toasts = await cdp.eval(`[...document.querySelectorAll('#toasts > *')].map((n) => n.textContent).join(' | ')`);
+  if (toasts) console.log("  toasts:", toasts);
+  const plan = await waitFor(`(() => { if (document.querySelector('#m-review').hidden || !document.querySelector('#m-plan-kpis')) return null;
+    return { freed: Number(document.querySelector('#m-plan-kpis [data-k=freed_bytes]').dataset.v), archive: Number(document.querySelector('#m-plan-kpis [data-k=archive_bytes]').dataset.v),
+      reason: document.querySelector('#m-no [data-key="claude:busy"] [data-reason]')?.textContent, ok: [...document.querySelectorAll('#m-ok [data-key]')].map((n) => n.dataset.key) }; })()`, 5_000, "review").catch(() => null);
+  report("[manage] review shows space to free, archive size and why the running session is excluded",
+    !!plan && plan.freed === row.size && plan.archive > 0 && plan.reason === "会话运行中" && JSON.stringify(plan.ok) === '["claude:cleanme"]', JSON.stringify(plan));
+  await shot("manage-review.png");
+  await click("#m-exec");
+  const res = await waitFor(`(() => { const a = [...document.querySelectorAll('#m-ok [data-status]')].map((n) => n.closest('[data-key]').dataset.key + '=' + n.dataset.status); return a.length && a; })()`, 10_000, "execute").catch(() => []);
+  const moved = readdirSync(trash).length > 0 && !existsSync(join(home, ".claude/projects/-w-clean/cleanme.jsonl"));
+  report("[manage] execution reports each session; source moved into the injected trash", JSON.stringify(res) === '["claude:cleanme=archived"]' && moved, res.join(" "));
+  await shot("manage-result.png");
+  await click("#m-done");
+  const badge = await waitFor(`document.querySelector('#m-table tr[data-key="claude:cleanme"] .tag.acc')?.textContent`, 8_000, "archived badge").catch(() => "");
+  await click('#nav [data-view="sessions"]');
+  const listBadge = await waitFor(`document.querySelector('.row[data-key="claude:cleanme"] .tag')?.textContent`, 8_000, "list badge").catch(() => "");
+  report("[manage] cleaned session carries the archived badge in both lists", badge === "已归档" && listBadge === "已归档", `${badge} / ${listBadge}`);
+  await click('#nav [data-view="manage"]');
+  await click('[data-mtab="archive"]');
+  const inArchive = await waitFor(`!!document.querySelector('#m-arch-table tr[data-key="claude:cleanme"]')`, 5_000, "archive tab").catch(() => false);
+  report("[manage] archive tab lists the archived session", !!inArchive);
+  await shot("manage-archive.png");
+  await click('[data-del="claude:cleanme"]');
+  await click('[data-del="claude:cleanme"]');
+  const gone = await waitFor(`!document.querySelector('#m-arch-table tr[data-key="claude:cleanme"]')`, 5_000, "delete").catch(() => false);
+  const arch = await apiJson(api, "/v1/archive");
+  report("[manage] deleting an archive (confirmed twice) removes it", !!gone && !arch.archives.some((a) => a.key === "claude:cleanme"));
+  report("[manage] no page errors", cdp.errors.length === 0, cdp.errors.slice(0, 3).join(" | "));
+}
+
+async function runReadOnly() {
+  const health = await apiJson(roApi, "/v1/health");
+  await load(`${roApi}/demo?token=${TOKEN}&view=manage`);
+  const ro = await waitFor(`(() => { if (document.querySelector('#m-ro').hidden || !document.querySelector('#m-table tr[data-key]')) return null;
+    return { checkboxes: document.querySelectorAll('#m-table input[type=checkbox]').length, plan: !!document.querySelector('#m-plan')?.offsetParent, selall: !!document.querySelector('#m-selall')?.offsetParent,
+      note: document.querySelector('#m-ro').textContent.includes('--read-only') }; })()`, 10_000, "read-only notice").catch(() => null);
+  await shot("readonly-manage.png");
+  await click('[data-mtab="archive"]');
+  await sleep(500);
+  const del = await cdp.eval(`document.querySelectorAll('[data-del]').length`);
+  await load(`${roApi}/demo?token=${TOKEN}&select=${enc("claude:ro-1")}`);
+  await waitFor(`!!document.querySelector('#resume-btn')`, 8_000, "ro detail");
+  await click("#resume-btn");
+  await waitFor(`!document.querySelector('#menu').hidden`, 3_000, "ro menu").catch(() => {});
+  const head = await cdp.eval(`({ clean: !!document.querySelector('#clean-btn'), term: document.querySelectorAll('#menu [data-act="open-term"]').length })`);
+  report("[read-only] write controls are hidden with an explanation", health.read_only === true && !!ro && ro.checkboxes === 0 && !ro.plan && !ro.selall && ro.note && del === 0 && !head.clean && head.term === 0,
+    JSON.stringify({ ...ro, del, ...head }));
+  report("[read-only] no page errors", cdp.errors.length === 0, cdp.errors.slice(0, 3).join(" | "));
+}
+
+// Every view, wide and narrow, dark and light: screenshots plus overflow / overlap / contrast audits.
+async function runVisual() {
+  const dir = join(SHOTS, "visual");
+  mkdirSync(dir, { recursive: true });
+  const ready = {
+    sessions: `document.querySelectorAll('#timeline [data-id]').length > 3 && !!document.querySelector('#sh-usage .us-cost')`,
+    usage: `!!document.querySelector('#u-chart svg') && document.querySelectorAll('#u-table tbody tr').length > 1`,
+    search: `document.querySelectorAll('.hit').length > 2`,
+    manage: `document.querySelectorAll('#m-table tbody tr[data-eligible="true"], #m-table tbody tr[data-eligible="false"]').length > 3`,
+    insights: `document.querySelectorAll('#i-heat rect').length > 300 && document.querySelectorAll('#i-ranks li').length > 2`,
+  };
+  const extra = { sessions: `&select=${enc("claude:proj-0")}`, search: `&sq=${enc("分页逻辑")}`, manage: `&mq=${enc("in:/w")}` };
+  const issues = { overflow: [], overlap: [], contrast: [] };
+  let n = 0;
+  for (const [w, h, mobile] of [[1480, 920, false], [390, 844, true]]) {
+    await viewport(w, h, mobile);
+    for (const theme of ["dark", "light"]) {
+      await scheme(theme);
+      for (const v of Object.keys(ready)) {
+        await load(`${api}/demo?token=${TOKEN}&view=${v}${extra[v] || ""}`);
+        await waitFor(ready[v], 10_000, `${v} ready`).catch(() => {});
+        await sleep(500);
+        await shot(join("visual", `${v}-${w}-${theme}.png`));
+        n++;
+        const audit = await cdp.eval(`__e2e.audit('${v === "sessions" ? "#app" : "#v-" + v}')`);
+        for (const k of Object.keys(issues)) for (const x of audit[k]) issues[k].push(`${v}@${w}/${theme}: ${x}`);
+      }
+    }
+  }
+  await viewport(1480, 920);
+  await scheme(null);
+  report("[visual] screenshots: 5 views × 1480/390 px × dark/light", n === 20, dir);
+  report("[visual] no horizontal overflow", issues.overflow.length === 0, issues.overflow.slice(0, 5).join(" | "));
+  report("[visual] no overlapping elements in bars, toolbars and tiles", issues.overlap.length === 0, issues.overlap.slice(0, 5).join(" | "));
+  report("[visual] text contrast meets WCAG AA", issues.contrast.length === 0, issues.contrast.slice(0, 6).join(" | "));
+}
+
+// In-page audit helpers, installed before the page's own scripts on every navigation.
+const AUDIT = `window.__e2e = (() => {
+  const cv = document.createElement('canvas'); cv.width = cv.height = 1;
+  const cx = cv.getContext('2d', { willReadFrequently: true });
+  const rgba = (c) => { cx.clearRect(0, 0, 1, 1); cx.fillStyle = '#000'; cx.fillStyle = c; cx.fillRect(0, 0, 1, 1); const d = cx.getImageData(0, 0, 1, 1).data; return [d[0], d[1], d[2], d[3] / 255]; };
+  const over = (top, bot) => [0, 1, 2].map((i) => top[i] * top[3] + bot[i] * (1 - top[3])).concat(1);
+  const lum = (c) => { const f = (v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; }; return 0.2126 * f(c[0]) + 0.7152 * f(c[1]) + 0.0722 * f(c[2]); };
+  const ratio = (a, b) => { const x = lum(a), y = lum(b); return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05); };
+  const bgOf = (el) => { const chain = []; for (let n = el; n && n.nodeType === 1; n = n.parentElement) chain.push(getComputedStyle(n).backgroundColor);
+    let c = rgba(getComputedStyle(document.documentElement).backgroundColor); if (c[3] < 1) c = over(c, [255, 255, 255, 1]);
+    for (const b of chain.reverse()) { const x = rgba(b); if (x[3] > 0) c = over(x, c); } return c; };
+  const fgOf = (el, prop = 'color') => { const s = getComputedStyle(el); let c = rgba(s[prop]); let o = 1; for (let n = el; n && n.nodeType === 1; n = n.parentElement) o *= Number(getComputedStyle(n).opacity); return [c[0], c[1], c[2], c[3] * o]; };
+  const contrastOf = (el, against) => { const bg = bgOf(against || el); return ratio(over(fgOf(el), bg), bg); };
+  const desc = (el) => el.tagName.toLowerCase() + (el.id ? '#' + el.id : '') + (el.className && typeof el.className === 'string' ? '.' + el.className.trim().split(/\\s+/).slice(0, 2).join('.') : '');
+  function audit(rootSel) {
+    const root = document.querySelector(rootSel), vw = document.documentElement.clientWidth, out = { overflow: [], overlap: [], contrast: [] };
+    if (document.scrollingElement.scrollWidth > vw + 1) out.overflow.push('document ' + document.scrollingElement.scrollWidth);
+    const scope = [document.querySelector('.top'), root];
+    for (const r0 of scope) for (const el of r0.querySelectorAll('*')) {
+      const r = el.getBoundingClientRect();
+      if (!r.width || !r.height) continue;
+      if (r.right > vw + 1) { let clip = false; for (let p = el.parentElement; p && p !== r0.parentElement; p = p.parentElement) { if (p === root) break; if (getComputedStyle(p).overflowX !== 'visible') { clip = true; break; } } if (!clip) out.overflow.push(desc(el) + ' right=' + Math.round(r.right)); }
+      if (r.bottom < 0 || r.top > innerHeight || el.closest('svg, [aria-hidden=true], .sk, :disabled, .shimmer')) continue;
+      const own = [...el.childNodes].some((n) => n.nodeType === 3 && n.textContent.trim());
+      if (!own || getComputedStyle(el).visibility === 'hidden') continue;
+      const fg = fgOf(el);
+      if (fg[3] < 0.05) continue;
+      const bg = bgOf(el), c = ratio(over(fg, bg), bg), fs = parseFloat(getComputedStyle(el).fontSize), bold = Number(getComputedStyle(el).fontWeight) >= 700;
+      const need = fs >= 24 || (fs >= 18.66 && bold) ? 3 : 4.5;
+      if (c < need - 0.005) out.contrast.push(desc(el) + ' ' + c.toFixed(2) + ' "' + el.textContent.trim().slice(0, 16) + '"');
+    }
+    for (const box of document.querySelectorAll('.top, ' + ['.toolbar', '.page-h', '.kpis', '.sh-actions', '.sh-top', '.selbar', '.r1', '.r2', '.legend', '.sform'].map((s) => rootSel + ' ' + s).join(', '))) {
+      const kids = [...box.children].map((k) => [k, k.getBoundingClientRect()]).filter(([k, r]) => r.width && r.height && getComputedStyle(k).position !== 'absolute');
+      for (let i = 0; i < kids.length; i++) for (let j = i + 1; j < kids.length; j++) {
+        const [a, ra] = kids[i], [b, rb] = kids[j];
+        const w = Math.min(ra.right, rb.right) - Math.max(ra.left, rb.left), h = Math.min(ra.bottom, rb.bottom) - Math.max(ra.top, rb.top);
+        if (w > 1 && h > 1) out.overlap.push(desc(a) + ' × ' + desc(b));
+      }
+    }
+    for (const k of Object.keys(out)) out[k] = [...new Set(out[k])].slice(0, 12);
+    return out;
+  }
+  return { contrastOf, audit };
+})();`;
 
 // ---------------------------------------------------------------- minimal CDP client
 async function connectCdp(url) {
@@ -261,7 +990,7 @@ async function connectCdp(url) {
     });
   const evaluate = async (expression) => {
     const r = await send("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true });
-    if (r.exceptionDetails) throw new Error(r.exceptionDetails.text);
+    if (r.exceptionDetails) throw new Error(r.exceptionDetails.exception?.description || r.exceptionDetails.text);
     return r.result.value;
   };
   return { send, eval: evaluate, errors, close: () => ws.close() };
@@ -271,17 +1000,22 @@ async function connectCdp(url) {
 let daemon;
 let cdp;
 const api = `http://127.0.0.1:${PORT}`;
+const roApi = `http://127.0.0.1:${RO_PORT}`;
+const noFtsApi = `http://127.0.0.1:${NOFTS_PORT}`;
 
 async function main() {
-daemon = start(BIN, ["daemon", "--bind", `127.0.0.1:${PORT}`, "--no-cache", "--token", TOKEN], { UNIFLO_HOME: home });
+daemon = start(BIN, ["daemon", "--bind", `127.0.0.1:${PORT}`, "--no-cache", "--no-price-sync", "--token", TOKEN], { UNIFLO_HOME: home, UNIFLO_TRASH_DIR: trash });
+start(BIN, ["daemon", "--bind", `127.0.0.1:${RO_PORT}`, "--no-cache", "--no-price-sync", "--read-only", "--token", TOKEN], { UNIFLO_HOME: roHome });
+start(BIN, ["daemon", "--bind", `127.0.0.1:${NOFTS_PORT}`, "--no-cache", "--no-price-sync", "--read-only", "--no-fts", "--token", TOKEN], { UNIFLO_HOME: roHome });
 const profile = mkdtempSync(join(tmpdir(), "uniflo-e2e-chrome-"));
 try {
   await until(async () => (await fetch(`${api}/v1/health?token=${TOKEN}`)).ok, 15_000, "daemon health");
+  await until(async () => (await fetch(`${roApi}/v1/health?token=${TOKEN}`)).ok, 15_000, "read-only daemon health");
+  await until(async () => (await fetch(`${noFtsApi}/v1/health?token=${TOKEN}`)).ok, 15_000, "no-fts daemon health");
   report("daemon without token answers 401", (await fetch(`${api}/v1/health`)).status === 401);
 
   // Same page served from a different loopback origin: the third-party integration path (CORS).
-  const html = readFileSync(join(ROOT, "examples/web/index.html"));
-  Bun.serve({ port: STATIC_PORT, hostname: "127.0.0.1", fetch: () => new Response(html, { headers: { "content-type": "text/html; charset=utf-8" } }) });
+  Bun.serve({ port: STATIC_PORT, hostname: "127.0.0.1", fetch: () => new Response(readFileSync(join(ROOT, "examples/web/index.html")), { headers: { "content-type": "text/html; charset=utf-8" } }) });
 
   start(CHROME, [
     "--headless=new", `--remote-debugging-port=${CDP_PORT}`, `--user-data-dir=${profile}`, "--no-first-run",
@@ -295,19 +1029,28 @@ try {
   await cdp.send("Runtime.enable");
   await cdp.send("Log.enable");
   await cdp.send("Page.enable");
-  await cdp.send("Emulation.setDeviceMetricsOverride", { width: 1480, height: 920, deviceScaleFactor: 2, mobile: false });
+  await cdp.send("Page.addScriptToEvaluateOnNewDocument", { source: AUDIT });
+  await viewport(1480, 920);
 
   mkdirSync(SHOTS, { recursive: true });
-  for (const transport of ["sse", "ws", "ndjson"]) await runTransport(transport);
-  await runCrossOrigin();
+  await until(async () => (await apiJson(api, "/v1/usage")).indexing?.ready, 20_000, "usage index").catch(() => {});
+  // E2E_ONLY=runManage,runVisual runs a subset while iterating; the full run is the gate.
+  const only = (process.env.E2E_ONLY || "").split(",").filter(Boolean);
+  if (!only.length) {
+    for (const transport of ["sse", "ws", "ndjson"]) await runTransport(transport);
+    await runCrossOrigin();
+  }
+  for (const step of [runIdentity, runIcons, runUsage, runUsageControls, runDetail, runFts, runSearchHelp, runInsights, runNotify, runVisual, runManage, runReadOnly]) {
+    if (only.length && !only.includes(step.name)) continue;
+    try { await step(); } catch (e) { report(`${step.name}`, false, String(e.message || e)); }
+  }
 } catch (e) {
   report("harness", false, String(e.message || e) + (daemon.lastErr() ? ` · daemon: ${daemon.lastErr().trim().slice(-300)}` : ""));
 } finally {
   try { cdp?.close(); } catch {}
   for (const p of procs) p.kill("SIGTERM");
   await sleep(300);
-  rmSync(home, { recursive: true, force: true });
-  rmSync(profile, { recursive: true, force: true });
+  for (const d of [home, roHome, trash, profile]) rmSync(d, { recursive: true, force: true });
   console.log(JSON.stringify({ ok: !failed, passed: results.filter((r) => r.ok).length, failed: results.filter((r) => !r.ok).length }));
   process.exit(failed ? 1 : 0);
 }

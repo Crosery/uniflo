@@ -175,6 +175,11 @@ async fn rest_endpoints_shapes_and_paging() {
     let hs = get(s.addr, "/v1/harnesses", &[]).await.json();
     assert_eq!(hs[0]["id"], "claude");
     assert_eq!(hs[0]["sessions"], 2);
+    assert_eq!(hs[0]["icon"], "/v1/harnesses/claude/icon.svg");
+    let icon = get(s.addr, "/v1/harnesses/claude/icon.svg", &[]).await;
+    assert_eq!((icon.status, icon.header("content-type")), (200, Some("image/svg+xml")));
+    assert!(String::from_utf8_lossy(&icon.body).contains("fill=\"currentColor\""));
+    assert_eq!(get(s.addr, "/v1/harnesses/prime/icon.svg", &[]).await.status, 404, "no brand icon");
 
     let list = get(s.addr, "/v1/sessions?q=gateway", &[]).await;
     assert!(list.header("x-uniflo-seq").is_some());

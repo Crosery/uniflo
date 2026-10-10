@@ -19,8 +19,10 @@ serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true
+tower.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+rusqlite.workspace = true
 tempfile.workspace = true
-uniflo-adapters = { workspace = true, features = ["claude", "codex"] }
+uniflo-adapters = { workspace = true, features = ["claude", "codex", "opencode", "pi"] }

@@ -19,13 +19,27 @@ uniflo-search.workspace = true
 uniflo-adapters = { workspace = true, features = ["default"] }
 uniflo-gateway.workspace = true
 anyhow.workspace = true
+axum.workspace = true
 chrono.workspace = true
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
+toml_edit.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
+rusqlite.workspace = true
+ruzstd.workspace = true
 tempfile.workspace = true
+
+# cargo binstall: the release packages built by .github/workflows/release.yml (ADR-0009).
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ version }-{ target }.tar.gz"
+bin-dir = "{ name }-{ version }-{ target }/{ bin }{ binary-ext }"
+pkg-fmt = "tgz"
+
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ version }-{ target }.zip"
+pkg-fmt = "zip"

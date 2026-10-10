@@ -12,8 +12,9 @@ Uniflo：本机常驻守护进程，持续读取所有 agent harness（Claude Co
 | 改代码（任何 crate） | `docs/conventions/DEVELOPMENT.md`、`docs/architecture.md` |
 | 改 wire schema（`uniflo-schema`） | `docs/schema.md` + `docs/decisions/ADR-0003-wire-schema-只增不改.md` |
 | 新增或修改 harness 适配 | `docs/adapters.md` |
-| 改网关接口、鉴权、CORS | `docs/api.md` + `docs/decisions/ADR-0004-网关只监听本机.md` |
+| 改网关接口、鉴权、CORS | `docs/api.md` + `docs/decisions/ADR-0004-网关只监听本机.md`；写接口再读 `docs/decisions/ADR-0006-会话清理与写接口.md` |
 | 改搜索语法 | `docs/search.md` |
+| 改 MCP 服务器、Skill、`uniflo setup`、resume / memory / context | `docs/agents.md` + `docs/decisions/ADR-0007-setup-写-harness-配置.md` |
 | 改网页演示 | `examples/web/index.html`、`scripts/demo-e2e.mjs`、`docs/conventions/DEVELOPMENT.md#测试` |
 | 提交代码 | `docs/conventions/COMMITS.md` |
 | 分支、MR/PR、合并 | `docs/conventions/BRANCHING.md`、`docs/conventions/GIT.md` |
@@ -21,6 +22,7 @@ Uniflo：本机常驻守护进程，持续读取所有 agent harness（Claude Co
 | 行为变更、缺陷、测试、交付证据 | `docs/conventions/TESTING.md` |
 | 较大需求（跨模块、要澄清、要分阶段验收） | 用 `/comet` 走 Native 流程；规范文档已接入它的项目知识检索 |
 | 为什么这样定 | `docs/decisions/ADR-*.md`；过程与证据 `notes/` |
+| 发布流程、安装脚本、`uniflo update` | `docs/decisions/ADR-0009-预编译分发与自升级.md`、`docs/conventions/BRANCHING.md` |
 
 ## 契约
 
@@ -28,17 +30,31 @@ Uniflo：本机常驻守护进程，持续读取所有 agent harness（Claude Co
 - **依赖方向单向**：`schema ← core ← search / adapters ← gateway ← cli`。下游不得被上游引用；`uniflo-schema` 只依赖 serde。新 crate 或新边要写进 `docs/architecture.md`。
 - **适配器只翻译，不判状态**：work/idle 由 `uniflo-core::status` 从归一事件统一推导。适配器不得自己写状态机；只能通过 `TurnStart`/`TurnEnd` 事件或 `live()` 表达。
 - **只读 harness 数据**：任何适配器、测试、脚本都不得写入、移动、复制、锁定 harness 的会话文件或数据库。SQLite 一律走 `sqlite::open_ro`（`SQLITE_OPEN_READ_ONLY`）。
+  - 例外只有两处，都要用户确认、都可撤销：
+    - 会话清理（`docs/decisions/ADR-0006-会话清理与写接口.md`）：只经"计划 → 确认 → 执行"、只动适配器 `cleanup_targets` 声明的目标、先写归档与清单再移入系统回收站、永不删除。只有 `uniflo-core::cleanup` 可以移动 harness 文件；适配器、测试、脚本仍然只读。测试只注入回收站目录（`DirTrash` / `UNIFLO_TRASH_DIR`），设了 `UNIFLO_HOME` 而没设 `UNIFLO_TRASH_DIR` 时一律拒绝移动；不得对真实数据执行清理计划。
+    - `uniflo setup`（`docs/decisions/ADR-0007-setup-写-harness-配置.md`）：经终端确认或 `--yes` 后，只增删 harness 配置里名为 `uniflo` 的 MCP 条目、指向 Uniflo Skill 的软链和可选的 SessionStart hook，按 `setup.json` 记录对称撤销，不覆盖别人的同名条目。Uniflo 直接编辑的配置文件先备份、原子写入；有官方 `mcp add/remove` 命令的 harness 由它自己的 CLI 改写配置，Uniflo 不另做备份。会话文件和数据库仍然只读。
+  - 开发和测试里，非 `--dry-run` 的 `uniflo setup`（含 `--uninstall`、`--reload`）只能在临时 HOME 中运行：设 `HOME` 和 `UNIFLO_HOME` 为临时目录，并清掉 `CLAUDE_CONFIG_DIR` 和 `CODEX_HOME`。
 - **隐私**：测试夹具只能手写合成数据，禁止拷贝真实会话；调试输出只打印键名、计数、类型，不打印会话正文、提示词、文件内容、token。`~/.claude/sessions/*.key` 之类的凭据文件永不读取。
 - **网关默认只听回环**：非回环 Host 必须同时配 `--allow-host` 和 token；不得放宽 Host/Origin 校验来"方便调试"。
+- **写接口必过写守卫**：网关守卫对 `GET` / `HEAD` / `OPTIONS` 以外的每个请求调用 `uniflo-gateway::write::check`（回环 Host、Origin、`X-Uniflo-Write: 1`、token），会改动任何东西的接口只能用这些方法，并登记到 `docs/api.md#写接口`；`--read-only` 时全部 403。
 - 生成物不入库：`target/`、缓存（`~/Library/Caches/uniflo/`）不提交。
 
 ## 非显然的环境事实
 
 - 默认端口 `127.0.0.1:7311`；CLI 读 `UNIFLO_URL`、`UNIFLO_TOKEN`；`UNIFLO_HOME` 覆盖家目录（测试用）。
+- Uniflo 自己的数据目录走 `uniflo_core::paths`（macOS `~/Library/Application Support/uniflo`，价格在 `pricing/`）；`UNIFLO_DATA_DIR` 直接指定。注意索引缓存 `cache::default_path()` 只看 `dirs::cache_dir()`（即 `HOME`），对真实数据起测试守护进程要同时设 `HOME=<tmp>`、`UNIFLO_HOME=<真实家目录>`、`UNIFLO_DATA_DIR=<tmp>`，并绑 `127.0.0.1:74xx`，否则会覆盖本机常驻守护进程的缓存或价格文件。
+- 价格同步测试用 `UNIFLO_PRICING_URL` 指本地 HTTP 服务、`UNIFLO_PRICING_FALLBACK_URL=` 置空关闭 LiteLLM；守护进程隐藏参数 `--price-sync-delay <秒>` 控制首次同步时间。用量账本缓存 `usage-v1.json` 与索引缓存同目录，排查用量问题时删它或加 `--no-cache`。
 - 索引缓存 `~/Library/Caches/uniflo/index-v1.json`（macOS），标签含版本、schema 版本和适配器列表，任一变化自动失效；排查索引问题时加 `--no-cache`。
+- 全文索引 `~/Library/Caches/uniflo/fts-v1.sqlite`（含 `-wal`/`-shm`，本机约 5.6 GB，首建约 14 min），标签含格式版本、Uniflo 版本和 schema 版本，变化即整份重建。缓存目录随 `UNIFLO_HOME` 移动；一个缓存目录同时只该有一个守护进程写索引；用真实家目录另起守护进程做实验时，若常驻守护进程也开着全文索引，给其中一个加 `--no-fts`。
 - macOS FSEvents 报告规范化路径（`/private/var/...`），`core::watch` 会映射回配置的根；新增根目录时别绕过它。
 - omp/Pi 没有在线注册表：存活进程靠 `core::procs`（`ps` + 一次批量 `lsof`）按 `--resume` 参数 → 打开的会话文件 → cwd 推断三级映射。Codex app-server 一个进程服务多会话，不做 pid 映射，状态全靠 `task_started/task_complete`。
 - Claude 子代理收尾时 `stop_reason` 为空、没有回合结束标记，靠 90 s settle 窗口转 idle；不要为此给适配器加时间判断。
+- 清理归档在数据目录 `archive/`（`<harness>/<id>.jsonl.zst`、`index.json`、`cleanup.log.jsonl`、`tombstones.json`）。墓碑下的路径不作为源读取，除非内容与清单一致（大小 + SHA-256，即从回收站还原）；排查"会话消失 / 还原后不出现"时先看这里。
+- 安装与升级测试：
+  - `UNIFLO_RELEASE_BASE_URL`、`UNIFLO_UPDATE_INDEX_URL` 指向本地 HTTP 服务，`UNIFLO_INSTALL_DIR`、`UNIFLO_CONFIG_DIR`（或 `UNIFLO_HOME`）、`TMPDIR` 指向临时目录。
+  - 不得替换 `~/.cargo/bin/uniflo` 或 PATH 上的 uniflo，不得写真实的 `install.json`，不得对 `com.crosery.uniflo` 运行 `launchctl kickstart` / `bootout` / `load`。
+  - `uniflo update` 只在 launchd 服务运行的就是被升级的那份可执行文件时才 kickstart，临时安装不会触发；改这段逻辑时用注入的 `launchctl` 做单测。
+  - 依赖变化后运行 `node scripts/third-party-notices.mjs`，否则 `scripts/verify.sh` 失败。
 - 本仓 Rust edition 2024 写在各 crate 的 `Cargo.toml` 里（不用 `edition.workspace`），因为本机 rustfmt 钩子靠它识别 let-chains。
 
 ## 完成标准

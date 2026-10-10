@@ -26,6 +26,8 @@ pub const TAIL_BYTES: u64 = 256 * 1024;
 pub const CATCHUP_MAX: u64 = 16 * 1024 * 1024;
 const MAX_WINDOW: u64 = 64 * 1024 * 1024;
 const REV_CHUNK: u64 = 128 * 1024;
+/// Window of one [`Adapter::read_all`] step.
+const SCAN_CHUNK: u64 = 4 * 1024 * 1024;
 
 /// Native identity of the session a file holds.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,6 +46,20 @@ pub trait LineDecoder: Send + Sync + 'static {
     fn identify(&self, path: &Path) -> Option<SourceId>;
     fn decode(&self, record: &Value, cx: &mut Cx<'_, Self::State>);
 
+    /// End of a contiguous run of records (one read window): emit what is still open, e.g. a
+    /// message streamed as fragments. `more`: the window is a history page ending where a
+    /// newer page begins, so nothing open continues past it and it is complete; otherwise
+    /// emit it as `partial`, and its completed version reuses the id.
+    fn finish(&self, _cx: &mut Cx<'_, Self::State>, _more: bool) {}
+
+    /// Whether a history page may begin at `record`, `prev` being the record before it:
+    /// decoding from there with fresh state must give the events a whole-file decode gives.
+    /// Decoders whose events span records (merged fragments, turn numbering) say `false`
+    /// inside such a span; pages then reach back to the previous boundary.
+    fn page_start(&self, _prev: &Value, _record: &Value) -> bool {
+        true
+    }
+
     /// The file is one JSON document rewritten in place instead of appended lines.
     fn whole_file(&self, _path: &Path) -> bool {
         false
@@ -56,6 +72,10 @@ pub trait LineDecoder: Send + Sync + 'static {
     }
     fn live_roots(&self) -> Vec<PathBuf> {
         Vec::new()
+    }
+    /// See [`Adapter::cleanup_targets`]; `None` (default) = cleanup unsupported.
+    fn cleanup_targets(&self, _src: &Path) -> Option<Vec<PathBuf>> {
+        None
     }
 }
 
@@ -168,10 +188,28 @@ impl<D: LineDecoder> JsonlAdapter<D> {
                 && let Ok(v) = serde_json::from_slice::<Value>(rest)
             {
                 self.decode_value(&v, at, base + start as u64, state, sink);
-                return buf.len() as u64;
+                start = buf.len();
             }
         }
+        if start > 0 {
+            self.finish(at, base + start as u64, state, sink, false);
+        }
         start as u64
+    }
+
+    fn finish(&self, at: At<'_>, pos: u64, state: &mut D::State, sink: &mut Sink, more: bool) {
+        let mut cx = Cx { key: at.key, src: at.src, pos, state, sink, n: 0 };
+        self.decoder.finish(&mut cx, more);
+        sink.flush_meta();
+    }
+
+    /// [`LineDecoder::page_start`] on raw lines; an unparsable line is a boundary.
+    fn page_start(&self, prev: &[u8], line: &[u8]) -> bool {
+        let parse = |l: &[u8]| serde_json::from_slice::<Value>(trim_line(l)).ok();
+        match (parse(prev), parse(line)) {
+            (Some(p), Some(l)) => self.decoder.page_start(&p, &l),
+            _ => true,
+        }
     }
 
     fn decode_line(&self, line: &[u8], pos: u64, at: At<'_>, state: &mut D::State, sink: &mut Sink) {
@@ -329,10 +367,14 @@ impl<D: LineDecoder> Adapter for JsonlAdapter<D> {
         let size = f.metadata()?.len();
         let end = q.before.map_or(size, |b| b.min(size));
         let mut rev = RevLines::new(&mut f, end);
+        // Newest first. Past `limit`, keep going back until the oldest line can start a page.
         let mut lines: Vec<(u64, Vec<u8>)> = Vec::new();
         let mut estimate = 0usize;
-        while estimate < limit {
-            let Some((pos, line)) = rev.next_line()? else { break };
+        while let Some((pos, line)) = rev.next_line()? {
+            if estimate >= limit && lines.last().is_none_or(|(_, newer)| self.page_start(&line, newer)) {
+                break;
+            }
+            // Per line with fresh state; fragments still open at its end are not counted.
             let mut probe = Sink::default();
             let mut st = D::State::default();
             self.decode_line(&line, pos, At { src, key: &key }, &mut st, &mut probe);
@@ -345,7 +387,59 @@ impl<D: LineDecoder> Adapter for JsonlAdapter<D> {
         for (pos, line) in &lines {
             self.decode_line(line, *pos, At { src, key: &key }, &mut state, &mut sink);
         }
-        Ok(dedupe_events(sink.records))
+        self.finish(At { src, key: &key }, end, &mut state, &mut sink, end < size);
+        // A merged message sits at its first fragment though it is emitted when it closes;
+        // ordered by position, the first event's `pos` is where the next older page ends.
+        let mut evs = dedupe_events(sink.records);
+        evs.sort_by_key(|e| e.pos);
+        Ok(evs)
+    }
+
+    fn read_all(&self, src: &Path, _sessions: &[String], sink: &mut dyn FnMut(&str, Record)) -> Result<Cursor> {
+        let md = std::fs::metadata(src).with_context(|| format!("stat {}", src.display()))?;
+        let (size, mtime) = (md.len(), file_mtime_ms(&md));
+        let sid =
+            self.decoder.identify(src).ok_or_else(|| anyhow!("not a {} source: {}", self.info().id, src.display()))?;
+        let key = session_key(self.info().id, &sid.id);
+        if self.decoder.whole_file(src) {
+            let mut out = self.read_whole(src, None, &key, &sid.id, size, mtime)?;
+            prepend_parent(&mut out.batch, &sid);
+            for (id, r) in out.batch.items {
+                sink(&id, r);
+            }
+            return Ok(out.cursor);
+        }
+        if let Some(p) = &sid.parent {
+            sink(&sid.id, Record::Meta(MetaPatch { parent: Some(p.clone()), ..Default::default() }));
+        }
+        // Bounded windows keep memory flat on multi-GB transcripts; a window grows only when a
+        // single line does not fit.
+        let mut f = File::open(src)?;
+        let mut state = D::State::default();
+        let (mut offset, mut want) = (0u64, SCAN_CHUNK);
+        while offset < size {
+            let end = (offset + want).min(size);
+            let buf = read_range(&mut f, offset, end)?;
+            let eof = end >= size;
+            let mut part = Sink::default();
+            let used = self.decode_lines(&buf, offset, At { src, key: &key }, &mut state, &mut part, eof);
+            for r in part.records {
+                sink(&sid.id, r);
+            }
+            if used == 0 {
+                if eof {
+                    break;
+                }
+                want = want.saturating_mul(2);
+                continue;
+            }
+            offset += used;
+            want = SCAN_CHUNK;
+            if eof {
+                break;
+            }
+        }
+        Ok(Cursor { offset, size, mtime_ms: mtime, state: to_state(&state) })
     }
 
     fn live(&self) -> Option<Vec<LiveSession>> {
@@ -354,6 +448,10 @@ impl<D: LineDecoder> Adapter for JsonlAdapter<D> {
 
     fn live_roots(&self) -> Vec<PathBuf> {
         self.decoder.live_roots().into_iter().filter(|p| p.is_dir()).collect()
+    }
+
+    fn cleanup_targets(&self, src: &Path, _id: &str) -> Option<Vec<PathBuf>> {
+        self.decoder.cleanup_targets(src)
     }
 }
 
@@ -383,6 +481,30 @@ fn hash_event(e: &Event) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     serde_json::to_string(e).unwrap_or_default().hash(&mut h);
     h.finish()
+}
+
+/// Records and unknown discriminators produced by [`decode_record`].
+#[derive(Debug, Default)]
+pub struct Decoded {
+    pub records: Vec<Record>,
+    pub unknown: Vec<String>,
+}
+
+/// Feed one record that does not come from a JSONL file (e.g. a database row holding the
+/// same entry format) through `decoder`; `pos` is the caller's ordinal for it.
+pub fn decode_record<D: LineDecoder>(
+    decoder: &D,
+    key: &str,
+    src: &Path,
+    pos: u64,
+    v: &Value,
+    state: &mut D::State,
+) -> Decoded {
+    let mut sink = Sink::default();
+    let mut cx = Cx { key, src, pos, state, sink: &mut sink, n: 0 };
+    decoder.decode(v, &mut cx);
+    sink.flush_meta();
+    Decoded { records: sink.records, unknown: sink.unknown }
 }
 
 /// Keep one event per id: first position, latest content (in-place streaming updates).
@@ -765,6 +887,37 @@ mod tests {
     }
 
     #[test]
+    fn read_all_streams_every_line_and_resumes() {
+        let (_d, a, p) = setup();
+        let mut s = line("meta", "/w", 0);
+        let long = "z".repeat((SCAN_CHUNK + 10) as usize);
+        s.push_str(&line("u", &long, 1));
+        for i in 0..2000 {
+            s.push_str(&line("a", &"x".repeat(5000), 10 + i));
+        }
+        std::fs::write(&p, &s).unwrap();
+        std::fs::OpenOptions::new().append(true).open(&p).unwrap().write_all(b"{\"t\":\"u\",\"x\":\"ha").unwrap();
+        let mut n = 0;
+        let mut metas = 0;
+        let c = a
+            .read_all(&p, &[], &mut |id, r| {
+                assert_eq!(id, "s1");
+                match r {
+                    Record::Event(_) => n += 1,
+                    Record::Meta(_) => metas += 1,
+                }
+            })
+            .unwrap();
+        assert_eq!((n, metas), (2001, 1), "middle of a big file is read, not sampled");
+        assert_eq!(c.offset, s.len() as u64, "torn last line left for the next read");
+        assert_eq!(c.state, serde_json::json!(2002));
+        std::fs::OpenOptions::new().append(true).open(&p).unwrap().write_all(b"llo\",\"ts\":9}\n").unwrap();
+        let out = a.read(&p, Some(&c)).unwrap();
+        assert!(!out.summary);
+        assert_eq!(events(&out).len(), 1);
+    }
+
+    #[test]
     fn rev_lines_handles_no_trailing_newline_and_crlf() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("f");
@@ -776,5 +929,141 @@ mod tests {
             got.push((pos, String::from_utf8(l).unwrap()));
         }
         assert_eq!(got, vec![(7, "ccc".into()), (6, "".into()), (3, "bb".into()), (0, "a\r".into())]);
+    }
+
+    /// Fragments `{"f":"…"}` accumulate in state until `{"t":"end"}`; open text is flushed partial.
+    /// The message sits at its first fragment; `{"tick":1}` is an event inside a run. Pages
+    /// start only after an end.
+    struct Frag;
+
+    impl LineDecoder for Frag {
+        type State = Option<(u64, String)>;
+        fn info(&self) -> HarnessInfo {
+            HarnessInfo { id: "frag", name: "Frag" }
+        }
+        fn roots(&self) -> Vec<PathBuf> {
+            Vec::new()
+        }
+        fn is_source(&self, _: &Path) -> bool {
+            true
+        }
+        fn identify(&self, p: &Path) -> Option<SourceId> {
+            Some(SourceId { id: p.file_stem()?.to_str()?.to_owned(), parent: None })
+        }
+        fn decode(&self, v: &Value, cx: &mut Cx<'_, Self::State>) {
+            match v.get("f").and_then(Value::as_str) {
+                Some(f) => cx.state.get_or_insert_with(|| (cx.pos, String::new())).1.push_str(f),
+                None if v.get("tick").is_some() => {
+                    cx.emit_at(0, Body::System { subtype: "tick".into(), text: String::new() });
+                }
+                None => {
+                    if let Some((at, text)) = cx.state.take() {
+                        cx.emit(format!("m{at}"), 0, Body::AssistantMessage { text, model: None }).pos = Some(at);
+                    }
+                    cx.emit_at(0, Body::TurnEnd { reason: None });
+                }
+            }
+        }
+        fn finish(&self, cx: &mut Cx<'_, Self::State>, more: bool) {
+            if let Some((at, text)) = cx.state.clone() {
+                let e = cx.emit(format!("m{at}"), 0, Body::AssistantMessage { text, model: None });
+                (e.pos, e.partial) = (Some(at), !more);
+            }
+        }
+        fn page_start(&self, prev: &Value, _record: &Value) -> bool {
+            prev.get("t").is_some()
+        }
+    }
+
+    #[test]
+    fn finish_flushes_open_fragments_as_partial_then_completes_same_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = JsonlAdapter::new(Frag);
+        let p = dir.path().join("f.jsonl");
+        std::fs::write(&p, "{\"f\":\"he\"}\n{\"f\":\"llo \"}\n").unwrap();
+        let out = a.read(&p, None).unwrap();
+        let evs = events(&out);
+        assert_eq!(evs.len(), 1);
+        assert!(evs[0].partial);
+        assert!(matches!(&evs[0].body, Body::AssistantMessage { text, .. } if text == "hello "));
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&p)
+            .unwrap()
+            .write_all(b"{\"f\":\"you\"}\n{\"t\":\"end\"}\n")
+            .unwrap();
+        let out2 = a.read(&p, Some(&out.cursor)).unwrap();
+        let evs2 = events(&out2);
+        assert_eq!(evs2.len(), 2);
+        assert_eq!(evs2[0].id, evs[0].id, "completed version replaces the partial one");
+        assert!(!evs2[0].partial);
+        assert!(matches!(&evs2[0].body, Body::AssistantMessage { text, .. } if text == "hello you"));
+        let h = a.history(&p, "f", &HistoryQuery { before: None, limit: 10 }).unwrap();
+        assert_eq!(h.iter().map(|e| e.body.kind()).collect::<Vec<_>>(), ["assistant_message", "turn_end"]);
+    }
+
+    #[test]
+    fn history_pages_never_start_inside_a_fragment_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = JsonlAdapter::new(Frag);
+        let p = dir.path().join("f.jsonl");
+        let mut s = String::new();
+        for turn in ["a", "b"] {
+            for i in 0..40 {
+                s += &format!("{{\"f\":\"{turn}{i} \"}}\n");
+                if i % 10 == 9 {
+                    s += "{\"tick\":1}\n";
+                }
+            }
+            s += "{\"t\":\"end\"}\n";
+        }
+        for i in 0..3 {
+            s += &format!("{{\"f\":\"c{i} \"}}\n");
+        }
+        std::fs::write(&p, &s).unwrap();
+        let out = a.read(&p, None).unwrap();
+        let full: Vec<Event> = events(&out).into_iter().cloned().collect();
+        assert_eq!(full.len(), 13);
+        // Page backwards with a limit far below the fragment count; every page boundary is an
+        // event position, as clients and the full-text indexer use it.
+        let mut paged: Vec<Event> = Vec::new();
+        let mut before = None;
+        for _ in 0..10 {
+            let page = a.history(&p, "f", &HistoryQuery { before, limit: 2 }).unwrap();
+            let Some(first) = page.first() else { break };
+            assert!(before.is_none_or(|b| first.pos.unwrap() < b), "pages move backwards");
+            before = first.pos;
+            paged.splice(0..0, page);
+        }
+        let view = |evs: &[Event]| -> std::collections::BTreeMap<String, (bool, String)> {
+            evs.iter()
+                .map(|e| {
+                    let text = match &e.body {
+                        Body::AssistantMessage { text, .. } => text.clone(),
+                        _ => String::new(),
+                    };
+                    (e.id.clone(), (e.partial, text))
+                })
+                .collect()
+        };
+        assert_eq!(paged.len(), full.len(), "no event twice");
+        assert_eq!(view(&paged), view(&full), "same ids, texts and partial flags as one whole read");
+        assert!(paged.windows(2).all(|w| w[0].pos <= w[1].pos));
+        let (partial, a) = &view(&full)["m0"];
+        assert!(!partial && a.starts_with("a0 a1 ") && a.ends_with("a39 "));
+    }
+
+    #[test]
+    fn decode_record_feeds_values_outside_files() {
+        let toy = Toy { root: PathBuf::new() };
+        let mut st = Count::default();
+        let v: Value = serde_json::from_str(&line("u", "hi", 5)).unwrap();
+        let d = decode_record(&toy, "toy:x", Path::new("/db"), 42, &v, &mut st);
+        assert!(matches!(&d.records[..], [Record::Event(e)] if e.pos == Some(42) && e.session == "toy:x" && e.ts == 5));
+        let bad: Value = serde_json::json!({"t":"zzz"});
+        let d2 = decode_record(&toy, "toy:x", Path::new("/db"), 43, &bad, &mut st);
+        assert!(d2.records.is_empty());
+        assert_eq!(d2.unknown, vec!["t=Some(\"zzz\")".to_string()]);
+        assert_eq!(st.0, 2);
     }
 }

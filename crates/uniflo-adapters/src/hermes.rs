@@ -4,8 +4,12 @@
 //! follow cursor and the paging `pos`). Assistant rows fan out into reasoning, text and one
 //! tool call per `tool_calls` entry; `tool` rows become tool results; an assistant row whose
 //! `finish_reason` is a terminal one (not `tool_calls`) closes the turn.
+//!
+//! Token and cost columns exist only per session; they become one session-level `usage`
+//! event (id `session:usage`, no `pos`) re-emitted with the session row.
 
-use crate::sqlite::{col, columns, nonempty, open_ro, real, text, wal_sig};
+use crate::common::{output_with_reasoning, reported_cost};
+use crate::sqlite::{col, columns, int, nonempty, open_ro, real, text, wal_sig};
 use anyhow::Result;
 use rusqlite::{Connection, Row};
 use serde::{Deserialize, Serialize};
@@ -15,7 +19,7 @@ use std::sync::Arc;
 use uniflo_core::adapter::Batch;
 use uniflo_core::util::{file_mtime_ms, home, json_arg, now_ms};
 use uniflo_core::{Adapter, Cursor, HarnessInfo, HistoryQuery, MetaPatch, ReadOutput, Record};
-use uniflo_schema::{Body, Event, session_key};
+use uniflo_schema::{Body, Event, Usage, session_key};
 
 const ID: &str = "hermes";
 const HOT_WINDOW: usize = 50;
@@ -66,13 +70,22 @@ impl Schema {
             col(&m, "reasoning_content")
         );
         let sess_select = format!(
-            "SELECT id, {}, {}, {}, {}, {}, {}, rowid FROM sessions",
+            "SELECT id, {}, {}, {}, {}, {}, {}, rowid, {}, {}, {}, {}, {}, {}, {}, {}, {} FROM sessions",
             col(&s, "title"),
             col(&s, "cwd"),
             col(&s, "model"),
             col(&s, "parent_session_id"),
             col(&s, "started_at"),
             col(&s, "title_source"),
+            col(&s, "input_tokens"),
+            col(&s, "output_tokens"),
+            col(&s, "cache_read_tokens"),
+            col(&s, "cache_write_tokens"),
+            col(&s, "reasoning_tokens"),
+            col(&s, "actual_cost_usd"),
+            col(&s, "estimated_cost_usd"),
+            col(&s, "last_activity_at"),
+            col(&s, "ended_at"),
         );
         Ok(Schema { msg_filter: f, msg_select, sess_select })
     }
@@ -82,6 +95,7 @@ struct SessRow {
     id: String,
     patch: MetaPatch,
     hot: bool,
+    usage: Option<Event>,
 }
 
 fn sess_row(r: &Row) -> SessRow {
@@ -89,7 +103,24 @@ fn sess_row(r: &Row) -> SessRow {
     let started = ms(real(r, 5));
     let parent = nonempty(r, 4).filter(|p| *p != id);
     let rank = if nonempty(r, 6).as_deref() == Some("derived") { 1 } else { 2 };
+    let n = |i: usize| int(r, i).unwrap_or(0).max(0) as u64;
+    let reasoning = n(12);
+    let usage = Usage {
+        input: n(8),
+        output: output_with_reasoning(n(9), reasoning),
+        cache_read: n(10),
+        cache_write: n(11),
+        reasoning,
+        model: nonempty(r, 3),
+        cost_usd: reported_cost(real(r, 13).map(Value::from).as_ref())
+            .or_else(|| reported_cost(real(r, 14).map(Value::from).as_ref())),
+    };
+    let usage = (usage.input + usage.output + usage.cache_read + usage.cache_write > 0).then(|| {
+        let ts = [ms(real(r, 15)), ms(real(r, 16)), started].into_iter().find(|t| *t > 0).unwrap_or(0);
+        Event { pos: None, ..ev(&id, "session:usage".into(), ts, 0, Body::Usage(usage)) }
+    });
     SessRow {
+        usage,
         patch: MetaPatch {
             parent,
             title: nonempty(r, 1).map(|t| (rank, t)),
@@ -223,10 +254,23 @@ impl Hermes {
         }
     }
 
+    fn state(&self, c: &Connection, src: &Path) -> Result<State> {
+        let (wal_size, wal_mtime) = wal_sig(src);
+        Ok(State {
+            max_id: c.query_row("SELECT COALESCE(MAX(id),0) FROM messages", [], |r| r.get(0))?,
+            max_sess: c.query_row("SELECT COALESCE(MAX(rowid),0) FROM sessions", [], |r| r.get(0))?,
+            wal_size,
+            wal_mtime,
+        })
+    }
+
     fn summary(&self, c: &Connection, sc: &Schema, st: State, reset: bool) -> Result<ReadOutput> {
         let mut batch = Batch::default();
         for s in sessions(c, sc, "", &[])? {
             batch.items.push((s.id.clone(), Record::Meta(s.patch)));
+            if let Some(u) = s.usage {
+                batch.items.push((s.id.clone(), Record::Event(u)));
+            }
             let n = if s.hot { HOT_WINDOW } else { COLD_WINDOW };
             let mut rows = messages(
                 c,
@@ -256,14 +300,17 @@ impl Hermes {
                 touched.push(s.id.clone());
             }
         }
+        let mut usage = Vec::new();
         for id in &touched {
             for s in sessions(c, sc, "WHERE id=?1", &[id])? {
-                batch.items.push((s.id, Record::Meta(s.patch)));
+                batch.items.push((s.id.clone(), Record::Meta(s.patch)));
+                usage.extend(s.usage.map(|u| (s.id, Record::Event(u))));
             }
         }
         for m in rows {
             expand(m, &mut batch);
         }
+        batch.items.extend(usage);
         Ok(ReadOutput { cursor: self.cursor_for(st), batch, summary: false, reset: false })
     }
 }
@@ -289,18 +336,38 @@ impl Adapter for Hermes {
         let c = open_ro(src)?;
         c.execute_batch("BEGIN")?;
         let sc = Schema::load(&c)?;
-        let (wal_size, wal_mtime) = wal_sig(src);
-        let st = State {
-            max_id: c.query_row("SELECT COALESCE(MAX(id),0) FROM messages", [], |r| r.get(0))?,
-            max_sess: c.query_row("SELECT COALESCE(MAX(rowid),0) FROM sessions", [], |r| r.get(0))?,
-            wal_size,
-            wal_mtime,
-        };
+        let st = self.state(&c, src)?;
         let prev = cursor.and_then(|c| serde_json::from_value::<State>(c.state.clone()).ok());
         match (cursor, prev) {
             (Some(_), Some(p)) if p.max_id <= st.max_id && p.max_sess <= st.max_sess => self.follow(&c, &sc, &p, st),
             (cur, _) => self.summary(&c, &sc, st, cur.is_some()),
         }
+    }
+
+    fn read_all(&self, src: &Path, ids: &[String], sink: &mut dyn FnMut(&str, Record)) -> Result<Cursor> {
+        let c = open_ro(src)?;
+        c.execute_batch("BEGIN")?;
+        let sc = Schema::load(&c)?;
+        let st = self.state(&c, src)?;
+        let mut usage = Vec::new();
+        for s in sessions(&c, &sc, "", &[])? {
+            sink(&s.id, Record::Meta(s.patch));
+            usage.extend(s.usage.map(|u| (s.id, u)));
+        }
+        for id in ids {
+            let mut batch = Batch::default();
+            for m in messages(&c, &sc, "AND session_id=?1 AND id<=?2 ORDER BY id", &[id, &st.max_id])? {
+                expand(m, &mut batch);
+            }
+            for (sid, r) in batch.items {
+                sink(&sid, r);
+            }
+            if let Some(i) = usage.iter().position(|(s, _)| s == id) {
+                let (sid, u) = usage.swap_remove(i);
+                sink(&sid, Record::Event(u));
+            }
+        }
+        Ok(self.cursor_for(st))
     }
 
     fn history(&self, src: &Path, session_id: &str, q: &HistoryQuery) -> Result<Vec<Event>> {
@@ -435,6 +502,39 @@ mod tests {
         });
         assert_eq!(call, Some(("call_1".into(), "bash".into(), serde_json::json!({"cmd":"ls"}))));
         assert!(a.events.iter().any(|e| matches!(&e.body, Body::ToolResult { call_id, .. } if call_id == "call_1")));
+    }
+
+    #[test]
+    fn session_columns_become_one_session_usage_event() {
+        let d = db();
+        d.w.execute_batch(
+            "ALTER TABLE sessions ADD COLUMN input_tokens INTEGER; ALTER TABLE sessions ADD COLUMN output_tokens INTEGER;
+             ALTER TABLE sessions ADD COLUMN cache_read_tokens INTEGER; ALTER TABLE sessions ADD COLUMN reasoning_tokens INTEGER;
+             ALTER TABLE sessions ADD COLUMN actual_cost_usd REAL; ALTER TABLE sessions ADD COLUMN estimated_cost_usd REAL;",
+        )
+        .unwrap();
+        seed(&d);
+        d.w.execute("UPDATE sessions SET input_tokens=50, output_tokens=8, cache_read_tokens=900, reasoning_tokens=3, estimated_cost_usd=0.04 WHERE id='a'", [])
+            .unwrap();
+        let usage = |evs: &[Event]| -> Vec<Usage> {
+            evs.iter().filter_map(|e| if let Body::Usage(u) = &e.body { Some(u.clone()) } else { None }).collect()
+        };
+        let g = group(d.ad.read(&d.db, None).unwrap().batch);
+        let u = usage(&g["a"].events);
+        assert_eq!(u.len(), 1);
+        assert_eq!((u[0].input, u[0].output, u[0].cache_read, u[0].reasoning), (50, 8, 900, 3));
+        assert_eq!((u[0].cost_usd, u[0].model.as_deref()), (Some(0.04), Some("m1")));
+        assert!(usage(&g["b"].events).is_empty(), "no tokens, no event");
+
+        let mut seen = Vec::new();
+        d.ad.read_all(&d.db, &["a".into()], &mut |_, r| {
+            if let Record::Event(e) = r {
+                seen.push(e)
+            }
+        })
+        .unwrap();
+        assert_eq!(seen.last().map(|e| e.id.as_str()), Some("session:usage"), "after the full history");
+        assert_eq!(usage(&seen).len(), 1);
     }
 
     #[test]

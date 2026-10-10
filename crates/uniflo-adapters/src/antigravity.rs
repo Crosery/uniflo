@@ -59,6 +59,11 @@ impl LineDecoder for Antigravity {
             && crate::common::under_any(p, &self.roots)
     }
 
+    /// Only the transcript: the rest of brain/<id>/ holds the user's artifacts and uploads.
+    fn cleanup_targets(&self, src: &Path) -> Option<Vec<PathBuf>> {
+        uniflo_core::cleanup::targets::file(src)
+    }
+
     fn identify(&self, p: &Path) -> Option<SourceId> {
         // brain/<id>/.system_generated/logs/transcript.jsonl
         let id = p.parent()?.parent()?.parent()?.file_name()?.to_str()?.to_owned();

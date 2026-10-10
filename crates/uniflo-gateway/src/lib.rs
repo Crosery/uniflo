@@ -4,19 +4,37 @@
 //! |---|---|
 //! | `GET /v1/health` | liveness, seq, counts |
 //! | `GET /v1/harnesses` | supported harnesses on this machine |
+//! | `GET /v1/harnesses/{id}/icon.svg` | monochrome brand icon (`image/svg+xml`) |
 //! | `GET /v1/sessions?q=&limit=&format=ndjson` | search (see `uniflo-search` syntax) |
 //! | `GET /v1/sessions/{key}` | one session |
 //! | `GET /v1/sessions/{key}/events?limit=&before=&max_text=&format=ndjson` | transcript, newest page first |
+//! | `GET /v1/sessions/{key}/events?around=<event id>&limit=` | transcript window centred on one event |
+//! | `GET /v1/search?q=&filter=&kinds=&limit=&offset=` | full-text hits grouped by session (503 without an index) |
 //! | `GET /v1/stream` (SSE) · `/v1/stream.ndjson` · `/v1/ws` | live envelopes; `since`, `session`, `harness`, `types`, `kinds`, `max_text` |
 //! | `GET /v1/stats` | engine counters, unknown discriminators |
+//! | `GET /v1/usage?group_by=&q=&since=&until=&tz=&under=&depth=&limit=&sort=` | token / cost aggregation |
+//! | `GET /v1/sessions/{key}/usage` | per-step usage, per-turn totals |
+//! | `GET /v1/models?q=` · `GET /v1/pricing` | models seen with prices · catalog sync status |
+//! | `POST /v1/cleanup/plan` · `POST /v1/cleanup/plans/{id}/execute` | session cleanup (write) |
+//! | `GET /v1/archive` · `DELETE /v1/archive/{key}` (write) | archived sessions |
+//! | `GET /v1/sessions/{key}/resume` | command that continues the session in its harness |
+//! | `POST /v1/sessions/{key}/open-terminal?terminal=` | macOS: run that command in a new terminal window (write route) |
+//! | `GET /v1/memory?cwd=` · `GET /v1/memory/file?path=` | agent memory / instruction files · one of them |
 //! | `GET /demo` | bundled single-page demo client (`examples/web/index.html`) |
 //!
 //! Snapshots carry `x-uniflo-seq`; subscribe with `since=<that>` for a gap-free view.
 //! Security: loopback Host only (DNS-rebinding guard), browser Origins limited to
-//! loopback + `--cors-origin`, optional bearer token (`Authorization` or `?token=`).
+//! loopback + `--cors-origin`, optional bearer token (`Authorization` or `?token=`). Every write
+//! request (any method but GET / HEAD / OPTIONS) also passes [`write::check`].
 
+pub mod agent;
+pub mod cleanup;
 mod guard;
+pub mod icons;
+mod search;
 mod stream;
+pub mod usage;
+pub mod write;
 
 pub use guard::GuardOptions;
 
@@ -25,15 +43,17 @@ use axum::extract::{Path, Query, State, WebSocketUpgrade};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use futures_util::StreamExt;
 use serde::Deserialize;
 use std::convert::Infallible;
 use std::sync::Arc;
+use uniflo_core::cleanup::Cleanup;
 use uniflo_core::util::now_ms;
 use uniflo_core::{Engine, HistoryQuery};
 use uniflo_schema::{Envelope, SCHEMA_VERSION};
+use uniflo_search::fts::Fts;
 use uniflo_search::{Query as SearchQuery, search};
 
 pub const DEFAULT_MAX_TEXT: usize = 32 * 1024;
@@ -41,23 +61,57 @@ pub const DEFAULT_MAX_TEXT: usize = 32 * 1024;
 #[derive(Clone)]
 struct AppState {
     engine: Arc<Engine>,
+    fts: Option<Arc<Fts>>,
+    cleanup: Option<Arc<Cleanup>>,
+    read_only: bool,
 }
 
+/// Optional services behind the router; a missing one answers 503.
+#[derive(Default)]
+pub struct Services {
+    pub fts: Option<Arc<Fts>>,
+    pub cleanup: Option<Arc<Cleanup>>,
+}
+
+/// Router without a full-text index: `/v1/search` answers 503.
 pub fn router(engine: Arc<Engine>, guard: GuardOptions) -> Router {
-    let state = AppState { engine };
+    router_with_fts(engine, guard, None)
+}
+
+pub fn router_with_fts(engine: Arc<Engine>, guard: GuardOptions, fts: Option<Arc<Fts>>) -> Router {
+    router_with(engine, guard, Services { fts, ..Default::default() })
+}
+
+pub fn router_with(engine: Arc<Engine>, guard: GuardOptions, services: Services) -> Router {
+    let state = AppState { engine, fts: services.fts, cleanup: services.cleanup, read_only: guard.read_only };
+    let guard = Arc::new(guard);
     Router::new()
         .route("/", get(index))
         .route("/demo", get(demo))
         .route("/v1/health", get(health))
         .route("/v1/harnesses", get(harnesses))
+        .route("/v1/harnesses/{id}/icon.svg", get(icons::icon))
         .route("/v1/stats", get(stats))
         .route("/v1/sessions", get(sessions))
         .route("/v1/sessions/{key}", get(session))
         .route("/v1/sessions/{key}/events", get(events))
+        .route("/v1/sessions/{key}/usage", get(usage::session_usage))
+        .route("/v1/usage", get(usage::usage))
+        .route("/v1/models", get(usage::models))
+        .route("/v1/pricing", get(usage::pricing))
+        .route("/v1/search", get(search::search))
+        .route("/v1/sessions/{key}/resume", get(agent::resume))
+        .route("/v1/sessions/{key}/open-terminal", axum::routing::post(agent::open_terminal))
+        .route("/v1/memory", get(agent::memory))
+        .route("/v1/memory/file", get(agent::memory_file))
         .route("/v1/stream", get(sse))
         .route("/v1/stream.ndjson", get(ndjson))
         .route("/v1/ws", get(ws))
-        .layer(axum::middleware::from_fn_with_state(Arc::new(guard), guard::guard))
+        .route("/v1/archive", get(cleanup::archives))
+        .route("/v1/cleanup/plan", post(cleanup::plan))
+        .route("/v1/cleanup/plans/{id}/execute", post(cleanup::execute))
+        .route("/v1/archive/{key}", delete(cleanup::remove))
+        .layer(axum::middleware::from_fn_with_state(guard, guard::guard))
         .with_state(state)
 }
 
@@ -101,7 +155,7 @@ async fn index() -> impl IntoResponse {
         "name": "uniflo",
         "version": env!("CARGO_PKG_VERSION"),
         "schema": SCHEMA_VERSION,
-        "endpoints": ["/demo", "/v1/health", "/v1/harnesses", "/v1/sessions", "/v1/sessions/{key}", "/v1/sessions/{key}/events", "/v1/stream", "/v1/stream.ndjson", "/v1/ws", "/v1/stats"],
+        "endpoints": ["/demo", "/v1/health", "/v1/harnesses", "/v1/harnesses/{id}/icon.svg", "/v1/sessions", "/v1/sessions/{key}", "/v1/sessions/{key}/events", "/v1/search", "/v1/stream", "/v1/stream.ndjson", "/v1/ws", "/v1/stats", "/v1/usage", "/v1/sessions/{key}/usage", "/v1/models", "/v1/pricing", "/v1/cleanup/plan", "/v1/cleanup/plans/{id}/execute", "/v1/archive", "/v1/archive/{key}", "/v1/sessions/{key}/resume", "/v1/sessions/{key}/open-terminal", "/v1/memory", "/v1/memory/file"],
     }))
 }
 
@@ -122,15 +176,22 @@ async fn health(State(s): State<AppState>) -> impl IntoResponse {
         "update_available": st.update.as_ref().is_some_and(|u| u.available),
         "latest_version": st.update.as_ref().and_then(|u| u.latest.clone()),
         "latest_prerelease": st.update.as_ref().and_then(|u| u.latest_prerelease.clone()),
+        "read_only": s.read_only,
     }))
 }
 
 async fn harnesses(State(s): State<AppState>) -> impl IntoResponse {
-    Json(s.engine.harnesses())
+    let mut list = s.engine.harnesses();
+    for h in &mut list {
+        h.icon = icons::path(&h.id);
+    }
+    Json(list)
 }
 
 async fn stats(State(s): State<AppState>) -> impl IntoResponse {
-    Json(s.engine.stats())
+    let mut v = serde_json::to_value(s.engine.stats()).unwrap_or_default();
+    v["fts"] = serde_json::to_value(s.fts.as_ref().map(|f| f.status())).unwrap_or_default();
+    Json(v)
 }
 
 #[derive(Deserialize)]
@@ -160,6 +221,8 @@ async fn session(State(s): State<AppState>, Path(key): Path<String>) -> Response
 struct EventParams {
     limit: Option<usize>,
     before: Option<u64>,
+    /// Event id: return a window centred on it instead of a page.
+    around: Option<String>,
     max_text: Option<usize>,
     format: Option<String>,
 }
@@ -167,6 +230,10 @@ struct EventParams {
 async fn events(State(s): State<AppState>, Path(key): Path<String>, Query(p): Query<EventParams>) -> Response {
     if s.engine.session(&key).is_none() {
         return ApiError(StatusCode::NOT_FOUND, format!("unknown session {key}")).into_response();
+    }
+    if let Some(id) = p.around {
+        let (limit, max) = (p.limit.unwrap_or(200).clamp(1, 10_000), p.max_text.unwrap_or(DEFAULT_MAX_TEXT));
+        return search::around(s.engine.clone(), key, id, limit, max, p.format.as_deref() == Some("ndjson")).await;
     }
     let q = HistoryQuery { before: p.before, limit: p.limit.unwrap_or(200).clamp(1, 10_000) };
     let engine = s.engine.clone();

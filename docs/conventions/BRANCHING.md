@@ -3,7 +3,7 @@
 > 只有 `main`（正式稳定版）与 `stage`（预发布与动态集成分支）两条长期分支；task 分支合并后必须立即删除，任何操作前先确认当前分支。
 > 规范参考：`/Users/crosery/work_file/geek_main/docs/conventions/BRANCHING.md`。
 
-状态：`current` · 更新：2026-10-04
+状态：`current` · 更新：2026-10-10
 
 ## 第负一步：先确认分支
 
@@ -54,16 +54,27 @@ node scripts/check-branch-invariants.mjs
 
 ## 自动化发版与 CI/CD 机制 (`.github/workflows/release.yml`)
 
-项目已接入 GitHub Actions 自动化发包与发布流水线，基于推送的 Git Tag 名称自动路由发布通道：
+推送 `v*` tag 触发发布流水线，按 tag 名称路由发布通道。流水线分三个 job，顺序固定：
 
-- **正式稳定版发布**：
-  - **触发条件**：打纯数字 SemVer tag（如 `git tag v0.1.2` 并推送）。
-  - **行为**：CI 自动运行全部测试门禁，通过后自动将全套 6 个 crate 发布为正式稳定版至 crates.io，并在 GitHub 创建正式 Release。
-  - **用户安装**：全局用户执行 `cargo install uniflo` 默认安装最新的正式稳定版。
+1. **`publish`**：跑 `scripts/verify.sh` 全部门禁，通过后按拓扑顺序把 6 个 crate 发布到 crates.io（`scripts/publish-crates.sh`）。crates.io 是主渠道，先发，不等二进制。
+2. **`build`**：5 个目标并行构建预编译二进制，见 ADR-0009：
+   - `aarch64-apple-darwin`、`x86_64-apple-darwin`
+   - `x86_64-unknown-linux-musl`、`aarch64-unknown-linux-musl`
+   - `x86_64-pc-windows-msvc`
 
-- **预发布 / Beta 版发布**：
-  - **触发条件**：打带预发布后缀的 tag（如 `git tag v0.1.2-rc.1` 或 `v0.1.2-beta.1` 并推送）。
-  - **行为**：CI 自动识别为预发布通道，将带后缀的预发布版本发布到 crates.io，并在 GitHub 标记创建 Pre-release。
-  - **用户安装**：全球用户若需体验最新的预发布 beta 版，执行 `cargo install uniflo --version 0.1.2-beta.1` 即可体验。
+   每个目标用 `scripts/package.sh` 打成 `uniflo-<version>-<target>.tar.gz`（Windows 为 `.zip`），包内含可执行文件、`LICENSE`、`THIRD_PARTY_NOTICES.md`。tag 版本与 `Cargo.toml` 不一致时失败。
+3. **`release`**：5 个包都到齐后生成 `SHA256SUMS`，连同 `install.sh`、`install.ps1` 一起上传到该 tag 的 GitHub Release。任一目标失败都不建 Release，修复后重跑失败的 job。
 
-*注：GitHub 仓库中需要在 `Settings -> Secrets and variables -> Actions` 中配置 `CARGO_REGISTRY_TOKEN` 密钥。*
+| 通道 | tag 示例 | crates.io | GitHub Release | 用户安装 |
+|---|---|---|---|---|
+| 正式稳定版 | `v0.1.5` | 正式版本 | 正式 Release（`latest` 指向它） | `cargo install uniflo`；一行安装脚本；`cargo binstall uniflo` |
+| 预发布 / Beta | `v0.1.5-rc.1`、`v0.1.5-beta.1` | 带后缀的预发布版本 | 标记为 Pre-release（tag 含 `-`），不会成为 `latest` | `cargo install uniflo --version 0.1.5-rc.1`；`UNIFLO_VERSION=0.1.5-rc.1` 加安装脚本 |
+
+- 发布前本地自检：
+  - `node scripts/check-dist.mjs` 检查工作流目标、binstall 模板与包名是否一致；
+  - `node scripts/third-party-notices.mjs --check` 检查第三方许可证清单是否过期（两者都在 `scripts/verify.sh` 中）。
+  - 依赖有变化时，先运行 `node scripts/third-party-notices.mjs` 重新生成。
+- 当前平台的安装与自升级全链路可在本机复现：`scripts/dist-e2e.sh <旧版 uniflo> <新版 uniflo>`。真实的跨平台构建与上传只能在推送 tag 后由 CI 验证，推送 tag 需要用户授权。
+- crates.io 先于 Release 资产发布，所以中间有几分钟窗口：crates.io 已有新版本，但 Release 资产还没传完。这段时间里 binary 安装的 `uniflo update` 会因下载失败而中止，可执行文件不受影响，稍后重试即可。
+
+*注：GitHub 仓库中需要在 `Settings -> Secrets and variables -> Actions` 中配置 `CARGO_REGISTRY_TOKEN` 密钥；Release 上传使用工作流自带的 `GITHUB_TOKEN`（`contents: write`）。*

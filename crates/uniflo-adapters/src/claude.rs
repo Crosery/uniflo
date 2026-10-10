@@ -121,6 +121,11 @@ impl LineDecoder for ClaudeFamily {
         }
     }
 
+    /// <id>.jsonl, its <id>/ directory (sub-agents, tool results) and <id>.* sidecars.
+    fn cleanup_targets(&self, src: &Path) -> Option<Vec<PathBuf>> {
+        uniflo_core::cleanup::targets::with_siblings(src, src.file_stem()?.to_str()?)
+    }
+
     fn identify(&self, p: &Path) -> Option<SourceId> {
         let id = p.file_stem()?.to_str()?.to_owned();
         let comps: Vec<&str> = p.iter().filter_map(|c| c.to_str()).collect();
@@ -294,7 +299,12 @@ fn assistant(v: &Value, t: i64, cx: &mut Cx<'_, ()>) {
         }
     }
     let mid = str_of(msg, "id").unwrap_or(&id).to_owned();
-    if let Some(u) = msg.get("usage").filter(|u| u.is_object()) {
+    // `<synthetic>` messages (API errors, local notices) were never a model call.
+    let synthetic = str_of(msg, "model") == Some("<synthetic>");
+    if let Some(u) = msg.get("usage").filter(|u| u.is_object() && !synthetic) {
+        // Anthropic shape already matches the contract: input / cache read / cache creation
+        // are disjoint, thinking is billed inside output_tokens. Lines of one message repeat
+        // the usage; the shared id makes them one step.
         let n = |k: &str| u.get(k).and_then(Value::as_u64).unwrap_or(0);
         let usage = Usage {
             input: n("input_tokens"),
@@ -302,6 +312,8 @@ fn assistant(v: &Value, t: i64, cx: &mut Cx<'_, ()>) {
             cache_read: n("cache_read_input_tokens"),
             cache_write: n("cache_creation_input_tokens"),
             reasoning: u.pointer("/output_tokens_details/thinking_tokens").and_then(Value::as_u64).unwrap_or(0),
+            model: model.clone(),
+            cost_usd: None,
         };
         cx.emit(format!("{mid}:usage"), t, Body::Usage(usage));
     }
@@ -402,7 +414,9 @@ mod tests {
         assert!(
             matches!(&r.events[4].body, Body::ToolResult { call_id, output, is_error: false, .. } if call_id == "toolu_1" && output == "a.txt")
         );
-        assert!(matches!(&r.events[2].body, Body::Usage(u) if u.input == 5 && u.cache_write == 3));
+        assert!(
+            matches!(&r.events[2].body, Body::Usage(u) if u.input == 5 && u.cache_write == 3 && u.model.as_deref() == Some("claude-x"))
+        );
         assert_eq!(r.events[0].ts, 1790942400000);
     }
 
