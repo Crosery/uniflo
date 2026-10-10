@@ -8,8 +8,15 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Output, Stdio};
+use std::sync::Mutex;
 use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+fn lock() -> std::sync::MutexGuard<'static, ()> {
+    TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 const BIN: &str = env!("CARGO_BIN_EXE_uniflo");
 const CODEX_ID: &str = "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b";
@@ -320,6 +327,7 @@ fn ids(v: &Value, list: &str, field: &str) -> Vec<String> {
 /// Scenarios: MCP 握手与工具列表 · MCP 工具结果与 REST 一致 · 三个入口数据一致.
 #[test]
 fn mcp_cli_and_rest_agree() {
+    let _lock = lock();
     let h = home();
     let d = h.daemon();
     let mut m = h.mcp(&d.url);
@@ -430,6 +438,7 @@ fn mcp_cli_and_rest_agree() {
 /// Scenario: MCP 在守护进程不可用时退回本地.
 #[test]
 fn mcp_answers_in_process_without_a_daemon() {
+    let _lock = lock();
     let h = home();
     let mut m = h.mcp("http://127.0.0.1:9");
     m.handshake();
@@ -449,6 +458,7 @@ fn mcp_answers_in_process_without_a_daemon() {
 /// Scenario: 恢复命令与注入防护.
 #[test]
 fn resume_commands_and_injection_guard() {
+    let _lock = lock();
     let h = home();
     let d = h.daemon();
     let resume = |key: &str| d.get(&format!("/v1/sessions/{}/resume", enc(key))).1;
@@ -505,6 +515,7 @@ fn resume_commands_and_injection_guard() {
 /// Scenario: 记忆文件与接力上下文.
 #[test]
 fn memory_files_and_context() {
+    let _lock = lock();
     let h = home();
     let d = h.daemon();
     let sub = h.proj().join("sub");
@@ -560,6 +571,7 @@ fn memory_files_and_context() {
 /// Scenario: 非交互、dry-run 与触发时机 — through the binary, outside a terminal.
 #[test]
 fn setup_outside_a_terminal_writes_nothing_and_nothing_prompts() {
+    let _lock = lock();
     let h = Home { dir: tempfile::tempdir().unwrap() };
     h.write(".cursor/mcp.json", "{\"mcpServers\":{}}");
     std::fs::create_dir_all(h.root().join(".claude/skills")).unwrap();
@@ -610,6 +622,7 @@ fn setup_outside_a_terminal_writes_nothing_and_nothing_prompts() {
 #[test]
 #[ignore = "uses the real claude and codex CLIs"]
 fn real_claude_and_codex_setup_in_an_isolated_home() {
+    let _lock = lock();
     let h = Home { dir: tempfile::tempdir().unwrap() };
     let claude_json = json!({"hasCompletedOnboarding": true, "mcpServers": {"other": {"type": "stdio", "command": "/usr/bin/true", "args": []}}});
     h.write(".claude.json", serde_json::to_string_pretty(&claude_json).unwrap());

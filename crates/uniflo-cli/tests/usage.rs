@@ -11,6 +11,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+fn lock() -> std::sync::MutexGuard<'static, ()> {
+    TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 const BIN: &str = env!("CARGO_BIN_EXE_uniflo");
 
 fn now_ms() -> i64 {
@@ -231,6 +237,7 @@ fn inode(p: &Path) -> u64 {
 
 #[test]
 fn cli_and_rest_agree_and_table_has_cost_columns() {
+    let _lock = lock();
     let h = Home::new();
     let t = now_ms() - 3_600_000;
     let mut s = user("u1", t) + &step("m1", t + 1000, "claude-sonnet-4-5", 1200, 300);
@@ -265,6 +272,7 @@ fn cli_and_rest_agree_and_table_has_cost_columns() {
 
 #[test]
 fn price_sync_opens_a_time_segment_and_reprices_only_new_steps() {
+    let _lock = lock();
     let h = Home::new();
     let t0 = now_ms() - 3_600_000;
     // The trailing prompt keeps the session working, so the daemon polls it while hot.
@@ -313,6 +321,7 @@ fn price_sync_opens_a_time_segment_and_reprices_only_new_steps() {
 
 #[test]
 fn sync_failures_and_safeguards_keep_prices_and_overrides() {
+    let _lock = lock();
     let h = Home::new();
     let t = now_ms() - 3_600_000;
     let s = user("u1", t)
@@ -364,6 +373,7 @@ fn sync_failures_and_safeguards_keep_prices_and_overrides() {
 
 #[test]
 fn no_price_sync_sends_no_request() {
+    let _lock = lock();
     let h = Home::new();
     std::fs::write(h.session(), user("u1", now_ms())).unwrap();
     h.mock.set(200, catalog(15.0));
