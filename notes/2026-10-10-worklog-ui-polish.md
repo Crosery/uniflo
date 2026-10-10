@@ -52,3 +52,10 @@
 - `CHROME=/Users/crosery/.local/bin/chrome-headless-shell scripts/verify.sh --e2e`：`{"ok":true,"passed":125,"failed":0}`，`verify: all checks passed`（含 `third-party-notices.mjs --check`）。第一次运行 `uniflo-cli` 的 `mcp_cli_and_rest_agree` 因 "timed out waiting for health" 失败，与本改动无关（网页与 e2e 之外无改动），原样重跑通过。
 - 截图（逐张人工看过，下拉与日历均未被裁切）：`notes/evidence/2026-10-10-web-console/usage-{1480,390}-{dark,light}-{project,date}.png`，分别是项目下拉展开、日期组件展开。
 - 未验证：真实数据页面（只用合成数据，没有碰 7311 的守护进程）。
+
+## 补丁 · 日历指针
+
+- 问题：暗色主题下 Air Datepicker 输入框上方的小菱形指针是库默认的白色，没有主题化。
+- 处理：Tom Select 下拉没有指针，为保持一致，用 `.air-datepicker .air-datepicker--pointer { display: none; }` 去掉；两份 HTML 保持一致。
+- 验证：`CHROME=/Users/crosery/.local/bin/chrome-headless-shell scripts/verify.sh --e2e` 通过，`{"ok":true,"passed":125,"failed":0}`；8 张 `usage-*.png` 已刷新。
+- 截图复查：逐张看了 1480 暗色日期、390 暗色 / 亮色日期、390 暗色项目。窄屏下日历是库的移动模式（居中弹层加半透明遮罩，亮色下整页变灰是遮罩所致），没有被裁切；窄屏项目下拉没有被裁切，名、路径、会话数、费用都在，列表在固定高度内滚动。
