@@ -531,6 +531,41 @@ async function runSearchHelp() {
     help.text.includes("会话里说过的话") && help.text.includes("侧栏的搜索框") && help.text.includes("工具参数与工具输出"), help.text.slice(0, 80));
   report("[search-help] ready state names the index and its size", /全文索引已就绪 · \d+(\.\d+)? (KB|MB|GB)/.test(help.index), help.index);
   report("[search-help] two example queries are offered", help.chips.length === 2 && help.chips[1].startsWith('"'), help.chips.join(" | "));
+  const home = await cdp.eval(`({ vis: !document.querySelector('#s-home').hidden, sec: document.querySelector('#h-sessions h2').textContent, rows: document.querySelectorAll('#h-sessions .hrow[data-open]').length,
+    running: [...document.querySelectorAll('#h-sessions .hrow .age.work')].length, tries: document.querySelectorAll('#s-home .s-try').length,
+    idx: document.querySelector('#h-index').textContent, syn: document.querySelector('#s-home .hsyn').textContent })`);
+  const runningNow = (await apiJson(api, "/v1/sessions?q=s:work&limit=50")).length;
+  report("[search-home] empty state lists what is running (or recent sessions) as clickable rows",
+    home.vis && home.rows > 0 && (runningNow ? home.sec.includes("正在运行") && home.running > 0 : home.sec.includes("最近会话")), `${home.sec} · ${home.rows} rows · ${runningNow} running`);
+  report("[search-home] empty state has the index card, several examples and the syntax cheat sheet",
+    /已索引会话/.test(home.idx) && /索引大小/.test(home.idx) && home.tries >= 6 && home.syn.includes("-a") && home.syn.includes("h:claude") && home.syn.includes("since:7d"), `${home.tries} examples`);
+  for (const [w, h, mobile] of [[1480, 920, false], [390, 844, true]]) {
+    await viewport(w, h, mobile);
+    for (const theme of ["dark", "light"]) {
+      await scheme(theme);
+      await sleep(200);
+      const audit = await cdp.eval(`__e2e.audit('#v-search')`);
+      report(`[search-home] ${w}px ${theme}: no overflow, no overlap, AA contrast`, !audit.overflow.length && !audit.overlap.length && !audit.contrast.length, [...audit.overflow, ...audit.overlap, ...audit.contrast].slice(0, 4).join(" | "));
+      await shot(`search-home-${w}-${theme}.png`);
+    }
+  }
+  await viewport(1480, 920);
+  await scheme(null);
+  await click('#h-sessions .hrow[data-open]');
+  const opened = await waitFor(`!document.querySelector('#app').hidden && !!document.querySelector('.row.sel')`, 5_000, "open session").catch(() => false);
+  report("[search-home] clicking a session row opens it", !!opened);
+  await load(`${api}/demo?token=${TOKEN}&view=search`);
+  await waitFor(`!document.querySelector('#s-home').hidden && document.querySelector('#s-index').dataset.state === 'ready'`, 10_000, "home again");
+  await click('#s-home .s-try[data-filter="since:7d"]');
+  const withFilter = await waitFor(`(() => { const st = document.querySelector('#s-status').textContent; return st && !st.startsWith('搜索中') && !st.startsWith('输入要找的词') ? { q: document.querySelector('#s-q').value, f: document.querySelector('#s-f').value } : null; })()`, 8_000, "try chip").catch(() => null);
+  report("[search-home] clicking a \"试试这些\" example fills query and filter and runs the search", withFilter?.q === "refactor" && withFilter?.f === "since:7d", JSON.stringify(withFilter));
+  await load(`${api}/demo?token=${TOKEN}&view=search`);
+  await waitFor(`!document.querySelector('#h-recent').hidden`, 8_000, "recent searches").catch(() => {});
+  const rec = await cdp.eval(`({ shown: !document.querySelector('#h-recent').hidden, text: document.querySelector('#h-recent').textContent })`);
+  report("[search-home] recent searches are kept in this browser and listed", rec.shown && rec.text.includes("refactor"), rec.text.slice(0, 60));
+  await click('#h-recent [data-clear-recent]');
+  report("[search-home] \"清除\" empties the recent searches", await cdp.eval(`document.querySelector('#h-recent').hidden && !localStorage.getItem('uniflo.recentSearches') || document.querySelector('#h-recent').hidden`));
+  await waitFor(`document.querySelector('#s-index').dataset.state === 'ready'`, 5_000).catch(() => {});
   await click('.s-ex [data-example]');
   const ran = await waitFor(`(() => { const q = document.querySelector('#s-q').value, st = document.querySelector('#s-status').textContent;
     return st && !st.startsWith('搜索中') && !st.startsWith('输入要找的词') ? { q, st, url: location.search } : null; })()`, 8_000, "example search").catch(() => null);

@@ -1,6 +1,6 @@
 ✓ Daemon listening on http://127.0.0.1:PORT
 ✓ /v1/harnesses returned 33 registered harnesses
-✓ /demo served 298014 bytes HTML correctly
+✓ /demo served 306891 bytes HTML correctly
 ✓ /v1/sessions returned response with 0 items
 ✓ /v1/search answers 503 with --no-fts
 ✓ daemon without token answers 401
@@ -11,7 +11,7 @@
 ✓ [sse] working session shows running tool + work badge
 ✓ [sse] transcript first page rendered · 151 events
 ✓ [sse] "load earlier" pages history · 151 → 251
-✓ [sse] appended message appears live · 6 ms
+✓ [sse] appended message appears live · 15 ms
 ✓ [sse] session flips to work
 ✓ [sse] tool call + result stream in
 ✓ [sse] turn end flips to idle
@@ -20,7 +20,7 @@
 ✓ [ws] list: claude + sub-agent + omp + codex, codex working · 102 rows
 ✓ [ws] transcript first page rendered · 150 events
 ✓ [ws] "load earlier" pages history · 150 → 256
-✓ [ws] appended message appears live · 3 ms
+✓ [ws] appended message appears live · 10 ms
 ✓ [ws] session flips to work
 ✓ [ws] tool call + result stream in
 ✓ [ws] turn end flips to idle
@@ -29,7 +29,7 @@
 ✓ [ndjson] list: claude + sub-agent + omp + codex, codex working · 102 rows
 ✓ [ndjson] transcript first page rendered · 150 events
 ✓ [ndjson] "load earlier" pages history · 150 → 261
-✓ [ndjson] appended message appears live · 4 ms
+✓ [ndjson] appended message appears live · 5 ms
 ✓ [ndjson] session flips to work
 ✓ [ndjson] tool call + result stream in
 ✓ [ndjson] turn end flips to idle
@@ -37,7 +37,7 @@
 ✓ [cross-origin] page on another loopback origin passes all checks
 ✓ [cross-origin] omp transcript rendered
 ✓ [cross-origin] no page errors
-✓ [page] examples/web/index.html equals the gateway's embedded copy · 303568 bytes
+✓ [page] examples/web/index.html equals the gateway's embedded copy · 312904 bytes
 ✓ [page] daemon /demo serves that page
 ✓ [icons] /v1/harnesses carries icon; icon.svg is image/svg+xml · 30 with icon, 3 without
 ✓ [icons] synthetic data covers every supported harness · 33 harnesses
@@ -66,18 +66,28 @@
 ✓ [search] clicking the hit opens the session, scrolls to the event and highlights it · {"inView":true,"before":true,"after":true,"selected":"claude:search-target","view":true,"url":"?token=e2e-not-a-secret&select=claude:search-target&sq=%E9%87%8F%E5%AD%90%E9%80%80%E7%81%AB%E8%B0%83%E5%BA%A6%E5%99%A8&at=search-target-u12"}
 ✓ [search] no page errors
 ✓ [search-help] the view says what it searches and how it differs from the sidebar search · 全文检索
-✓ [search-help] ready state names the index and its size · 全文索引已就绪 · 442 KB
+✓ [search-help] ready state names the index and its size · 全文索引已就绪 · 418 KB
 ✓ [search-help] two example queries are offered · error | "not found"
+✓ [search-home] empty state lists what is running (or recent sessions) as clickable rows · 正在运行2 个会话 · 2 rows · 2 running
+✓ [search-home] empty state has the index card, several examples and the syntax cheat sheet · 7 examples
+✓ [search-home] 1480px dark: no overflow, no overlap, AA contrast
+✓ [search-home] 1480px light: no overflow, no overlap, AA contrast
+✓ [search-home] 390px dark: no overflow, no overlap, AA contrast
+✓ [search-home] 390px light: no overflow, no overlap, AA contrast
+✓ [search-home] clicking a session row opens it
+✓ [search-home] clicking a "试试这些" example fills query and filter and runs the search · {"q":"refactor","f":"since:7d"}
+✓ [search-home] recent searches are kept in this browser and listed · 最近搜索清除refactor · since:7d量子退火调度器只保存在这个浏览器里。
+✓ [search-home] "清除" empties the recent searches
 ✓ [search-help] clicking an example fills the input and runs the search · {"q":"error","st":"0 个会话命中 · 2 ms","url":"?token=e2e-not-a-secret&view=search&select=claude:busy&sq=error"}
 ✓ [search-help] building state shows done/total and "估算中" before two samples · 正在建立全文索引：20 / 100 个会话（20%） · 剩余时间估算中。建好之前能搜，但结果可能不全。
 ✓ [search-help] ETA appears once the rate is known and the page refreshes by itself · 正在建立全文索引：40 / 100 个会话（40%） · 剩余时间约 5 秒。建好之前能搜，但结果可能不全。
-✓ [search-help] the notice turns into the ready line when the index finishes · 全文索引已就绪 · 442 KB
+✓ [search-help] the notice turns into the ready line when the index finishes · 全文索引已就绪 · 418 KB
 ✓ [search-help] no page errors
 ✓ [search-help] --no-fts daemon: says search is off and how to turn it on, and disables the form · 全文检索未启用：守护进程以 --no-fts 启动，或索引无法打开（原因见守护进程日志）。去掉 --no-fts 重启守护进程即可开启；没有它，这里搜不到对话内容。
 ✓ [insights] heatmap (sessions) equals /v1/usage?group_by=day · 51 active days of 370
-✓ [insights] weekday × hour (sessions) equals weekday_hour, weekday and hour groups · 65 cells
+✓ [insights] weekday × hour (sessions) equals weekday_hour, weekday and hour groups · 51 cells
 ✓ [insights] heatmap (tokens) equals /v1/usage?group_by=day · 51 active days of 370
-✓ [insights] weekday × hour (tokens) equals weekday_hour, weekday and hour groups · 65 cells
+✓ [insights] weekday × hour (tokens) equals weekday_hour, weekday and hour groups · 51 cells
 ✓ [insights] top-5 rankings by cost equal the grouped /v1/usage
 ✓ [insights] top-5 rankings by tokens equal the grouped /v1/usage
 ✓ [insights] no page errors
@@ -100,4 +110,4 @@
 ✓ [manage] no page errors
 ✓ [read-only] write controls are hidden with an explanation · {"checkboxes":0,"plan":false,"selall":false,"note":true,"del":0,"clean":false,"term":0}
 ✓ [read-only] no page errors
-{"ok":true,"passed":97,"failed":0}
+{"ok":true,"passed":107,"failed":0}

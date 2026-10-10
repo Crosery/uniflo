@@ -22,7 +22,7 @@
 | 命令 | 结果 |
 |---|---|
 | `cargo test -p uniflo-core -p uniflo-gateway` | 通过；含 `launches_open_with_a_private_script_or_ghostty_argv`、`failures_carry_a_reason_and_the_command_and_leave_no_script`、`terminal_launch_needs_no_apple_events`、集成测试 `launches_through_open_without_apple_events` |
-| `CHROME=/Users/crosery/.local/bin/chrome-headless-shell scripts/verify.sh --e2e` | `verify: all checks passed`，e2e `{"ok":true,"passed":97,"failed":0}`；输出见 `notes/evidence/2026-10-10-web-console/e2e-run.txt` |
+| `CHROME=/Users/crosery/.local/bin/chrome-headless-shell scripts/verify.sh --e2e` | `verify: all checks passed`，e2e `{"ok":true,"passed":107,"failed":0}`；输出见 `notes/evidence/2026-10-10-web-console/e2e-run.txt` |
 
 | Scenario / 缺陷 | 证据 | 结论 |
 |---|---|---|
@@ -32,6 +32,10 @@
 | 检索视图说明、示例、三种索引状态 | e2e 的 `[search-help]` 8 项：说明文字、就绪行、两个示例、点击示例触发搜索、建立中（进度与「估算中」→ ETA → 就绪，桩 `/v1/stats`）、`--no-fts` 守护进程（专用端口，只读，合成数据）显示未启用并禁用表单 | PASS |
 
 截图（`notes/evidence/2026-10-10-web-console/`）：`icons-dark.png`、`icons-light.png`、`detail.png`、`search-jump.png`、`search-help.png`、`search-building.png`、`search-off.png`，以及 20 张 `visual-<view>-<1480|390>-<dark|light>.png`（含检索与会话列表）。
+
+## 追加：检索视图空状态
+
+未输入或无结果时显示 `#s-home`：「正在运行」（无则「最近会话」，来自页面已有的会话数据，3 秒刷新，侧栏有过滤时另取 `/v1/sessions?limit=60`）、全文索引卡（已索引会话 / 大小 / 上次建立耗时；未启用时给原因和开启方法）、「试试这些」6 个示例（带过滤的会同时填过滤框）、检索语法速查、浏览器本地的「最近搜索」（localStorage，可清除）。宽屏两栏、窄屏单栏。e2e `[search-home]` 10 项：运行 / 最近行、索引卡与语法、4 种宽度×主题的溢出 / 重叠 / 对比度审计、点击行打开会话、点击示例同时填 query 与 filter 并搜索、最近搜索出现与清除；截图 `search-home-{1480,390}-{dark,light}.png`，已人工看过。索引状态里没有「最后更新时间」字段，所以不显示。
 
 ## 未验证 / 残余风险
 

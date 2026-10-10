@@ -432,6 +432,35 @@ details[open] > summary .chev { transform: rotate(90deg); }
 .s-ex .chip { font-family: var(--font-mono); background: var(--surface); }
 .s-ex .chip:disabled { opacity: .5; }
 #s-index:empty { display: none; }
+.shome { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr); gap: 12px; align-items: start; margin-top: 4px; }
+.hcol { display: grid; gap: 12px; min-width: 0; }
+.hcard { border: .5px solid var(--border-strong); border-radius: var(--r-xl); background: var(--bg-raised); padding: 14px 16px 12px; min-width: 0; }
+.hcard h2 { margin: 0 0 10px; display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: var(--fs-sm); font-weight: 600; letter-spacing: -.005em; }
+.hcard h2 small { font-size: var(--fs-xs); font-weight: 400; color: var(--text-3); }
+.hcard h2 .live { display: inline-flex; align-items: center; gap: 6px; }
+.hcard h2 .live::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 22%, transparent); }
+.hrows { display: grid; margin: 0 -8px; }
+.hrow { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; gap: 10px; align-items: center; width: 100%; padding: 8px; border: 0; border-radius: var(--r-md); background: none; text-align: left; color: var(--text); }
+.hrow:hover { background: var(--surface); }
+.hrow .t { min-width: 0; }
+.hrow .t b { display: block; font-size: var(--fs-sm); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hrow .t span { display: block; font: 12px var(--font-mono); color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hrow .age { font: 12px var(--font-mono); color: var(--text-3); white-space: nowrap; }
+.hrow .age.work { color: var(--ok); }
+.hnone { margin: 0; padding: 8px 0; font-size: var(--fs-sm); color: var(--text-3); }
+.hchips { display: flex; flex-wrap: wrap; gap: 6px; }
+.hchips .chip { font-family: var(--font-mono); height: 26px; }
+.hsyn { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 6px 14px; margin: 0; font-size: var(--fs-sm); color: var(--text-2); }
+.hsyn dt, .hsyn dd { margin: 0; }
+.hsyn code { font-size: 12px; padding: 1px 6px; border-radius: var(--r-sm); background: var(--surface-hover); }
+.hstats { display: grid; grid-template-columns: repeat(auto-fit, minmax(96px, 1fr)); gap: 8px; }
+.hstats div { padding: 8px 10px; border-radius: var(--r-md); background: var(--surface); }
+.hstats b { display: block; font: 600 var(--fs-base) var(--font-sans); font-variant-numeric: tabular-nums; }
+.hstats span { font-size: var(--fs-xs); color: var(--text-3); }
+.hcard .hint { margin: 10px 0 0; font-size: var(--fs-xs); color: var(--text-3); }
+.hcard .linkbtn { border: 0; background: none; padding: 0; font-size: var(--fs-xs); color: var(--text-3); }
+.hcard .linkbtn:hover { color: var(--text); }
+@media (max-width: 860px) { .shome { grid-template-columns: minmax(0, 1fr); } }
 #s-index .notice { align-items: center; }
 #s-index .grow { flex: 1; min-width: 0; }
 .pbar { height: 4px; margin-top: 6px; border-radius: 2px; background: var(--surface-hover); overflow: hidden; }
@@ -852,6 +881,38 @@ SOFTWARE.
     <div class="status-line" id="s-status" role="status"></div>
     <div class="sres" id="s-results"></div>
     <button class="btn" id="s-more" hidden>加载更多会话</button>
+    <div class="shome" id="s-home" hidden>
+      <div class="hcol">
+        <section class="hcard" id="h-sessions" aria-labelledby="h-sessions-t"></section>
+        <section class="hcard" aria-labelledby="h-syn-t">
+          <h2 id="h-syn-t">检索语法</h2>
+          <dl class="hsyn">
+            <dt><code>a b</code></dt><dd>两个词同时出现</dd>
+            <dt><code>"a b"</code></dt><dd>整句短语</dd>
+            <dt><code>-a</code></dt><dd>排除含 a 的内容</dd>
+            <dt><code>h:claude</code></dt><dd>只看某个 harness（右侧过滤框）</dd>
+            <dt><code>s:work</code></dt><dd>只看某种状态：work / idle</dd>
+            <dt><code>since:7d</code></dt><dd>最近 7 天有活动的会话</dd>
+            <dt><code>in:dir</code></dt><dd>目录里含 dir 的会话</dd>
+          </dl>
+        </section>
+      </div>
+      <div class="hcol">
+        <section class="hcard" id="h-index" aria-labelledby="h-index-t"></section>
+        <section class="hcard" aria-labelledby="h-try-t">
+          <h2 id="h-try-t">试试这些</h2>
+          <div class="hchips">
+            <button type="button" class="chip s-try" data-example="error">error</button>
+            <button type="button" class="chip s-try" data-example="&quot;permission denied&quot;">"permission denied"</button>
+            <button type="button" class="chip s-try" data-example="timeout -retry">timeout -retry</button>
+            <button type="button" class="chip s-try" data-example="TODO">TODO</button>
+            <button type="button" class="chip s-try" data-example="refactor" data-filter="since:7d">refactor · since:7d</button>
+            <button type="button" class="chip s-try" data-example="npm install" data-filter="h:claude">npm install · h:claude</button>
+          </div>
+        </section>
+        <section class="hcard" id="h-recent" aria-labelledby="h-recent-t" hidden></section>
+      </div>
+    </div>
   </div>
 </section>
 
@@ -2846,7 +2907,7 @@ async function runFts(append = false) {
   const q = $("#s-q").value.trim(), f = $("#s-f").value.trim();
   setp({ sq: q, sf: f });
   const status = $("#s-status"), box = $("#s-results");
-  if (!q) { box.innerHTML = ""; status.textContent = "输入要找的词：可以是中文、代码片段、报错信息。"; $("#s-more").hidden = true; return; }
+  if (!q) { box.innerHTML = ""; status.textContent = "输入要找的词：可以是中文、代码片段、报错信息。"; $("#s-more").hidden = true; syncHome(); return; }
   const mine = ++S.seq;
   if (!append) S.offset = 0;
   status.className = "status-line";
@@ -2861,6 +2922,8 @@ async function runFts(append = false) {
     </article>`).join("");
     if (append) box.insertAdjacentHTML("beforeend", html); else box.innerHTML = html || `<div class="empty" style="height:auto;padding:48px 0"><h3>没有找到</h3><p>换个词，或去掉会话过滤再试。</p></div>`;
     S.offset = r.offset + r.results.length;
+    if (!append) rememberSearch(q, f);
+    syncHome();
     const more = r.total > S.offset;
     $("#s-more").hidden = !more;
     const notes = [];
@@ -2874,6 +2937,7 @@ async function runFts(append = false) {
     status.className = "status-line bad";
     status.textContent = e.status === 503 ? "全文检索不可用，原因见上方说明。" : `检索失败：${e.message}`;
     if (e.status === 503) refreshFtsIndex();
+    syncHome();
   }
 }
 // Index state comes from /v1/stats `fts`: null = no index (--no-fts, or it failed to open);
@@ -2891,6 +2955,7 @@ function ftsEta(done, total) {
   return fmtEta((total - done) / ((done - d0) / ((now - t0) / 1000)));
 }
 function renderFtsIndex(st) {
+  HOME.st = st;
   const box = $("#s-index");
   const state = !st ? "off" : st.indexing ? "building" : "ready";
   if (state !== FI.state) FI.samples = [];
@@ -2898,9 +2963,10 @@ function renderFtsIndex(st) {
   FI.state = state;
   box.dataset.state = state;
   const off = state === "off";
-  for (const el of $$("#s-form input, #s-form button, .s-ex .chip")) el.disabled = off;
+  for (const el of $$("#s-form input, #s-form button, #v-search .chip")) el.disabled = off;
   if (off) {
     box.innerHTML = `<div class="notice warn">${icoInfo}<div><b>全文检索未启用</b>：守护进程以 <code>--no-fts</code> 启动，或索引无法打开（原因见守护进程日志）。去掉 <code>--no-fts</code> 重启守护进程即可开启；没有它，这里搜不到对话内容。</div></div>`;
+    renderHome();
     return;
   }
   if (state === "building") {
@@ -2909,6 +2975,7 @@ function renderFtsIndex(st) {
     const pct = total ? Math.min(100, Math.round(done / total * 100)) : 0;
     box.innerHTML = `<div class="notice">${icoInfo}<div class="grow"><b>正在建立全文索引</b>：${done} / ${total} 个会话${total ? `（${pct}%）` : ""} · 剩余时间${total ? (eta || "估算中") : "估算中"}。建好之前能搜，但结果可能不全。
       <div class="pbar" role="progressbar" aria-label="索引进度" aria-valuemin="0" aria-valuemax="${total}" aria-valuenow="${done}"><i style="width:${pct}%"></i></div></div></div>`;
+    renderHome();
     return;
   }
   const bad = st.errors > 0 && st.last_error;
@@ -2918,6 +2985,7 @@ function renderFtsIndex(st) {
     ? `<div class="notice warn">${icoInfo}<div><b>索引遇到 ${st.errors} 个错误</b>，最近一次：<code>${esc(st.last_error)}</code>。其余内容仍可检索。</div></div>`
     : `<div class="status-line">${esc(bits.join(" · "))}</div>`;
   if (wasBuilding && $("#s-q").value.trim()) runFts();
+  renderHome();
 }
 async function refreshFtsIndex() {
   const mine = ++FI.seq;
@@ -2933,11 +3001,62 @@ async function refreshFtsIndex() {
     $("#s-index").innerHTML = `<div class="notice bad">${icoInfo}<div>读不到守护进程状态：${esc(e.message)}。</div></div>`;
   }
 }
+// Empty state: what is running / recent, the index at a glance, examples, syntax, recent searches.
+const HOME = { list: null, st: null };
+const RECENT_KEY = "uniflo.recentSearches";
+const recents = () => { try { return JSON.parse(localStorage.getItem(RECENT_KEY) || "[]").filter((r) => r && r.q); } catch { return []; } };
+function rememberSearch(q, f) {
+  try { localStorage.setItem(RECENT_KEY, JSON.stringify([{ q, f }, ...recents().filter((r) => r.q !== q || r.f !== f)].slice(0, 8))); } catch {}
+}
+function homeSessions() {
+  const all = filtered() ? HOME.list || [] : [...sessions.values()];
+  return all.filter((x) => !x.archived);
+}
+function renderHome() {
+  const home = $("#s-home");
+  if (home.hidden) return;
+  const all = homeSessions();
+  const running = all.filter((x) => x.status === "work").sort((a, b) => b.status_since - a.status_since);
+  const rows = (list, work) => `<div class="hrows">${list.map((x) => `<button type="button" class="hrow" data-open="${esc(x.key)}">${hicon(x.harness, "lg")}<span class="t"><b>${esc(label(x))}</b><span>${esc(x.cwd || x.key)}</span></span><span class="age${work ? " work" : ""}" title="${esc(stamp(work ? x.status_since : x.updated_at))}">${work ? "运行 " : ""}${age(work ? x.status_since : x.updated_at)}</span></button>`).join("")}</div>`;
+  if (running.length) {
+    $("#h-sessions").innerHTML = `<h2 id="h-sessions-t"><span class="live">正在运行</span><small>${running.length} 个会话</small></h2>${rows(running.slice(0, 8), true)}`;
+  } else {
+    const recent = all.slice().sort((a, b) => b.updated_at - a.updated_at).slice(0, 8);
+    $("#h-sessions").innerHTML = `<h2 id="h-sessions-t">最近会话<small>现在没有在运行的会话</small></h2>${recent.length ? rows(recent, false) : '<p class="hnone">还没有会话。</p>'}`;
+  }
+  const st = HOME.st, card = $("#h-index");
+  if (!st) card.innerHTML = `<h2 id="h-index-t">全文索引<small>未启用</small></h2><p class="hnone">守护进程以 <code>--no-fts</code> 启动，或索引无法打开（原因见守护进程日志）。去掉 <code>--no-fts</code> 重启守护进程即可开启。</p>`;
+  else {
+    const { done = 0, total = 0 } = st.progress || {};
+    const stats = [[`${done} / ${total}`, "已索引会话"], [fmtBytes(st.bytes || 0), "索引大小"]];
+    if (st.build_ms != null) stats.push([st.build_ms < 1000 ? `${st.build_ms} ms` : `${(st.build_ms / 1000).toFixed(1)} s`, "上次建立耗时"]);
+    card.innerHTML = `<h2 id="h-index-t">全文索引<small>${st.indexing ? "建立中" : st.errors > 0 ? "有错误" : "已就绪"}</small></h2>
+      <div class="hstats">${stats.map(([v, k]) => `<div><b>${esc(v)}</b><span>${k}</span></div>`).join("")}</div>
+      ${st.indexing ? `<p class="hint">建好之前能搜，但结果可能不全，进度见上方。</p>` : st.errors > 0 && st.last_error ? `<p class="hint">最近一次错误：${esc(st.last_error)}</p>` : st.warming ? '<p class="hint">正在合并预热，个别词第一次搜索可能稍慢。</p>' : ""}`;
+  }
+  const rc = recents(), box = $("#h-recent");
+  box.hidden = !rc.length;
+  if (rc.length) box.innerHTML = `<h2 id="h-recent-t">最近搜索<button type="button" class="linkbtn" data-clear-recent>清除</button></h2><div class="hchips">${rc.map((r) => `<button type="button" class="chip s-try" data-example="${esc(r.q)}" data-filter="${esc(r.f || "")}">${esc(r.q)}${r.f ? ` · ${esc(r.f)}` : ""}</button>`).join("")}</div><p class="hint">只保存在这个浏览器里。</p>`;
+}
+// Show the empty state whenever no result groups are on screen.
+function syncHome() {
+  const empty = !$("#s-results .sgroup");
+  const was = $("#s-home").hidden;
+  $("#s-home").hidden = !empty;
+  if (empty) {
+    if (filtered() && !HOME.list) getJson("/v1/sessions", { limit: 60 }).then((l) => { HOME.list = l; renderHome(); }).catch(() => {});
+    renderHome();
+  }
+  if (empty && was) setTimeout(() => $("#s-home").hidden || renderHome(), 0);
+}
+setInterval(() => { if (view === "search") { if (filtered()) getJson("/v1/sessions", { limit: 60 }).then((l) => { HOME.list = l; renderHome(); }).catch(() => {}); else renderHome(); } }, 3000);
 let ftsTimer = null;
 const queueFts = () => { clearTimeout(ftsTimer); ftsTimer = setTimeout(() => runFts(), 300); };
 viewEnter.search = () => {
   const q = getp("sq"), f = getp("sf");
   refreshFtsIndex();
+  HOME.list = null;
+  syncHome();
   if ($("#s-q").value !== q || $("#s-f").value !== f || !$("#s-results").childElementCount) { $("#s-q").value = q; $("#s-f").value = f; runFts(); }
 };
 
@@ -3356,12 +3475,17 @@ document.addEventListener("toggle", (e) => {
 }, true);
 $("#q").addEventListener("input", () => { setp({ q: $("#q").value.trim() }); syncFilters(); queueSearch(); });
 $("#s-form").addEventListener("submit", (e) => { e.preventDefault(); clearTimeout(ftsTimer); runFts(); });
-$(".s-ex").addEventListener("click", (e) => {
+$("#v-search").addEventListener("click", (e) => {
   const c = e.target.closest("[data-example]");
-  if (!c) return;
-  $("#s-q").value = c.dataset.example;
-  clearTimeout(ftsTimer);
-  runFts();
+  if (c) {
+    $("#s-q").value = c.dataset.example;
+    if (c.dataset.filter !== undefined) $("#s-f").value = c.dataset.filter;
+    clearTimeout(ftsTimer);
+    return runFts();
+  }
+  const o = e.target.closest("[data-open]");
+  if (o) return openSession(o.dataset.open);
+  if (e.target.closest("[data-clear-recent]")) { try { localStorage.removeItem(RECENT_KEY); } catch {} renderHome(); }
 });
 $("#s-q").addEventListener("input", queueFts);
 $("#s-f").addEventListener("input", queueFts);
