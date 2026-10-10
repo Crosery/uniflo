@@ -270,6 +270,7 @@ fn price_sync_opens_a_time_segment_and_reprices_only_new_steps() {
 
     let out = h.run(Some(&d), &["pricing", "sync"]);
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    #[cfg(unix)]
     let ino = inode(&h.pricing_dir().join("catalog.json"));
     let old = (1000.0 * 3.0 + 1000.0 * 15.0) / 1e6;
     wait("first catalog in the daemon", Duration::from_secs(5), || step_costs(&d) == [Some(old)]);
@@ -279,8 +280,8 @@ fn price_sync_opens_a_time_segment_and_reprices_only_new_steps() {
     let r = h.json(Some(&d), &["pricing", "sync", "--json"]);
     let after = now_ms();
     assert_eq!(r["changed"], json!(["claude-test-m"]));
-    let cat_path = h.pricing_dir().join("catalog.json");
-    assert_ne!(inode(&cat_path), ino, "catalog.json replaced by rename");
+    #[cfg(unix)]
+    assert_ne!(inode(&h.pricing_dir().join("catalog.json")), ino, "catalog.json replaced by rename");
     let leftovers: Vec<_> = std::fs::read_dir(h.pricing_dir())
         .unwrap()
         .flatten()

@@ -203,7 +203,7 @@ mod tests {
 
         let got: Vec<(String, MemoryScope, String)> = list(&home, Some(&sub))
             .into_iter()
-            .map(|f| (f.path.replace(&t.path().display().to_string(), ""), f.scope, f.harness))
+            .map(|f| (f.path.replace(&t.path().display().to_string(), "").replace('\\', "/"), f.scope, f.harness))
             .collect();
         let g = MemoryScope::Global;
         let p = MemoryScope::Project;

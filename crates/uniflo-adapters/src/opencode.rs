@@ -18,6 +18,8 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use uniflo_core::adapter::Batch;
+#[cfg(target_os = "windows")]
+use uniflo_core::util::env_dir;
 use uniflo_core::util::{file_mtime_ms, home, now_ms, str_of, string_of};
 use uniflo_core::{Adapter, Cursor, HarnessInfo, HistoryQuery, LiveSession, MetaPatch, ReadOutput, Record};
 use uniflo_schema::{Body, Event, Usage, session_key};
@@ -33,7 +35,7 @@ const OPEN_CAP: usize = 512;
 fn data_db(sub: &str, name: &str) -> PathBuf {
     let mut cands = vec![home().join(".local/share").join(sub).join(name)];
     #[cfg(target_os = "windows")]
-    if let Some(local) = std::env::var_os("LOCALAPPDATA").map(PathBuf::from) {
+    if let Some(local) = env_dir("LOCALAPPDATA") {
         cands.push(local.join(sub).join(name));
     }
     cands.sort_by_key(|p| !p.is_file());

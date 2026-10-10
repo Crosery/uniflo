@@ -45,7 +45,10 @@ impl Filter {
         match self {
             Filter::Harness(hs) => hs.iter().any(|h| h == &s.harness),
             Filter::Status(st) => s.status == *st,
-            Filter::Cwd(c) => s.cwd.as_deref().is_some_and(|cwd| cwd.to_lowercase().contains(c)),
+            Filter::Cwd(c) => s
+                .cwd
+                .as_deref()
+                .is_some_and(|cwd| cwd.to_lowercase().replace('\\', "/").contains(&c.replace('\\', "/"))),
             Filter::Since(t) => s.updated_at >= *t,
             Filter::Before(t) => s.updated_at < *t,
             Filter::Sub(sub) => s.parent.is_some() == *sub,

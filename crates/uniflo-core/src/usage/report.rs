@@ -178,42 +178,48 @@ pub fn project_of(cwd: &str) -> String {
 }
 
 fn trim_dir(s: &str) -> &str {
-    let t = s.trim_end_matches('/');
+    let t = s.trim_end_matches(['/', '\\']);
     if t.is_empty() && s.starts_with('/') { "/" } else { t }
 }
 
 /// `cwd` relative to `base` as components; `None` when it is not under it.
 fn below<'a>(cwd: &'a str, base: &str) -> Option<Vec<&'a str>> {
     let cwd = trim_dir(cwd);
+    let base = trim_dir(base);
     let rest = if base == "/" {
         cwd.strip_prefix('/')?
     } else if cwd == base {
         ""
     } else {
-        cwd.strip_prefix(base)?.strip_prefix('/')?
+        cwd.strip_prefix(base)?.strip_prefix(['/', '\\'])?
     };
-    Some(rest.split('/').filter(|c| !c.is_empty()).collect())
+    Some(rest.split(['/', '\\']).filter(|c| !c.is_empty()).collect())
 }
 
 fn join(base: &str, parts: &[&str]) -> String {
     if parts.is_empty() {
         return base.to_owned();
     }
-    let sep = if base.ends_with('/') { "" } else { "/" };
-    format!("{base}{sep}{}", parts.join("/"))
+    let ch = if base.contains('\\') && !base.contains('/') { "\\" } else { "/" };
+    let sep = if base.ends_with(['/', '\\']) { "" } else { ch };
+    format!("{base}{sep}{}", parts.join(ch))
 }
 
 fn common_root<'a>(cwds: impl Iterator<Item = &'a str>) -> Option<String> {
     let mut root: Option<Vec<&str>> = None;
+    let mut sep = "/";
     for c in cwds {
-        let parts: Vec<&str> = trim_dir(c).split('/').collect();
+        if c.contains('\\') && !c.contains('/') {
+            sep = "\\";
+        }
+        let parts: Vec<&str> = trim_dir(c).split(['/', '\\']).collect();
         root = Some(match root {
             None => parts,
             Some(r) => r.iter().zip(&parts).take_while(|(a, b)| a == b).map(|(a, _)| *a).collect(),
         });
     }
-    root.map(|r| {
-        let j = r.join("/");
+    root.filter(|r| !r.is_empty() || sep == "/").map(|r| {
+        let j = r.join(sep);
         if j.is_empty() { "/".to_owned() } else { j }
     })
 }

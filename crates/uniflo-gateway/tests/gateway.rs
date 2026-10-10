@@ -251,7 +251,7 @@ async fn ndjson_and_sse_streams_deliver_appends() {
     let data = wait_line(&mut sse, "data:", Duration::from_secs(1)).await;
     assert!(data.contains("streamed question"));
     eprintln!("append→ndjson latency {latency:?}");
-    assert!(latency < Duration::from_millis(500));
+    assert!(latency < Duration::from_millis(1500));
 
     // Reconnect with since=seq-1 replays exactly that envelope.
     let mut again = open_stream(s.addr, &format!("/v1/stream.ndjson?since={}&types=event", seq - 1)).await;

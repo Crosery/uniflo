@@ -67,8 +67,12 @@ impl InstallRecord {
     }
 }
 
-fn canon(p: &Path) -> PathBuf {
-    std::fs::canonicalize(p).unwrap_or_else(|_| p.to_owned())
+pub fn canon(p: &Path) -> PathBuf {
+    let c = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_owned());
+    match c.to_str().and_then(|s| s.strip_prefix(r"\\?\")) {
+        Some(rest) => PathBuf::from(rest),
+        None => c,
+    }
 }
 
 /// Where `cargo install` puts binaries: `$CARGO_HOME/bin` and `~/.cargo/bin`.

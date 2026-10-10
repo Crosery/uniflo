@@ -20,7 +20,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use uniflo_core::adapter::Batch;
-use uniflo_core::util::{file_mtime_ms, home, json_arg, str_of, string_of, ts};
+use uniflo_core::util::{env_dir, file_mtime_ms, home, json_arg, str_of, string_of, ts};
 use uniflo_core::{Cursor, MetaPatch, Record};
 use uniflo_schema::{Body, Event, Usage, session_key};
 
@@ -33,12 +33,9 @@ pub fn default_db() -> PathBuf {
     let base = if cfg!(target_os = "macos") {
         h.join("Library/Application Support/Cursor")
     } else if cfg!(windows) {
-        std::env::var_os("APPDATA").map_or_else(|| h.join("AppData/Roaming"), PathBuf::from).join("Cursor")
+        env_dir("APPDATA").unwrap_or_else(|| h.join("AppData/Roaming")).join("Cursor")
     } else {
-        std::env::var_os("XDG_CONFIG_HOME")
-            .filter(|v| !v.is_empty())
-            .map_or_else(|| h.join(".config"), PathBuf::from)
-            .join("Cursor")
+        env_dir("XDG_CONFIG_HOME").unwrap_or_else(|| h.join(".config")).join("Cursor")
     };
     base.join("User/globalStorage/state.vscdb")
 }

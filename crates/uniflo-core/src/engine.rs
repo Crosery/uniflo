@@ -909,7 +909,11 @@ impl Engine {
                 self.publish(pending);
                 self.usage_touch(&src);
             }
-            Ok(Err(err)) => self.note_error(&format!("{}: {err:#}", src.display())),
+            Ok(Err(err)) => {
+                if !self.tombstoned(&src) && src.exists() {
+                    self.note_error(&format!("{}: {err:#}", src.display()));
+                }
+            }
             Err(err) => self.note_error(&format!("{}: {err}", src.display())),
         }
     }

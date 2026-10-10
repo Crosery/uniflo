@@ -22,7 +22,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use uniflo_core::adapter::Batch;
-use uniflo_core::util::{file_mtime_ms, home, json_arg, str_of, string_of, text_of};
+use uniflo_core::util::{env_dir, file_mtime_ms, home, json_arg, str_of, string_of, text_of};
 use uniflo_core::{Adapter, Cursor, HarnessInfo, HistoryQuery, MetaPatch, ReadOutput, Record};
 use uniflo_schema::{Body, Event, Usage, session_key};
 
@@ -33,10 +33,10 @@ const WINDOW: usize = 24;
 pub fn adapters() -> Vec<Arc<dyn Adapter>> {
     let h = home();
     let mut roots: Vec<PathBuf> = Vec::new();
-    roots.extend(std::env::var_os("XDG_DATA_HOME").filter(|v| !v.is_empty()).map(|v| PathBuf::from(v).join("devin")));
+    roots.extend(env_dir("XDG_DATA_HOME").map(|v| v.join("devin")));
     roots.push(h.join(".local/share/devin"));
     roots.push(h.join("Library/Application Support/devin"));
-    roots.extend(std::env::var_os("APPDATA").filter(|v| !v.is_empty()).map(|v| PathBuf::from(v).join("devin")));
+    roots.extend(env_dir("APPDATA").map(|v| v.join("devin")));
     let dbs: Vec<PathBuf> = roots.iter().map(|r| r.join("cli").join("sessions.db")).collect();
     let db = dbs.iter().find(|p| p.is_file()).unwrap_or(&dbs[0]).clone();
     vec![Arc::new(Devin { db })]

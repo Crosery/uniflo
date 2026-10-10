@@ -1,6 +1,7 @@
 //! Recursive filesystem notifications (FSEvents on macOS, inotify on Linux).
 
 use anyhow::Result;
+use notify::event::{AccessKind, AccessMode, EventKind};
 use notify::{RecursiveMode, Watcher as _};
 use std::path::{Path, PathBuf};
 
@@ -23,6 +24,9 @@ pub fn watch(roots: &[PathBuf], on_change: impl Fn(Change) + Send + 'static) -> 
         Ok(ev) => {
             if ev.need_rescan() {
                 on_change(Change::Rescan);
+            }
+            if matches!(&ev.kind, EventKind::Access(a) if !matches!(a, AccessKind::Close(AccessMode::Write))) {
+                return;
             }
             for p in ev.paths {
                 on_change(Change::Path(unalias(&aliases, p)));

@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use uniflo_core::adapter::Batch;
-use uniflo_core::util::{file_mtime_ms, home, ts_str};
+use uniflo_core::util::{env_dir, file_mtime_ms, home, ts_str};
 use uniflo_core::{Adapter, Cursor, HarnessInfo, HistoryQuery, MetaPatch, ReadOutput, Record};
 use uniflo_schema::{Body, Event, session_key};
 
@@ -21,8 +21,8 @@ const ID: &str = "copilot";
 const WINDOW: i64 = 16;
 
 pub fn adapters() -> Vec<Arc<dyn Adapter>> {
-    let db = std::env::var_os("COPILOT_HOME")
-        .map(|h| PathBuf::from(h).join("session-store.db"))
+    let db = env_dir("COPILOT_HOME")
+        .map(|h| h.join("session-store.db"))
         .filter(|p| p.is_file())
         .unwrap_or_else(|| home().join(".copilot/session-store.db"));
     vec![Arc::new(Copilot { db })]

@@ -212,7 +212,7 @@ pub struct Ctx {
 impl Ctx {
     pub fn from_process() -> Result<Ctx> {
         let exe = std::env::current_exe().context("locate the uniflo executable")?;
-        let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
+        let exe = uniflo_core::install::canon(&exe);
         Ok(Ctx {
             env: Env::from_process(),
             bin: exe.display().to_string(),
@@ -223,7 +223,7 @@ impl Ctx {
     }
 
     fn skill_dir(&self) -> PathBuf {
-        self.env.home.join(".agents/skills/uniflo")
+        self.env.file(".agents/skills/uniflo")
     }
 }
 
@@ -999,7 +999,7 @@ fn exec(
             let target = relative(link.parent().unwrap_or(Path::new("/")), &shared);
             match link_state(link, &target, &shared) {
                 LinkState::Ours => {
-                    std::fs::remove_file(link).map_err(|e| failed(e.into()))?;
+                    unlink(link).map_err(|e| failed(e.into()))?;
                     rec.link = None;
                     Ok(Some(format!("已删除软链 {}", ctx.env.show(link))))
                 }
@@ -1098,6 +1098,10 @@ fn link_state(link: &Path, target: &Path, shared: &Path) -> LinkState {
     }
 }
 
+fn unlink(link: &Path) -> std::io::Result<()> {
+    std::fs::remove_file(link).or_else(|_| std::fs::remove_dir(link))
+}
+
 #[cfg(unix)]
 fn symlink(target: &Path, link: &Path) -> std::io::Result<()> {
     std::os::unix::fs::symlink(target, link)
@@ -1105,7 +1109,19 @@ fn symlink(target: &Path, link: &Path) -> std::io::Result<()> {
 
 #[cfg(windows)]
 fn symlink(target: &Path, link: &Path) -> std::io::Result<()> {
-    std::os::windows::fs::symlink_dir(target, link)
+    match std::os::windows::fs::symlink_dir(target, link) {
+        Err(e) if e.raw_os_error() == Some(1314) => {
+            let abs = if target.is_absolute() {
+                target.to_path_buf()
+            } else {
+                link.parent().unwrap_or(Path::new(".")).join(target)
+            };
+            let abs = uniflo_core::install::canon(&abs);
+            let out = Command::new("cmd").args(["/c", "mklink", "/J"]).arg(link).arg(&abs).output()?;
+            if out.status.success() { Ok(()) } else { Err(e) }
+        }
+        other => other,
+    }
 }
 
 /// `to` relative to the directory `from` (both absolute): `~/.claude/skills` → `../../.agents/skills/uniflo`.

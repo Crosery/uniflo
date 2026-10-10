@@ -9,9 +9,9 @@
 use crate::common::{reported_cost, under_any};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
-#[cfg(not(target_os = "windows"))]
-use uniflo_core::util::home;
-use uniflo_core::util::{str_of, string_of};
+#[cfg(target_os = "windows")]
+use uniflo_core::util::env_dir;
+use uniflo_core::util::{home, str_of, string_of};
 use uniflo_core::{Cx, HarnessInfo, JsonlAdapter, LineDecoder, SourceId};
 use uniflo_schema::{Body, Usage};
 
@@ -39,10 +39,9 @@ fn vscode_storage_roots(ext: &str) -> Vec<PathBuf> {
     }
     #[cfg(target_os = "windows")]
     {
-        if let Some(appdata) = std::env::var_os("APPDATA").map(PathBuf::from) {
-            for app in &apps {
-                roots.push(appdata.join(app).join("User/globalStorage").join(ext).join("tasks"));
-            }
+        let appdata = env_dir("APPDATA").unwrap_or_else(|| home().join("AppData/Roaming"));
+        for app in &apps {
+            roots.push(appdata.join(app).join("User/globalStorage").join(ext).join("tasks"));
         }
     }
     #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]

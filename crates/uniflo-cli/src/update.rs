@@ -25,7 +25,7 @@ struct Report<'a> {
 /// and installed solely via the explicit `--pre` opt-in.
 pub fn run(check: bool, prerelease: bool, json: bool) -> Result<()> {
     let exe = std::env::current_exe().context("locate the uniflo executable")?;
-    let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
+    let exe = install::canon(&exe);
     let record_file = InstallRecord::file();
     let record = InstallRecord::load(&record_file);
     let method = install::detect(&exe, record.as_ref(), &install::cargo_bin_dirs());

@@ -19,15 +19,13 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use uniflo_core::util::{home, json_arg, str_of, string_of, text_of, ts};
+use uniflo_core::util::{env_dir, home, json_arg, str_of, string_of, text_of, ts};
 use uniflo_core::{Adapter, Cx, HarnessInfo, LineDecoder, MetaPatch, Record, SourceId};
 use uniflo_schema::{Body, Usage};
 
 pub fn adapters() -> Vec<Arc<dyn Adapter>> {
-    let home = std::env::var_os("KIMI_CODE_HOME")
-        .map(PathBuf::from)
-        .filter(|p| p.join("sessions").is_dir())
-        .unwrap_or_else(|| home().join(".kimi-code"));
+    let home =
+        env_dir("KIMI_CODE_HOME").filter(|p| p.join("sessions").is_dir()).unwrap_or_else(|| home().join(".kimi-code"));
     vec![Arc::new(WithSidecars::new(Kimi::new(home)))]
 }
 

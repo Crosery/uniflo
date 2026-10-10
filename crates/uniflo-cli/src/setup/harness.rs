@@ -242,20 +242,22 @@ impl Env {
 
     /// A home-relative path, honouring `CLAUDE_CONFIG_DIR` / `CODEX_HOME`.
     pub fn file(&self, rel: &str) -> PathBuf {
+        let join =
+            |base: &Path, r: &str| r.split('/').filter(|s| !s.is_empty()).fold(base.to_path_buf(), |p, c| p.join(c));
         if let Some(d) = &self.codex_home
             && let Some(rest) = rel.strip_prefix(".codex/").or((rel == ".codex").then_some(""))
         {
-            return d.join(rest);
+            return join(d, rest);
         }
         if let Some(d) = &self.claude_config_dir {
             if rel == ".claude.json" {
                 return d.join(".claude.json");
             }
             if let Some(rest) = rel.strip_prefix(".claude/").or((rel == ".claude").then_some("")) {
-                return d.join(rest);
+                return join(d, rest);
             }
         }
-        self.home.join(rel)
+        join(&self.home, rel)
     }
 
     pub fn which(&self, bin: &str) -> Option<PathBuf> {
@@ -270,7 +272,7 @@ impl Env {
     /// `~/x/y` for display.
     pub fn show(&self, p: &Path) -> String {
         match p.strip_prefix(&self.home) {
-            Ok(rest) => format!("~/{}", rest.display()),
+            Ok(rest) => format!("~/{}", rest.display().to_string().replace('\\', "/")),
             Err(_) => p.display().to_string(),
         }
     }
@@ -286,6 +288,9 @@ fn is_executable(p: &Path) -> bool {
     #[cfg(not(unix))]
     {
         md.is_file()
+            && p.extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| ["exe", "cmd", "bat", "com"].iter().any(|x| e.eq_ignore_ascii_case(x)))
     }
 }
 
@@ -335,11 +340,12 @@ mod tests {
         let bin = t.path().join("bin");
         std::fs::create_dir_all(home.join(".cursor")).unwrap();
         std::fs::create_dir_all(&bin).unwrap();
-        std::fs::write(bin.join("droid"), "#!/bin/sh\n").unwrap();
+        let droid = bin.join(if cfg!(windows) { "droid.exe" } else { "droid" });
+        std::fs::write(&droid, "#!/bin/sh\n").unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(bin.join("droid"), std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::fs::set_permissions(&droid, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
         std::fs::write(bin.join("codex"), "not executable").unwrap();
         let env = Env {

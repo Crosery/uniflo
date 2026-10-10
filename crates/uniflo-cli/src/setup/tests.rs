@@ -16,7 +16,7 @@ impl Home {
     }
 
     fn path(&self, rel: &str) -> PathBuf {
-        self.dir.path().join(rel)
+        rel.split('/').filter(|s| !s.is_empty()).fold(self.dir.path().to_path_buf(), |p, c| p.join(c))
     }
 
     fn write(&self, rel: &str, text: &str) {
@@ -58,10 +58,13 @@ impl Home {
         fn walk(root: &Path, dir: &Path, out: &mut BTreeMap<String, String>) {
             for e in std::fs::read_dir(dir).unwrap().flatten() {
                 let p = e.path();
-                let rel = p.strip_prefix(root).unwrap().display().to_string();
+                let rel = p.strip_prefix(root).unwrap().display().to_string().replace('\\', "/");
                 let ft = e.file_type().unwrap();
                 if ft.is_symlink() {
-                    out.insert(rel, format!("-> {}", std::fs::read_link(&p).unwrap().display()));
+                    out.insert(
+                        rel,
+                        format!("-> {}", std::fs::read_link(&p).unwrap().display().to_string().replace('\\', "/")),
+                    );
                 } else if ft.is_dir() {
                     walk(root, &p, out);
                 } else {
@@ -141,7 +144,10 @@ fn both_edits_files_links_skill_and_uninstalls_symmetrically() {
     assert!(skill.is_file() && !skill.is_symlink());
     assert_eq!(std::fs::read_to_string(&skill).unwrap(), crate::agent::SKILL);
     let link = h.path(".claude/skills/uniflo");
-    assert_eq!(std::fs::read_link(&link).unwrap(), PathBuf::from("../../.agents/skills/uniflo"));
+    assert!(
+        std::fs::read_link(&link).unwrap() == Path::new("../../.agents/skills/uniflo")
+            || std::fs::canonicalize(&link).ok() == std::fs::canonicalize(h.path(".agents/skills/uniflo")).ok()
+    );
     assert!(link.join("SKILL.md").is_file());
     assert!(std::fs::read_link(h.path(".kiro/skills/uniflo")).is_ok());
     for shared in [".codex/skills", ".gemini/skills", ".omp/agent/skills", ".config/opencode/skills"] {
@@ -154,7 +160,7 @@ fn both_edits_files_links_skill_and_uninstalls_symmetrically() {
     assert_eq!(st.harnesses["qwen"].result, "skipped");
     assert_eq!(st.harnesses["kiro"].result, "occupied");
     assert_eq!(st.harnesses["cursor"].result, "connected");
-    assert!(st.links.iter().any(|l| l.ends_with(".claude/skills/uniflo")));
+    assert!(st.links.iter().any(|l| l.replace('\\', "/").ends_with(".claude/skills/uniflo")));
     assert_eq!(st.backups.len(), 3);
 
     // Again: nothing to do, no new backups.
@@ -198,13 +204,15 @@ fn both_edits_files_links_skill_and_uninstalls_symmetrically() {
 fn uninstall_only_touches_what_is_still_uniflos() {
     let h = fixture();
     h.setup(args(|a| (a.both, a.yes) = (true, true)), false, "");
-    std::fs::remove_file(h.path(".claude/skills/uniflo")).unwrap();
-    std::os::unix::fs::symlink("/somewhere/else", h.path(".claude/skills/uniflo")).unwrap();
+    super::unlink(&h.path(".claude/skills/uniflo")).unwrap();
+    let other = h.path("somewhere-else");
+    std::fs::create_dir_all(&other).unwrap();
+    super::symlink(&other, &h.path(".claude/skills/uniflo")).unwrap();
     let mut cursor = h.json(".cursor/mcp.json");
     cursor["mcpServers"]["uniflo"] = json!({"command": "npx", "args": ["mine"]});
     h.write(".cursor/mcp.json", &cursor.to_string());
     let out = h.setup(args(|a| (a.uninstall, a.yes) = (true, true)), false, "");
-    assert_eq!(std::fs::read_link(h.path(".claude/skills/uniflo")).unwrap(), PathBuf::from("/somewhere/else"));
+    assert_eq!(std::fs::canonicalize(h.path(".claude/skills/uniflo")).unwrap(), std::fs::canonicalize(&other).unwrap());
     assert_eq!(h.json(".cursor/mcp.json")["mcpServers"]["uniflo"]["command"], "npx");
     assert!(out.contains("保留"), "{out}");
 }

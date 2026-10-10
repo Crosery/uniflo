@@ -9,7 +9,18 @@ pub fn now_ms() -> i64 {
 }
 
 pub fn home() -> PathBuf {
-    std::env::var_os("UNIFLO_HOME").map(PathBuf::from).or_else(dirs::home_dir).unwrap_or_else(|| PathBuf::from("/"))
+    std::env::var_os("UNIFLO_HOME")
+        .filter(|p| !p.is_empty())
+        .map(PathBuf::from)
+        .or_else(dirs::home_dir)
+        .unwrap_or_else(|| PathBuf::from("/"))
+}
+
+/// `var` as a path, ignored under `UNIFLO_HOME` unless the path sits inside it.
+pub fn env_dir(var: &str) -> Option<PathBuf> {
+    let p = PathBuf::from(std::env::var_os(var).filter(|v| !v.is_empty())?);
+    let sandboxed = std::env::var_os("UNIFLO_HOME").is_some_and(|v| !v.is_empty());
+    (!sandboxed || p.starts_with(home())).then_some(p)
 }
 
 /// Parse an RFC 3339 string, or a unix number in seconds / milliseconds, to epoch ms.

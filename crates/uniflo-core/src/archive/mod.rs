@@ -16,7 +16,7 @@ pub mod compact;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -65,6 +65,8 @@ pub struct Tombstone {
 struct State {
     entries: BTreeMap<String, Archived>,
     tombs: HashMap<PathBuf, Tombstone>,
+    /// Targets currently being moved to the trash (`bury` .. `save_tombstones`): never treated as restored.
+    moving: HashSet<PathBuf>,
     /// Paths whose content did not match the manifest, by (size, mtime): not re-hashed until they change.
     rejected: HashMap<PathBuf, (u64, i64)>,
 }
@@ -162,7 +164,9 @@ impl ArchiveStore {
         let gone: Vec<Archived> = keys.iter().filter_map(|k| st.entries.remove(k)).collect();
         self.save_index(&st)?;
         if tree {
-            st.tombs.retain(|_, t| t.key != key);
+            let State { tombs, moving, .. } = &mut *st;
+            tombs.retain(|_, t| t.key != key);
+            moving.retain(|p| tombs.contains_key(p));
             self.save_tombs(&st)?;
         }
         drop(st);
@@ -201,6 +205,7 @@ impl ArchiveStore {
         let mut st = self.state.lock().unwrap();
         for p in paths {
             st.tombs.insert(p.clone(), Tombstone { path: p.clone(), key: key.to_owned(), at });
+            st.moving.insert(p.clone());
             st.rejected.remove(p);
         }
     }
@@ -209,11 +214,13 @@ impl ArchiveStore {
         let mut st = self.state.lock().unwrap();
         for p in paths {
             st.tombs.remove(p);
+            st.moving.remove(p);
         }
     }
 
     pub fn save_tombstones(&self) -> Result<()> {
-        let st = self.state.lock().unwrap();
+        let mut st = self.state.lock().unwrap();
+        st.moving.clear();
         self.save_tombs(&st)
     }
 
@@ -238,13 +245,16 @@ impl ArchiveStore {
         let stamp = (md.len(), crate::util::file_mtime_ms(&md));
         let want = {
             let st = self.state.lock().unwrap();
-            if st.rejected.get(path) == Some(&stamp) {
+            if path.ancestors().any(|a| st.moving.contains(a)) || st.rejected.get(path) == Some(&stamp) {
                 return false;
             }
             st.entries.get(&t.key).and_then(|a| a.files.iter().find(|f| f.path == path).cloned())
         };
         let same = want.is_some_and(|f| f.size == md.len() && sha256_file(path).is_ok_and(|h| h == f.sha256));
         let mut st = self.state.lock().unwrap();
+        if path.ancestors().any(|a| st.moving.contains(a)) {
+            return false;
+        }
         if !same {
             st.rejected.insert(path.to_path_buf(), stamp);
             return false;

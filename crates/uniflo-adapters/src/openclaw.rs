@@ -38,9 +38,7 @@ const WINDOW: usize = 40;
 
 pub fn adapters() -> Vec<Arc<dyn Adapter>> {
     let h = home();
-    let candidates: Vec<PathBuf> = std::env::var_os("OPENCLAW_STATE_DIR")
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
+    let candidates: Vec<PathBuf> = uniflo_core::util::env_dir("OPENCLAW_STATE_DIR")
         .into_iter()
         .chain([h.join(".openclaw"), h.join(".clawdbot")])
         .collect();

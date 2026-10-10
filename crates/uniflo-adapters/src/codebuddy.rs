@@ -7,14 +7,12 @@
 //! prompt count) when the record has no `providerData.usage`.
 
 use crate::workbuddy::WorkBuddy;
-use std::path::PathBuf;
 use std::sync::Arc;
-use uniflo_core::util::home;
+use uniflo_core::util::{env_dir, home};
 use uniflo_core::{Adapter, HarnessInfo, JsonlAdapter};
 
 pub fn adapters() -> Vec<Arc<dyn Adapter>> {
-    let base = std::env::var_os("CODEBUDDY_CONFIG_DIR")
-        .map(PathBuf::from)
+    let base = env_dir("CODEBUDDY_CONFIG_DIR")
         .filter(|p| p.join("projects").is_dir())
         .unwrap_or_else(|| home().join(".codebuddy"));
     vec![Arc::new(JsonlAdapter::new(codebuddy(&base)))]

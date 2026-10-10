@@ -93,10 +93,10 @@ impl World {
         self.dir.path()
     }
     fn src(&self) -> PathBuf {
-        self.root().join(format!("claude/-w-demo/{SID}.jsonl"))
+        self.root().join("claude").join("-w-demo").join(format!("{SID}.jsonl"))
     }
     fn side_dir(&self) -> PathBuf {
-        self.root().join(format!("claude/-w-demo/{SID}"))
+        self.root().join("claude").join("-w-demo").join(SID)
     }
     fn key(&self) -> String {
         format!("claude:{SID}")
@@ -170,7 +170,22 @@ fn world(ttl: Duration) -> World {
             json!({"type":"message","id":"a1","timestamp":t+1,"message":{"role":"assistant","content":[{"type":"text","text":"yo"}],"stopReason":"stop"}}),
         );
     std::fs::write(root.join(format!("pi/--w--/{PI_STEM}.jsonl")), p).unwrap();
+    #[cfg(unix)]
     std::os::unix::fs::symlink(root.join("pi-elsewhere"), root.join(format!("pi/--w--/{PI_STEM}"))).unwrap();
+    #[cfg(windows)]
+    {
+        let link = root.join("pi").join("--w--").join(PI_STEM);
+        let target = root.join("pi-elsewhere");
+        if std::os::windows::fs::symlink_dir(&target, &link).is_err() {
+            let status = std::process::Command::new("cmd")
+                .args(["/c", "mklink", "/J"])
+                .arg(&link)
+                .arg(&target)
+                .status()
+                .unwrap();
+            assert!(status.success(), "mklink /J failed");
+        }
+    }
 
     let db = root.join("opencode/opencode.db");
     let w = rusqlite::Connection::open(&db).unwrap();
@@ -340,7 +355,10 @@ async fn plan_judges_each_kind_of_session() {
     assert_eq!((side["dir"].as_bool(), side["files"].as_u64()), (Some(true), Some(3)), "sub-agent dir, meta, hook");
     let src_len = std::fs::metadata(w.src()).unwrap().len();
     assert!(src_len > 1_800_000, "about 2 MB: {src_len}");
-    assert!(root["targets"][0]["file_id"].as_u64().is_some() && root["targets"][0]["mtime_ms"].as_i64() > Some(0));
+    assert!(
+        (!cfg!(unix) || root["targets"][0]["file_id"].as_u64().is_some())
+            && root["targets"][0]["mtime_ms"].as_i64() > Some(0)
+    );
     assert_eq!(root["targets"][0]["bytes"].as_u64(), Some(src_len));
 
     let reason = |k: &str| by[k]["reason"].as_str().map(str::to_owned);

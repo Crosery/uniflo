@@ -297,7 +297,7 @@ mod tests {
         let a = Craft { root: fx.root().join("workspaces") };
         fx.write("workspaces/ws1/config.json", r#"{"id":"ws1","serverToken":"secret"}"#);
         fx.write(&format!("workspaces/{S}/{FILE}"), &transcript());
-        let dir = fx.root().join(format!("workspaces/{S}"));
+        let dir = S.split('/').fold(fx.root().join("workspaces"), |p, c| p.join(c));
         assert_eq!(a.discover(), vec![dir.clone()]);
         let out = a.read(&dir, None).unwrap();
         let g = group(out.batch);

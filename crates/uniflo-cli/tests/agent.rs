@@ -63,8 +63,14 @@ impl Home {
         c.env_clear()
             .env("PATH", std::env::var_os("PATH").unwrap_or_default())
             .env("HOME", self.root())
+            .env("USERPROFILE", self.root())
             .env("UNIFLO_HOME", self.root())
             .env("NO_COLOR", "1");
+        for k in ["SystemRoot", "WINDIR", "COMSPEC", "PATHEXT", "TEMP", "TMP"] {
+            if let Some(v) = std::env::var_os(k) {
+                c.env(k, v);
+            }
+        }
         c
     }
 
@@ -508,7 +514,7 @@ fn memory_files_and_context() {
         list.as_array()
             .unwrap()
             .iter()
-            .find(|f| f["path"].as_str().unwrap().ends_with(suffix))
+            .find(|f| f["path"].as_str().unwrap().replace('\\', "/").ends_with(suffix))
             .map(|f| f["scope"].clone())
     };
     assert_eq!(scope(".claude/CLAUDE.md"), Some(json!("global")));
@@ -588,7 +594,9 @@ fn setup_outside_a_terminal_writes_nothing_and_nothing_prompts() {
     let mut m = h.mcp("http://127.0.0.1:9");
     assert_eq!(m.handshake()["result"]["serverInfo"]["name"], "uniflo");
     drop(m);
-    let own = |p: &Path| ["Library", ".cache", ".local", ".config"].iter().any(|d| p.starts_with(h.root().join(d)));
+    let own = |p: &Path| {
+        ["Library", "AppData", ".cache", ".local", ".config"].iter().any(|d| p.starts_with(h.root().join(d)))
+    };
     let after: Vec<_> = snapshot().into_iter().filter(|(p, ..)| !own(p)).collect();
     let before: Vec<_> = before.into_iter().filter(|(p, ..)| !own(p)).collect();
     assert_eq!(after, before, "only Uniflo's own cache may appear");
