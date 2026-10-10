@@ -96,20 +96,16 @@ impl Home {
     /// Everything a child sees: only the temp home, the mock source, no fallback source.
     fn cmd(&self) -> Command {
         let mut c = Command::new(BIN);
-        c.env_clear()
-            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
-            .env("HOME", self.dir.path())
+        c.env("HOME", self.dir.path())
             .env("USERPROFILE", self.dir.path())
             .env("UNIFLO_HOME", self.dir.path())
             .env("UNIFLO_DATA_DIR", self.pricing_dir().parent().unwrap())
             .env("UNIFLO_PRICING_URL", &self.mock.url)
             .env("UNIFLO_PRICING_FALLBACK_URL", "")
+            .env_remove("UNIFLO_TOKEN")
+            .env_remove("UNIFLO_URL")
+            .env_remove("UNIFLO_TRASH_DIR")
             .env("NO_COLOR", "1");
-        for k in ["SystemRoot", "WINDIR", "COMSPEC", "PATHEXT", "TEMP", "TMP"] {
-            if let Some(v) = std::env::var_os(k) {
-                c.env(k, v);
-            }
-        }
         c
     }
 

@@ -180,10 +180,8 @@ impl Server {
     fn raw(&mut self, path: &str) -> Result<(u16, Vec<u8>)> {
         if !self.local_only && self.local.is_none() {
             let c = Client::new(&self.url, self.token.clone())?;
-            match c.get(path) {
-                Ok(mut r) => return Ok((r.status, r.body()?)),
-                Err(e) if e.downcast_ref::<std::io::Error>().is_some() => {}
-                Err(e) => return Err(e),
+            if let Ok(mut r) = c.get(path) {
+                return Ok((r.status, r.body()?));
             }
         }
         let local = self.local()?;

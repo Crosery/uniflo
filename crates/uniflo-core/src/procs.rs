@@ -90,8 +90,20 @@ pub fn list(keep: fn(&str) -> bool, files: Option<fn(&Path) -> bool>) -> Vec<Pro
 }
 
 #[cfg(windows)]
-pub fn list(keep: fn(&str) -> bool, _files: Option<fn(&Path) -> bool>) -> Vec<Proc> {
-    let Ok(out) = Command::new("powershell")
+static RAW_PROCS: Mutex<Option<(Instant, Vec<(u32, String)>)>> = Mutex::new(None);
+
+#[cfg(windows)]
+fn raw_procs() -> Vec<(u32, String)> {
+    let mut g = RAW_PROCS.lock().unwrap();
+    if let Some((at, v)) = g.as_ref()
+        && at.elapsed() < Duration::from_secs(2)
+    {
+        return v.clone();
+    }
+    let ps = std::env::var("SystemRoot")
+        .map(|r| format!(r"{r}\System32\WindowsPowerShell\v1.0\powershell.exe"))
+        .unwrap_or_else(|_| "powershell".into());
+    let Ok(out) = Command::new(ps)
         .args([
             "-NoProfile",
             "-NonInteractive",
@@ -102,15 +114,25 @@ pub fn list(keep: fn(&str) -> bool, _files: Option<fn(&Path) -> bool>) -> Vec<Pr
     else {
         return Vec::new();
     };
-    let now = crate::util::now_ms();
-    let mut procs: Vec<Proc> = String::from_utf8_lossy(&out.stdout)
+    let list: Vec<(u32, String)> = String::from_utf8_lossy(&out.stdout)
         .lines()
         .filter_map(|l| {
             let l = l.trim();
             let (pid_str, args) = l.split_once(' ')?;
             let pid: u32 = pid_str.parse().ok()?;
-            keep(args).then(|| Proc { pid, start_ms: now, args: args.to_owned(), cwd: None, files: Vec::new() })
+            Some((pid, args.to_owned()))
         })
+        .collect();
+    *g = Some((Instant::now(), list.clone()));
+    list
+}
+
+#[cfg(windows)]
+pub fn list(keep: fn(&str) -> bool, _files: Option<fn(&Path) -> bool>) -> Vec<Proc> {
+    let now = crate::util::now_ms();
+    let mut procs: Vec<Proc> = raw_procs()
+        .into_iter()
+        .filter_map(|(pid, args)| keep(&args).then(|| Proc { pid, start_ms: now, args, cwd: None, files: Vec::new() }))
         .collect();
     // `lsof` has no Windows equivalent worth shelling out to; the CWD comes from the PEB.
     // Open-file mapping (minimax's precise pid pick, pi step 2) degrades to argv heuristics.
