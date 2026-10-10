@@ -326,6 +326,7 @@ mod tests {
     async fn whole_file_rewrite_keeps_session_and_reads_new_version() {
         let fx = Fixture::new();
         let root = fx.root().join("workspaces");
+        #[cfg_attr(not(unix), allow(unused_variables))]
         let cfg = fx.write("workspaces/ws1/config.json", r#"{"serverToken":"secret"}"#);
         // Unreadable: any attempt to read the workspace config would surface as an error.
         #[cfg(unix)]

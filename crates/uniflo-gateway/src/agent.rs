@@ -159,6 +159,7 @@ fn private_dir(root: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
         h.write_u32(std::process::id());
         h.write_u128(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos()));
         let dir = root.join(format!("uniflo-open-{:016x}", h.finish()));
+        #[cfg_attr(not(unix), allow(unused_mut))]
         let mut b = std::fs::DirBuilder::new();
         #[cfg(unix)]
         std::os::unix::fs::DirBuilderExt::mode(&mut b, 0o700);
