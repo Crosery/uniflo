@@ -21,6 +21,11 @@ fn lock() -> std::sync::MutexGuard<'static, ()> {
 const BIN: &str = env!("CARGO_BIN_EXE_uniflo");
 const CODEX_ID: &str = "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b";
 
+fn closed_url() -> String {
+    let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    format!("http://127.0.0.1:{port}")
+}
+
 fn now_ms() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as i64
 }
@@ -117,7 +122,7 @@ impl Home {
             .args(["--url", url, "mcp"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::inherit())
             .spawn()
             .unwrap();
         let stdin = child.stdin.take().unwrap();
@@ -282,7 +287,10 @@ impl Mcp {
     }
 
     fn recv(&mut self) -> Value {
-        let line = self.rx.recv_timeout(Duration::from_secs(120)).expect("an MCP reply");
+        let line = match self.rx.recv_timeout(Duration::from_secs(120)) {
+            Ok(l) => l,
+            Err(e) => panic!("an MCP reply timeout (id={}): {e:?}", self.id),
+        };
         serde_json::from_str(&line).unwrap_or_else(|e| panic!("stdout must carry JSON-RPC only: {e}: {line}"))
     }
 
@@ -296,6 +304,7 @@ impl Mcp {
     }
 
     fn call(&mut self, name: &str, args: Value) -> Value {
+        eprintln!("[test] calling tool: {name}");
         let r = self.request("tools/call", json!({"name":name,"arguments":args}));
         assert!(r.get("error").is_none(), "{name}: {r}");
         r["result"].clone()
@@ -440,7 +449,7 @@ fn mcp_cli_and_rest_agree() {
 fn mcp_answers_in_process_without_a_daemon() {
     let _lock = lock();
     let h = home();
-    let mut m = h.mcp("http://127.0.0.1:9");
+    let mut m = h.mcp(&closed_url());
     m.handshake();
     let r = m.call("uniflo_sessions", json!({"q": "h:claude", "limit": 50}));
     assert!(r["content"][0]["text"].as_str().unwrap().starts_with("守护进程未运行"), "{r}");
@@ -508,7 +517,7 @@ fn resume_commands_and_injection_guard() {
         assert!(String::from_utf8_lossy(&out.stderr).contains("cannot resume"), "{key}");
     }
     drop(d);
-    let out = h.run(&["--url", "http://127.0.0.1:9", "resume", "dsh:d1", "--print"]);
+    let out = h.run(&["--url", &closed_url(), "resume", "dsh:d1", "--print"]);
     assert_eq!(out.status.code(), Some(2), "in-process too");
 }
 
@@ -601,9 +610,10 @@ fn setup_outside_a_terminal_writes_nothing_and_nothing_prompts() {
         }
     }
     // Ordinary commands never ask outside a terminal; neither does the MCP server.
-    let out = h.run(&["--url", "http://127.0.0.1:9", "ls", "--json"]);
+    let closed = closed_url();
+    let out = h.run(&["--url", &closed, "ls", "--json"]);
     assert!(out.status.success() && !String::from_utf8_lossy(&out.stdout).contains("设置"));
-    let mut m = h.mcp("http://127.0.0.1:9");
+    let mut m = h.mcp(&closed);
     assert_eq!(m.handshake()["result"]["serverInfo"]["name"], "uniflo");
     drop(m);
     let own = |p: &Path| {

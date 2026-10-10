@@ -42,6 +42,8 @@ impl Client {
         let sock = std::net::ToSocketAddrs::to_socket_addrs(&addr)?.next().ok_or_else(|| anyhow!("resolve {addr}"))?;
         let mut s = TcpStream::connect_timeout(&sock, Duration::from_millis(300))?;
         s.set_nodelay(true)?;
+        s.set_read_timeout(Some(Duration::from_secs(10)))?;
+        s.set_write_timeout(Some(Duration::from_secs(5)))?;
         let auth = self.token.as_ref().map(|t| format!("Authorization: Bearer {t}\r\n")).unwrap_or_default();
         let extra = match (method, body) {
             ("GET", _) => String::new(),

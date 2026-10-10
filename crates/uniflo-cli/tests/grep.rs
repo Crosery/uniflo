@@ -3,6 +3,7 @@
 
 use serde_json::{Value, json};
 use std::io::{Read, Write};
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -163,7 +164,9 @@ fn grep_matches_rest_and_renders_sessions() {
     drop(d);
 
     // No daemon: the in-process path opens the same index and answers identically.
-    let (out, _) = uniflo(home.path(), &["--url", "http://127.0.0.1:9", "grep", "缓存击穿", "--json"]);
+    let closed_port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let (out, _) =
+        uniflo(home.path(), &["--url", &format!("http://127.0.0.1:{closed_port}"), "grep", "缓存击穿", "--json"]);
     assert_eq!(hits(&serde_json::from_str(&out).unwrap()), hits(&rest));
 }
 
