@@ -1,8 +1,8 @@
 //! Resume commands: how to continue a session in its own harness CLI.
 //!
 //! A table keyed by harness id (the CLI's flags are the only harness knowledge here). Nothing is
-//! executed in this module: [`resume`] builds argv and shell lines, [`terminal_argv`] the
-//! `osascript` invocation that opens a macOS terminal on one. The session id is validated before
+//! executed in this module: [`resume`] builds argv and shell lines, [`terminal_script`] /
+//! [`terminal_argv`] / [`ghostty_argv`] the `open` invocations that open a macOS terminal on one. The session id is validated before
 //! it is put into any argv, and every value reaches a shell only through [`sh_quote`] /
 //! [`ps_quote`], so no part of a session can become shell syntax.
 
@@ -171,33 +171,35 @@ impl Terminal {
     }
 }
 
-/// `osascript` argv that opens a new window of `t` and runs `line` in the user's shell there.
-/// The script is fixed text; `line` travels as the run handler's argument, never as source.
-pub fn terminal_argv(t: Terminal, line: &str) -> Vec<String> {
-    let body: &[&str] = match t {
-        Terminal::Terminal => &["tell application \"Terminal\"", "activate", "do script (item 1 of argv)", "end tell"],
-        Terminal::Iterm => &[
-            "tell application \"iTerm\"",
-            "activate",
-            "set w to (create window with default profile)",
-            "tell current session of w to write text (item 1 of argv)",
-            "end tell",
-        ],
-        Terminal::Ghostty => &[
-            "tell application \"Ghostty\"",
-            "activate",
-            "set cfg to new surface configuration",
-            "set initial input of cfg to (item 1 of argv) & linefeed",
-            "new window with configuration cfg",
-            "end tell",
-        ],
+/// Text of the `.command` script Terminal / iTerm run: delete itself and its private directory,
+/// run `line`, then stay in an interactive login shell. `line` is already POSIX-quoted
+/// ([`shell_line`]) and is the only variable part, so the script needs no Apple events.
+pub fn terminal_script(line: &str) -> String {
+    format!(
+        "#!/bin/sh\nrm -f -- \"$0\"\nrmdir -- \"$(dirname -- \"$0\")\" 2>/dev/null\n{line}\nexec \"${{SHELL:-/bin/zsh}}\" -l\n"
+    )
+}
+
+/// `open` argv that hands the script at `script` to Terminal or iTerm; `None` for Ghostty, which
+/// takes its command through [`ghostty_argv`].
+pub fn terminal_argv(t: Terminal, script: &str) -> Option<Vec<String>> {
+    let app = match t {
+        Terminal::Terminal => "Terminal",
+        Terminal::Iterm => "iTerm",
+        Terminal::Ghostty => return None,
     };
-    let mut argv = vec!["osascript".to_owned()];
-    for l in std::iter::once("on run argv").chain(body.iter().copied()).chain(["end run"]) {
-        argv.push("-e".to_owned());
-        argv.push(l.to_owned());
+    Some(["open", "-a", app, script].map(str::to_owned).to_vec())
+}
+
+/// `open` argv for a new Ghostty instance running `line` and then a login shell. Every Ghostty
+/// flag precedes `-e` (everything after it is the command); `line` is one argv element.
+pub fn ghostty_argv(cwd: Option<&str>, line: &str) -> Vec<String> {
+    let mut argv: Vec<String> = ["open", "-na", "Ghostty", "--args"].map(str::to_owned).to_vec();
+    if let Some(c) = cwd {
+        argv.push(format!("--working-directory={c}"));
     }
-    argv.push(line.to_owned());
+    argv.extend(["-e", "/bin/sh", "-c"].map(str::to_owned));
+    argv.push(format!("{line}\nexec \"${{SHELL:-/bin/zsh}}\" -l"));
     argv
 }
 
@@ -306,20 +308,28 @@ mod tests {
     }
 
     #[test]
-    fn terminal_scripts_take_the_line_as_an_argument() {
-        let line = r#"cd '/tmp/a"b' && claude --resume s1"#;
-        for t in [Terminal::Terminal, Terminal::Iterm, Terminal::Ghostty] {
-            let argv = terminal_argv(t, line);
-            assert_eq!(argv[0], "osascript");
-            assert_eq!(argv.last().unwrap(), line);
-            let script: Vec<&str> = argv[1..argv.len() - 1].iter().map(String::as_str).collect();
-            assert!(script.chunks(2).all(|kv| kv[0] == "-e"), "{script:?}");
-            assert!(!script.iter().any(|s| s.contains("claude") || s.contains("/tmp")), "line spliced into source");
-            assert_eq!((script[1], *script.last().unwrap()), ("on run argv", "end run"));
-        }
-        assert!(terminal_argv(Terminal::Terminal, line).iter().any(|s| s == "do script (item 1 of argv)"));
-        assert!(terminal_argv(Terminal::Iterm, line).iter().any(|s| s.contains("write text (item 1 of argv)")));
-        assert!(terminal_argv(Terminal::Ghostty, line).iter().any(|s| s.contains("initial input")));
+    fn terminal_launch_needs_no_apple_events() {
+        let line = shell_line(&["claude".into(), "--resume".into(), "s1".into()], Some("/tmp/it's $HOME \"x\""));
+        let script = terminal_script(&line);
+        assert_eq!(
+            script,
+            format!(
+                "#!/bin/sh\nrm -f -- \"$0\"\nrmdir -- \"$(dirname -- \"$0\")\" 2>/dev/null\n{line}\nexec \"${{SHELL:-/bin/zsh}}\" -l\n"
+            )
+        );
+        assert!(script.contains(r#"cd '/tmp/it'"'"'s $HOME "x"' && claude --resume s1"#), "{script}");
+        assert_eq!(
+            terminal_argv(Terminal::Terminal, "/t/a.command").unwrap(),
+            ["open", "-a", "Terminal", "/t/a.command"]
+        );
+        assert_eq!(terminal_argv(Terminal::Iterm, "/t/a.command").unwrap(), ["open", "-a", "iTerm", "/t/a.command"]);
+        assert_eq!(terminal_argv(Terminal::Ghostty, "/t/a.command"), None);
+        let g = ghostty_argv(Some("/w d"), &line);
+        assert_eq!(g[..5], ["open", "-na", "Ghostty", "--args", "--working-directory=/w d"]);
+        assert_eq!(g[5..8], ["-e", "/bin/sh", "-c"]);
+        assert_eq!(g.len(), 9, "the command is one argv element");
+        assert_eq!(g[8], format!("{line}\nexec \"${{SHELL:-/bin/zsh}}\" -l"));
+        assert_eq!(ghostty_argv(None, "x")[4], "-e");
         assert_eq!(Terminal::parse("iTerm2"), Some(Terminal::Iterm));
         assert_eq!(Terminal::parse("xterm"), None);
     }

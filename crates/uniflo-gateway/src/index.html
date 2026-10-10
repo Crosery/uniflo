@@ -159,6 +159,8 @@ button:focus-visible, summary:focus-visible, input:focus-visible, select:focus-v
 #toasts { position: fixed; right: 16px; bottom: 16px; display: grid; gap: 8px; z-index: 50; pointer-events: none; }
 .toast { padding: 9px 14px; border-radius: var(--r-lg); background: var(--bg-raised); border: .5px solid var(--border-strong); box-shadow: var(--shadow-lg); font-size: var(--fs-sm); max-width: 360px; animation: enter 200ms var(--ease); }
 .toast.bad { color: var(--danger); }
+.toast.sticky { pointer-events: auto; display: grid; gap: 8px; }
+.toast.sticky .acts { display: flex; gap: 8px; justify-content: flex-end; }
 
 /* ---------- layout ---------- */
 .app { --side-width: clamp(240px, 26vw, 320px); display: grid; grid-template-columns: var(--side-width) minmax(0, 1fr) 300px; min-height: 0; min-width: 0; }
@@ -1742,6 +1744,31 @@ function toast(msg, bad) {
   $("#toasts").append(n);
   setTimeout(() => n.remove(), 3200);
 }
+// A failure the user can still act on: stays until dismissed, with a copy-the-command action.
+function toastRecover(msg, command) {
+  const n = document.createElement("div");
+  n.className = "toast bad sticky";
+  n.setAttribute("role", "alert");
+  const t = document.createElement("div");
+  t.textContent = msg;
+  const acts = document.createElement("div");
+  acts.className = "acts";
+  const copy = document.createElement("button");
+  copy.className = "btn sm primary";
+  copy.dataset.act = "copy-recover";
+  copy.textContent = "复制恢复命令";
+  copy.onclick = async () => {
+    try { await navigator.clipboard.writeText(command); toast("已复制恢复命令"); n.remove(); }
+    catch { toast("无法写入剪贴板，请手动复制：" + command, true); }
+  };
+  const close = document.createElement("button");
+  close.className = "btn sm";
+  close.textContent = "关闭";
+  close.onclick = () => n.remove();
+  acts.append(close, copy);
+  n.append(t, acts);
+  $("#toasts").append(n);
+}
 
 // ---------------------------------------------------------------- URL state
 // Every view and filter lives in the query string next to api/token/transport, so a refresh
@@ -2104,7 +2131,11 @@ async function openTerminal(term) {
   try {
     const r = await write("POST", `/v1/sessions/${encodeURIComponent(key)}/open-terminal`, undefined, { terminal: term });
     toast(`已在 ${r.terminal || term} 中打开`);
-  } catch (e) { toast("打开终端失败：" + e.message, true); }
+  } catch (e) {
+    const command = e.body?.command || resumeCache.get(key)?.command;
+    if (command) toastRecover(`打开终端失败：${e.body?.reason || e.message}`, command);
+    else toast("打开终端失败：" + e.message, true);
+  }
 }
 
 // ---------------------------------------------------------------- transcript

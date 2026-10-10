@@ -462,6 +462,7 @@ async function runDetail() {
   // Never open a real terminal window: intercept the write request inside the page.
   await cdp.eval(`window.__term = []; const f0 = window.fetch; window.fetch = (u, o) => { if (String(u).includes('/open-terminal')) {
     window.__term.push({ url: String(u), method: o?.method, write: o?.headers?.['X-Uniflo-Write'] });
+    if (window.__termFail) return Promise.resolve(new Response(JSON.stringify({ error: '无法打开 Terminal：stub', reason: '无法打开 Terminal：stub', command: 'cd /w && claude --resume s1' }), { status: 500, headers: { 'content-type': 'application/json' } }));
     return Promise.resolve(new Response(JSON.stringify({ opened: true, terminal: 'terminal' }), { status: 200, headers: { 'content-type': 'application/json' } })); }
     return f0(u, o); }; true`);
   if (mac) {
@@ -471,6 +472,21 @@ async function runDetail() {
     const term = await waitFor(`window.__term.length && window.__term[0]`, 3_000, "open-terminal call").catch(() => null);
     report("[detail] \"在 Terminal 中打开\" posts open-terminal with X-Uniflo-Write (stubbed, no window)",
       !!term && term.method === "POST" && term.write === "1" && term.url.includes(`/v1/sessions/${enc(key)}/open-terminal`) && term.url.includes("terminal=terminal"), term?.url || "");
+  }
+  if (mac) {
+    await cdp.eval(`window.__termFail = true`);
+    await click("#resume-btn");
+    await waitFor(`!document.querySelector('#menu').hidden`, 3_000, "resume menu for failure");
+    await click('#menu [data-term="terminal"]');
+    const failed = await waitFor(`document.querySelector('#toasts .toast.sticky [data-act="copy-recover"]') && document.querySelector('#toasts .toast.sticky').textContent`, 3_000, "failure toast").catch(() => "");
+    await sleep(3_600);
+    const kept = await cdp.eval(`!!document.querySelector('#toasts .toast.sticky')`);
+    await click('#toasts .toast.sticky [data-act="copy-recover"]');
+    await sleep(300);
+    const clip2 = await cdp.eval(`navigator.clipboard.readText()`).catch((e) => "ERR " + e.message);
+    report("[detail] open-terminal failure keeps a toast with the reason and a working \"复制恢复命令\"",
+      failed.includes("无法打开 Terminal：stub") && kept && clip2 === "cd /w && claude --resume s1", `${failed} | kept=${kept} | ${clip2}`);
+    await cdp.eval(`window.__termFail = false`);
   }
   await shot("detail.png");
   report("[detail] no page errors", cdp.errors.length === 0, cdp.errors.slice(0, 3).join(" | "));

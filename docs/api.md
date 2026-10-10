@@ -27,7 +27,7 @@
 | `GET /v1/pricing` | — | `PricingStatus`：`{source, fetched_at, stale, error, models, overrides, last_attempt, pending, sync_enabled}` |
 | `GET /v1/archive` | — | `ArchiveList`：已清理会话的归档及其大小，见 [会话清理](#会话清理) |
 | `GET /v1/sessions/{key}/resume` | — | `ResumeInfo`：在会话自己的 harness 里继续它的命令 `{key, harness, supported, argv, cwd, command, command_powershell, reason}`，只给命令、不执行；规则与支持的 harness 见 `docs/agents.md#恢复会话`；未知 key 404 |
-| `POST /v1/sessions/{key}/open-terminal` | `terminal=terminal`（默认）\|`iterm`\|`ghostty` | 写接口。macOS 在新终端窗口切到 cwd 执行恢复命令，返回 `{opened, terminal, command, cwd}`；不支持恢复、目录不存在或终端未安装 422，终端名无效 400；其他平台 501 并附 `command`、`command_powershell` |
+| `POST /v1/sessions/{key}/open-terminal` | `terminal=terminal`（默认）\|`iterm`\|`ghostty` | 写接口。macOS 在新终端窗口切到 cwd 执行恢复命令，返回 `{opened, terminal, command, cwd}`，用 `open` 启动、不需要自动化权限；不支持恢复、目录不存在或终端未安装 422，终端名无效 400，启动失败 500（`reason` 为原因，附 `command`）；其他平台 501 并附 `command`、`command_powershell` |
 | `GET /v1/memory` | `cwd`（绝对路径，可用 `~`，可省） | `MemoryFile[]`：agent 记忆与指令文件 `{path, scope, harness, bytes, updated_at}`，范围见 `docs/agents.md#记忆与指令文件`；`cwd` 不是绝对路径 400 |
 | `GET /v1/memory/file` | `path`（必填） | `MemoryContent`：上面能列出的文件之一及其内容（最多 256 KB，超出 `truncated: true`）；其他路径 403，不存在 404 |
 
