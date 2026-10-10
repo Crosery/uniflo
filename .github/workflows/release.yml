@@ -145,7 +145,11 @@ jobs:
           fi
 
           cp scripts/install.sh scripts/install.ps1 dist/
+          # Hand-written notes for this tag go first; GitHub's generated list is appended.
+          NOTES=()
+          if [[ -f "docs/releases/$TAG.md" ]]; then NOTES=(--notes-file "docs/releases/$TAG.md"); fi
           gh release create "$TAG" dist/* \
             --title "$TITLE" \
+            "${NOTES[@]}" \
             --generate-notes \
             $PRERELEASE_FLAG
