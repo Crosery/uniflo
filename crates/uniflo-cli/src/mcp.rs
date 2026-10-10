@@ -776,7 +776,7 @@ fn tools() -> Vec<Value> {
             "Token usage and cost",
             "Tokens and API-equivalent cost aggregated by one dimension. Same as GET /v1/usage.",
             json!({
-                "group_by": { "type": "string", "enum": ["harness", "model", "project", "cwd", "dir", "day", "hour", "weekday", "session"], "default": "harness" },
+                "group_by": { "type": "string", "enum": ["harness", "model", "project", "cwd", "dir", "day", "hour", "weekday", "session", "weekday_hour"], "default": "harness" },
                 "q": { "type": "string", "description": "Session filter (search syntax); since:/before: apply to step time" },
                 "since": { "type": "string", "description": "30m, 2h, 7d, YYYY-MM-DD or epoch ms" },
                 "until": { "type": "string" },

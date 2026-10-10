@@ -22,10 +22,13 @@ pub enum GroupBy {
     Hour,
     Weekday,
     Session,
+    /// Weekday × hour of day (`3-09` = Wednesday 09:00–10:00).
+    WeekdayHour,
 }
 
 impl GroupBy {
-    pub const ALL: &[&str] = &["harness", "model", "project", "cwd", "dir", "day", "hour", "weekday", "session"];
+    pub const ALL: &[&str] =
+        &["harness", "model", "project", "cwd", "dir", "day", "hour", "weekday", "session", "weekday_hour"];
 
     pub fn parse(s: &str) -> Result<GroupBy, String> {
         Ok(match s {
@@ -38,6 +41,7 @@ impl GroupBy {
             "hour" => GroupBy::Hour,
             "weekday" | "dow" => GroupBy::Weekday,
             "session" => GroupBy::Session,
+            "weekday_hour" => GroupBy::WeekdayHour,
             other => return Err(format!("unknown group_by {other:?}; one of {}", GroupBy::ALL.join(", "))),
         })
     }
@@ -47,7 +51,7 @@ impl GroupBy {
     }
 
     fn by_time(self) -> bool {
-        matches!(self, GroupBy::Day | GroupBy::Hour | GroupBy::Weekday)
+        matches!(self, GroupBy::Day | GroupBy::Hour | GroupBy::Weekday | GroupBy::WeekdayHour)
     }
 }
 
@@ -93,6 +97,8 @@ pub struct Query {
     /// Keep this many rows; the rest fold into one `(other)` row so totals still add up.
     pub limit: Option<usize>,
     pub sort: Sort,
+    /// Only steps (and prompts of turns) whose model groups under this `group_by=model` key.
+    pub model: Option<String>,
 }
 
 pub const OTHER_KEY: &str = "(other)";
@@ -263,6 +269,10 @@ pub fn report(index: &UsageIndex, sessions: &[&Session], q: &Query, p: &Loaded, 
                 (k.clone(), k)
             }
             GroupBy::Hour => (format!("{:02}", c.hour), format!("{:02}:00", c.hour)),
+            GroupBy::WeekdayHour => (
+                format!("{}-{:02}", c.weekday, c.hour),
+                format!("{} {:02}:00", WEEKDAYS[(c.weekday as usize).saturating_sub(1) % 7], c.hour),
+            ),
             _ => (c.weekday.to_string(), WEEKDAYS[(c.weekday as usize).saturating_sub(1) % 7].into()),
         }
     };
@@ -308,7 +318,7 @@ pub fn report(index: &UsageIndex, sessions: &[&Session], q: &Query, p: &Loaded, 
         let mut turn_model: HashMap<u32, Option<&str>> = HashMap::new();
         for st in &l.steps {
             turn_model.entry(st.turn).or_insert(st.model.as_deref());
-            if !in_window(st.ts) {
+            if !in_window(st.ts) || q.model.as_ref().is_some_and(|m| model_key(st.model.as_deref()).0 != *m) {
                 continue;
             }
             any = true;
@@ -334,15 +344,14 @@ pub fn report(index: &UsageIndex, sessions: &[&Session], q: &Query, p: &Loaded, 
             }
         }
         for pr in &l.prompts {
-            if !in_window(pr.ts) {
+            let pm = turn_model.get(&pr.turn).copied().flatten().or(l.model.as_deref());
+            if !in_window(pr.ts) || q.model.as_ref().is_some_and(|m| model_key(pm).0 != *m) {
                 continue;
             }
             any = true;
             let (k, label) = match &fixed {
                 Some(f) => f.clone(),
-                None if q.group_by == GroupBy::Model => {
-                    model_key(turn_model.get(&pr.turn).copied().flatten().or(l.model.as_deref()))
-                }
+                None if q.group_by == GroupBy::Model => model_key(pm),
                 None => time_key(pr.ts),
             };
             let a = rows.entry(k).or_insert_with(|| Acc { label, ..Default::default() });

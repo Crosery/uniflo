@@ -4,6 +4,7 @@
 //! |---|---|
 //! | `GET /v1/health` | liveness, seq, counts |
 //! | `GET /v1/harnesses` | supported harnesses on this machine |
+//! | `GET /v1/harnesses/{id}/icon.svg` | monochrome brand icon (`image/svg+xml`) |
 //! | `GET /v1/sessions?q=&limit=&format=ndjson` | search (see `uniflo-search` syntax) |
 //! | `GET /v1/sessions/{key}` | one session |
 //! | `GET /v1/sessions/{key}/events?limit=&before=&max_text=&format=ndjson` | transcript, newest page first |
@@ -29,6 +30,7 @@
 pub mod agent;
 pub mod cleanup;
 mod guard;
+pub mod icons;
 mod search;
 mod stream;
 pub mod usage;
@@ -88,6 +90,7 @@ pub fn router_with(engine: Arc<Engine>, guard: GuardOptions, services: Services)
         .route("/demo", get(demo))
         .route("/v1/health", get(health))
         .route("/v1/harnesses", get(harnesses))
+        .route("/v1/harnesses/{id}/icon.svg", get(icons::icon))
         .route("/v1/stats", get(stats))
         .route("/v1/sessions", get(sessions))
         .route("/v1/sessions/{key}", get(session))
@@ -152,7 +155,7 @@ async fn index() -> impl IntoResponse {
         "name": "uniflo",
         "version": env!("CARGO_PKG_VERSION"),
         "schema": SCHEMA_VERSION,
-        "endpoints": ["/demo", "/v1/health", "/v1/harnesses", "/v1/sessions", "/v1/sessions/{key}", "/v1/sessions/{key}/events", "/v1/search", "/v1/stream", "/v1/stream.ndjson", "/v1/ws", "/v1/stats", "/v1/usage", "/v1/sessions/{key}/usage", "/v1/models", "/v1/pricing", "/v1/cleanup/plan", "/v1/cleanup/plans/{id}/execute", "/v1/archive", "/v1/archive/{key}", "/v1/sessions/{key}/resume", "/v1/sessions/{key}/open-terminal", "/v1/memory", "/v1/memory/file"],
+        "endpoints": ["/demo", "/v1/health", "/v1/harnesses", "/v1/harnesses/{id}/icon.svg", "/v1/sessions", "/v1/sessions/{key}", "/v1/sessions/{key}/events", "/v1/search", "/v1/stream", "/v1/stream.ndjson", "/v1/ws", "/v1/stats", "/v1/usage", "/v1/sessions/{key}/usage", "/v1/models", "/v1/pricing", "/v1/cleanup/plan", "/v1/cleanup/plans/{id}/execute", "/v1/archive", "/v1/archive/{key}", "/v1/sessions/{key}/resume", "/v1/sessions/{key}/open-terminal", "/v1/memory", "/v1/memory/file"],
     }))
 }
 
@@ -178,7 +181,11 @@ async fn health(State(s): State<AppState>) -> impl IntoResponse {
 }
 
 async fn harnesses(State(s): State<AppState>) -> impl IntoResponse {
-    Json(s.engine.harnesses())
+    let mut list = s.engine.harnesses();
+    for h in &mut list {
+        h.icon = icons::path(&h.id);
+    }
+    Json(list)
 }
 
 async fn stats(State(s): State<AppState>) -> impl IntoResponse {

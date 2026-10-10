@@ -162,7 +162,7 @@ async fn usage_groups_add_up_project_dir_window_and_tz() {
     let srv = start().await;
     let repo1 = srv.root.join("repo1").to_string_lossy().into_owned();
     let repo2 = srv.root.join("repo2").to_string_lossy().into_owned();
-    for g in ["harness", "model", "project", "cwd", "dir", "day", "hour", "weekday", "session"] {
+    for g in ["harness", "model", "project", "cwd", "dir", "day", "hour", "weekday", "session", "weekday_hour"] {
         let (status, r) = get(srv.addr, &format!("/v1/usage?group_by={g}")).await;
         assert_eq!(status, 200, "{g}: {r}");
         assert_rows_add_up(&r);
@@ -179,6 +179,32 @@ async fn usage_groups_add_up_project_dir_window_and_tz() {
         (100.0 * 3.0 + 20.0 * 15.0 + 1000.0 * 0.3 + 50.0 * 3.0 * 1.25 + 10.0 * 3.0 + 5.0 * 15.0 + 1200.0 * 0.3) / 1e6;
     assert!((m["model-a"]["cost_usd"].as_f64().unwrap() - a).abs() < 1e-12);
     assert_eq!((u(&m["model-c"], "input"), u(&m["model-c"], "cache_read")), (1200, 800), "codex input minus cached");
+
+    // A model filter keeps exactly that model's row, in any grouping.
+    for g in ["model", "harness", "day"] {
+        let (_, f) = get(srv.addr, &format!("/v1/usage?group_by={g}&model=model-b")).await;
+        assert_rows_add_up(&f);
+        for k in ["steps", "prompts", "input", "cache_read", "sessions"] {
+            assert_eq!(u(&f["totals"], k), u(&m["model-b"], k), "{g} {k}");
+        }
+    }
+    let (_, f) = get(srv.addr, "/v1/usage?group_by=harness&model=model-c").await;
+    assert_eq!(rows_by_key(&f).keys().collect::<Vec<_>>(), ["codex"]);
+
+    // weekday × hour cells add up to the weekday and hour buckets.
+    let (_, wh) = get(srv.addr, "/v1/usage?group_by=weekday_hour&tz=UTC").await;
+    let (_, wd) = get(srv.addr, "/v1/usage?group_by=weekday&tz=UTC").await;
+    let (_, hr) = get(srv.addr, "/v1/usage?group_by=hour&tz=UTC").await;
+    let cells = rows_by_key(&wh);
+    assert!(cells.keys().all(|k| k.len() == 4 && k.as_bytes()[1] == b'-'), "{:?}", cells.keys());
+    for (k, row) in rows_by_key(&wd) {
+        let sum: u64 = cells.iter().filter(|(c, _)| c.starts_with(&format!("{k}-"))).map(|(_, x)| u(x, "steps")).sum();
+        assert_eq!(sum, u(&row, "steps"), "weekday {k}");
+    }
+    for (k, row) in rows_by_key(&hr) {
+        let sum: u64 = cells.iter().filter(|(c, _)| c.ends_with(&format!("-{k}"))).map(|(_, x)| u(x, "prompts")).sum();
+        assert_eq!(sum, u(&row, "prompts"), "hour {k}");
+    }
 
     let (_, r) = get(srv.addr, "/v1/usage?group_by=project").await;
     let p = rows_by_key(&r);

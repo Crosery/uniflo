@@ -1,0 +1,91 @@
+==> web demo e2e (headless Chrome)
+✓ daemon without token answers 401
+✓ [sse] all endpoint checks pass · 14 checks
+✓ [sse] list: claude + sub-agent + omp + codex, codex working · 102 rows
+✓ [sse] markdown, code block, reasoning and paired tool cards render
+✓ [sse] tool results fold into their call cards · 3 paired
+✓ [sse] working session shows running tool + work badge
+✓ [sse] transcript first page rendered · 151 events
+✓ [sse] "load earlier" pages history · 151 → 251
+✓ [sse] appended message appears live · 4 ms
+✓ [sse] session flips to work
+✓ [sse] tool call + result stream in
+✓ [sse] turn end flips to idle
+✓ [sse] no page errors
+✓ [ws] all endpoint checks pass · 14 checks
+✓ [ws] list: claude + sub-agent + omp + codex, codex working · 102 rows
+✓ [ws] transcript first page rendered · 150 events
+✓ [ws] "load earlier" pages history · 150 → 256
+✓ [ws] appended message appears live · 11 ms
+✓ [ws] session flips to work
+✓ [ws] tool call + result stream in
+✓ [ws] turn end flips to idle
+✓ [ws] no page errors
+✓ [ndjson] all endpoint checks pass · 14 checks
+✓ [ndjson] list: claude + sub-agent + omp + codex, codex working · 102 rows
+✓ [ndjson] transcript first page rendered · 150 events
+✓ [ndjson] "load earlier" pages history · 150 → 261
+✓ [ndjson] appended message appears live · 16 ms
+✓ [ndjson] session flips to work
+✓ [ndjson] tool call + result stream in
+✓ [ndjson] turn end flips to idle
+✓ [ndjson] no page errors
+✓ [cross-origin] page on another loopback origin passes all checks
+✓ [cross-origin] omp transcript rendered
+✓ [cross-origin] no page errors
+✓ [page] examples/web/index.html equals the gateway's embedded copy · 287717 bytes
+✓ [page] daemon /demo serves that page
+✓ [icons] /v1/harnesses carries icon; icon.svg is image/svg+xml · 22 with icon, 11 without
+✓ [icons] synthetic data covers every supported harness · 33 harnesses
+✓ [icons] every row shows its harness icon, letter block when there is none · 22 icons + 11 letter blocks
+✓ [icons] icons stay visible in dark theme (≥ 3:1 against the row)
+✓ [icons] icons stay visible in light theme (≥ 3:1 against the row)
+✓ [usage] 7d by model: KPI and table equal /v1/usage · 6 rows · since=2026-10-04&tz=Asia%2FShanghai&group_by=model
+✓ [usage] unpriced steps expand into the unpriced model list · demo-model
+✓ [usage] costs are labelled "API 等价成本"
+✓ [usage] directory drill-down two levels shows the breadcrumb · | › /w/alpha| › /w/alpha/api|page
+✓ [usage] cost column sorts ascending · 0.0194826 ≤ 0.063325
+✓ [usage] refresh restores view, range, grouping, drill-down and sort · ?token=e2e-not-a-secret&view=usage&select=claude:busy&range=7d&group=dir&unpriced=1&under=/w/alpha/api&sort=cost_usd&asc=1
+✓ [usage] after refresh, dir /w/alpha/api: KPI and table equal /v1/usage · 2 rows · under=%2Fw%2Falpha%2Fapi&since=2026-10-04&tz=Asia%2FShanghai&group_by=dir&depth=1
+✓ [usage] no page errors
+✓ [detail] per-step table equals /v1/sessions/{key}/usage · 3 steps
+✓ [detail] context bar shows the last step's share · 5.09%
+✓ [detail] session totals show five token kinds and "API 等价成本"
+✓ [detail] resume menu offers "在终端打开" on macOS · 复制恢复命令 / 在 Terminal 中打开 / 在 iTerm2 中打开 / 在 Ghostty 中打开
+✓ [detail] copy resume command puts the resume command on the clipboard · cd /w/alpha/api/v1 && claude --resume proj-0
+✓ [detail] "在 Terminal 中打开" posts open-terminal with X-Uniflo-Write (stubbed, no window) · http://127.0.0.1:<port>/v1/sessions/claude%3Aproj-0/open-terminal?terminal=terminal&token=e2e-not-a-secret
+✓ [detail] no page errors
+✓ [search] hit shows a highlighted snippet in its session group · {"s":"claude:search-target","e":"search-target-u12","mark":"量子退火调度器"}
+✓ [search] query is in the URL
+✓ [search] clicking the hit opens the session, scrolls to the event and highlights it · {"inView":true,"before":true,"after":true,"selected":"claude:search-target","view":true,"url":"?token=e2e-not-a-secret&select=claude:search-target&sq=%E9%87%8F%E5%AD%90%E9%80%80%E7%81%AB%E8%B0%83%E5%BA%A6%E5%99%A8&at=search-target-u12"}
+✓ [search] no page errors
+✓ [insights] heatmap (sessions) equals /v1/usage?group_by=day · 49 active days of 370
+✓ [insights] weekday × hour (sessions) equals weekday_hour, weekday and hour groups · 51 cells
+✓ [insights] heatmap (tokens) equals /v1/usage?group_by=day · 49 active days of 370
+✓ [insights] weekday × hour (tokens) equals weekday_hour, weekday and hour groups · 51 cells
+✓ [insights] top-5 rankings by cost equal the grouped /v1/usage
+✓ [insights] top-5 rankings by tokens equal the grouped /v1/usage
+✓ [insights] no page errors
+✓ [notify] off by default: no notification
+✓ [notify] one per session within 30 s, titled with the session title · 网关新增 /demo 演示页 | 通知测试 notify2
+✓ [notify] carries the harness icon and the turn duration
+✓ [notify] clicking the notification opens that session
+✓ [notify] switched off: no further notifications
+✓ [notify] no page errors
+✓ [visual] screenshots: 5 views × 1480/390 px × dark/light · target/demo-e2e/visual
+✓ [visual] no horizontal overflow
+✓ [visual] no overlapping elements in bars, toolbars and tiles
+✓ [visual] text contrast meets WCAG AA
+✓ [manage] list shows each session's size and whether it can be cleaned · 10.9 KB · busy: 会话运行中
+✓ [manage] review shows space to free, archive size and why the running session is excluded · {"freed":11207,"archive":1121,"reason":"会话运行中","ok":["claude:cleanme"]}
+✓ [manage] execution reports each session; source moved into the injected trash · claude:cleanme=archived
+✓ [manage] cleaned session carries the archived badge in both lists · 已归档 / 已归档
+✓ [manage] archive tab lists the archived session
+✓ [manage] deleting an archive (confirmed twice) removes it
+✓ [manage] no page errors
+✓ [read-only] write controls are hidden with an explanation · {"checkboxes":0,"plan":false,"selall":false,"note":true,"del":0,"clean":false,"term":0}
+✓ [read-only] no page errors
+{"ok":true,"passed":86,"failed":0}
+
+verify: all checks passed
+exit=0
