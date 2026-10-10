@@ -7914,7 +7914,7 @@ DEALINGS IN THE SOFTWARE.
 
 - 来源：[lobehub/lobe-icons](https://github.com/lobehub/lobe-icons)，npm 包 `@lobehub/icons-static-svg` 1.95.1（`sha512-Hw7EPPgVnC4NZLXBfTNJG6hyQgqECfUPC11VVXodPSr1aebKcFxDZlSpxhWwYNdCc6bhxps/x5TtXoPmfKH2ag==`），取各图标的单色版（不带 `-color` 后缀的文件），2026-10-10 核对。
 - 用在：网页演示 `examples/web/index.html` 与其内嵌副本 `crates/uniflo-gateway/src/index.html` 的 `#harness-icons` 精灵图；网关 `GET /v1/harnesses/{id}/icon.svg` 从内嵌副本里取同一份。
-- 改动：每个图标只保留 `<path>` 的 `d`、`clip-rule`、`opacity` 属性，改成 `<symbol id="hi-<harness id>">`；去掉 `<title>`，以及 OpenClaw 图标里未使用的渐变定义和覆盖整个画布的裁剪路径。
+- 改动：每个图标只保留 `<path>` 的 `d`、`clip-rule`、`opacity` 属性（lobe-icons 之外的见下节，另保留 `transform`、`fill-rule`），改成 `<symbol id="hi-<harness id>">`；去掉 `<title>`，以及 OpenClaw 图标里未使用的渐变定义和覆盖整个画布的裁剪路径。
 - 对应关系：claude ← `claudecode`，gemini ← `geminicli`，copilot ← `githubcopilot`，kilo ← `kilocode`，roo ← `roocode`，hermes ← `hermesagent`，mimocode ← `xiaomimimo`，其余同名（antigravity、cline、codebuddy、codex、commandcode、cursor、devin、grok、kimi、kiro、minimax、opencode、openclaw、qoder、qwen）。没有对应图标的 harness 显示字母块。
 - 商标归各自所有者。图标只用来标识对应的 harness，不表示这些产品或其所有者与 Uniflo 有关联或为其背书。
 
@@ -7941,3 +7941,24 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
+
+## harness 官方标识（lobe-icons 之外）
+
+2026-10-10 取自各家自己的仓库或站点，只保留形状，改成单色 `currentColor`，用 `transform` 缩放到 24×24 画布（`<symbol id="hi-<harness id>">`，位置同上）。商标归各自所有者，图标只用来标识对应的 harness，不表示这些产品或其所有者与 Uniflo 有关联或为其背书。
+
+| harness | 标识 | 来源 | 许可 / 说明 |
+|---|---|---|---|
+| `pi` | Pi 方块 π 标 | lobe-icons `pi`（同上，MIT）；形状与 [pi.dev](https://pi.dev/logo.svg) 的官方标识一致 | MIT（`badlogic/pi-mono`、lobe-icons） |
+| `dsh` | DeepSeek 鲸鱼 | lobe-icons `deepseek`（同上，MIT）；DeepSeek Harness 使用 DeepSeek 品牌 | MIT（lobe-icons）；商标归 DeepSeek |
+| `zcode` | Z.ai 的 Z | lobe-icons `zai`（同上，MIT）；ZCode 的接口与文档都指向 z.ai | MIT（lobe-icons）；商标归智谱 / Z.ai |
+| `omp` | oh-my-pi 的 π 加插件接口 | [can1357/oh-my-pi `assets/icon.svg`](https://github.com/can1357/oh-my-pi/blob/main/assets/icon.svg) | MIT；去掉两个装饰圆点，圆角改直角，接口上的两道槽挖成孔 |
+| `reasonix` | Reasonix 的 R 与鲸鱼 | [esengine/DeepSeek-Reasonix `desktop/electron/assets/icon.svg`](https://github.com/esengine/DeepSeek-Reasonix/blob/main/desktop/electron/assets/icon.svg) | MIT；去掉圆角底板与金色渐变，只留 R、鲸鱼、鲸眼 |
+| `craft` | Craft Agents 的 C 形方块 | [craft-ai-agents/craft-agents-oss `apps/electron/resources/icon.svg`](https://github.com/craft-ai-agents/craft-agents-oss/blob/main/apps/electron/resources/icon.svg) | Apache-2.0；去掉紫色填充 |
+| `factory` | Factory 的花形标 | [factory.ai](https://factory.ai) 官网页头标识（`#mobile-nav-logo`） | 官网公开标识，无单独许可文件，仅按商标指称用途使用 |
+| `workbuddy` | WorkBuddy 的猫头 | [workbuddy.tencent.com](https://workbuddy.tencent.com) 的站点图标 `logo.svg` | 官网公开标识，无单独许可文件，仅按商标指称用途使用；去掉圆形底板与渐变，猫头轮廓加两只眼睛，圆形裁剪不保留 |
+
+仍显示字母块的 harness 与原因：
+
+- `crosery`：自家 harness（产品 Everebb），仓库里只有位图和 `.icns`，没有矢量标识，不描摹。
+- `prime`（Prime Intellect 的 Prime Agent）：其仓库没有矢量标识，官方站点在本次核对时连接超时，取不到，不凭记忆描摹。
+- `kodu`：官方仓库 `kodu-ai/claude-coder` 带 `kodu-logo.svg`，但仓库是 AGPL-3.0，标识没有单独授权，不并入本仓库（MIT / Apache-2.0）；`kodu.ai` 域名已挂牌出售，项目已停止维护。

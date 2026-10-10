@@ -145,7 +145,7 @@ es.addEventListener("event", (m) => upsertEvent(JSON.parse(m.data).event)); // �
 
 顶栏五个视图（数字键 `1`–`5` 切换），视图、过滤、下钻和排序都写进 URL，刷新或分享链接原样恢复：
 
-- **会话**：实时会话流，见下。会话头显示 API 等价成本、五类 token、最后一步的上下文占用；「每步用量」展开逐步明细；「恢复」复制恢复命令，macOS 上还可直接在 Terminal / iTerm2 / Ghostty 中打开。
+- **会话**：实时会话流，见下。会话头显示 API 等价成本、五类 token、最后一步的上下文占用；「每步用量」展开逐步明细；「恢复」复制恢复命令，macOS 上还可直接在 Terminal / iTerm2 / Ghostty 中打开（用 `open` 启动，不需要「自动化」权限；失败时给出原因和可复制的恢复命令）。
 - **用量**：24 小时 / 7 / 30 / 90 天或自定义区间，按 harness、模型、项目过滤；KPI、按 harness 或模型堆叠的每日费用图、可排序明细表（harness / 模型 / 项目 / 目录 / 日期分组，目录可逐级下钻，带面包屑），导出 CSV。费用一律标注「API 等价成本」，未定价的步骤单独计数并可展开到模型列表。
 - **检索**：全文检索，结果按会话分组、命中词高亮；点击片段打开会话并滚动到该事件高亮。
 - **管理**：勾选会话 → 生成清理计划（可释放空间、预计归档大小、不可清理的原因）→ 确认执行，逐项显示结果；「归档」页查看与删除归档。守护进程以 `--read-only` 启动时隐藏所有写操作并说明原因。
@@ -157,7 +157,7 @@ es.addEventListener("event", (m) => upsertEvent(JSON.parse(m.data).event)); // �
 - 中间：归一后的会话流——用户气泡、Markdown 回复（代码块可复制）、折叠的思考、一行一个的工具调用（参数 + 输出 + 耗时 + 状态），按回合汇总 token。
 - 右侧：14 个接口的实时自检与延迟、索引健康度、实时 Envelope 流。
 - 顶栏切换 SSE / WebSocket / NDJSON；跟随系统明暗主题；`/` 搜索，`j` `k` 切换会话。
-- harness 显示单色品牌图标（[lobe-icons](https://github.com/lobehub/lobe-icons)，MIT，见 `THIRD_PARTY_NOTICES.md`），没有图标的显示字母块。
+- harness 显示单色品牌图标（[lobe-icons](https://github.com/lobehub/lobe-icons)，MIT，加各家官方标识，来源见 `THIRD_PARTY_NOTICES.md`）。没有图标的显示字母块：`crosery`（自家 harness，没有矢量标识）、`prime`（Prime Intellect 官方站点无法取得矢量标识）、`kodu`（仓库为 AGPL-3.0，已停止维护）。
 - 回合结束通知（铃铛按钮，默认关闭）：页面在后台时，会话从工作转为空闲会弹系统通知，标题是会话标题，同一会话 30 秒内最多一次，点击通知打开该会话。
 - 响应式布局：宽屏三栏，≤1180px 自动收起右栏，≤760px 改为会话列表 / 会话内容单栏切换；「会话列表」按钮或 `Esc` 返回列表，`/` 打开搜索。通知与工具标题按内容撑高，不遮挡相邻行。
 - URL 参数：`?api=http://127.0.0.1:7311`（从其他本地端口打开时）、`?token=`、`?transport=ws`、`?select=<key>`、`?redact`（模糊所有正文，便于录屏）。

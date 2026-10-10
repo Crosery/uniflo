@@ -146,8 +146,8 @@ Pi、Grok 没有可用的 MCP 客户端，只装 Skill（选了 MCP 也会装）
 
 写接口，遵循写接口安全边界（见 ADR-0006 / `docs/api.md#写接口`）：回环 Host、Origin、`X-Uniflo-Write: 1`、配置了 token 时带 token，任一不满足 403；网关只读时 403。
 
-- macOS：`terminal=terminal`（默认）、`iterm`、`ghostty` 选终端；在新窗口切到 cwd 并执行恢复命令，返回 `{opened, terminal, command, cwd}`。用 `osascript` 的 `on run argv` 脚本，命令行作为参数传入，AppleScript 源码是固定的几行，不拼接任何会话内容。iTerm、Ghostty 只在 `/Applications` 或 `~/Applications` 里找得到时可用。
-- 不支持恢复 422（附 `resume`）；终端名无效 400；需要 cwd 而目录不存在、或所选终端没装 422；`osascript` 失败 500（附 `command`）。
+- macOS：`terminal=terminal`（默认）、`iterm`、`ghostty` 选终端；在新窗口切到 cwd 并执行恢复命令，返回 `{opened, terminal, command, cwd}`。Terminal、iTerm 把一个自删除的 `.command` 脚本交给 `open -a`：脚本写在随机命名的私有临时目录（目录与文件权限 0700），内容是 `cd <cwd> && <恢复命令>`（均经 POSIX 转义）后接一个交互 shell，运行时先删除自身与目录；Ghostty 用 `open -na Ghostty --args --working-directory=<cwd> -e /bin/sh -c <命令>`，命令是单个 argv 元素（Ghostty 首次执行外部命令会弹出自带的确认框）。全程不使用 AppleScript / Apple events，**不需要「自动化」权限**，所以 launchd 下的守护进程也能开窗。iTerm、Ghostty 只在 `/Applications` 或 `~/Applications` 里找得到时可用。
+- 不支持恢复 422（附 `resume`）；终端名无效 400；需要 cwd 而目录不存在、或所选终端没装 422；启动失败（`open` 非零退出、临时脚本写不了）500，返回人话 `reason`（同 `error`）并附可复制的 `command`。
 - 其他平台 501，附 `command`、`command_powershell`、`cwd`，由调用方自己在终端里执行。
 
 ## 记忆与指令文件

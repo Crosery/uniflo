@@ -159,6 +159,8 @@ button:focus-visible, summary:focus-visible, input:focus-visible, select:focus-v
 #toasts { position: fixed; right: 16px; bottom: 16px; display: grid; gap: 8px; z-index: 50; pointer-events: none; }
 .toast { padding: 9px 14px; border-radius: var(--r-lg); background: var(--bg-raised); border: .5px solid var(--border-strong); box-shadow: var(--shadow-lg); font-size: var(--fs-sm); max-width: 360px; animation: enter 200ms var(--ease); }
 .toast.bad { color: var(--danger); }
+.toast.sticky { pointer-events: auto; display: grid; gap: 8px; }
+.toast.sticky .acts { display: flex; gap: 8px; justify-content: flex-end; }
 
 /* ---------- layout ---------- */
 .app { --side-width: clamp(240px, 26vw, 320px); display: grid; grid-template-columns: var(--side-width) minmax(0, 1fr) 300px; min-height: 0; min-width: 0; }
@@ -426,6 +428,43 @@ details[open] > summary .chev { transform: rotate(90deg); }
 .panel-b { padding: 12px 16px 16px; min-width: 0; }
 .status-line { font-size: var(--fs-xs); color: var(--text-3); min-height: 18px; }
 .status-line.bad { color: var(--danger); }
+.s-ex { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.s-ex .chip { font-family: var(--font-mono); background: var(--surface); }
+.s-ex .chip:disabled { opacity: .5; }
+#s-index:empty { display: none; }
+.shome { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr); gap: 12px; align-items: start; margin-top: 4px; }
+.hcol { display: grid; gap: 12px; min-width: 0; }
+.hcard { border: .5px solid var(--border-strong); border-radius: var(--r-xl); background: var(--bg-raised); padding: 14px 16px 12px; min-width: 0; }
+.hcard h2 { margin: 0 0 10px; display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: var(--fs-sm); font-weight: 600; letter-spacing: -.005em; }
+.hcard h2 small { font-size: var(--fs-xs); font-weight: 400; color: var(--text-3); }
+.hcard h2 .live { display: inline-flex; align-items: center; gap: 6px; }
+.hcard h2 .live::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 22%, transparent); }
+.hrows { display: grid; margin: 0 -8px; }
+.hrow { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; gap: 10px; align-items: center; width: 100%; padding: 8px; border: 0; border-radius: var(--r-md); background: none; text-align: left; color: var(--text); }
+.hrow:hover { background: var(--surface); }
+.hrow .t { min-width: 0; }
+.hrow .t b { display: block; font-size: var(--fs-sm); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hrow .t span { display: block; font: 12px var(--font-mono); color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hrow .age { font: 12px var(--font-mono); color: var(--text-3); white-space: nowrap; }
+.hrow .age.work { color: var(--ok); }
+.hnone { margin: 0; padding: 8px 0; font-size: var(--fs-sm); color: var(--text-3); }
+.hchips { display: flex; flex-wrap: wrap; gap: 6px; }
+.hchips .chip { font-family: var(--font-mono); height: 26px; }
+.hsyn { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 6px 14px; margin: 0; font-size: var(--fs-sm); color: var(--text-2); }
+.hsyn dt, .hsyn dd { margin: 0; }
+.hsyn code { font-size: 12px; padding: 1px 6px; border-radius: var(--r-sm); background: var(--surface-hover); }
+.hstats { display: grid; grid-template-columns: repeat(auto-fit, minmax(96px, 1fr)); gap: 8px; }
+.hstats div { padding: 8px 10px; border-radius: var(--r-md); background: var(--surface); }
+.hstats b { display: block; font: 600 var(--fs-base) var(--font-sans); font-variant-numeric: tabular-nums; }
+.hstats span { font-size: var(--fs-xs); color: var(--text-3); }
+.hcard .hint { margin: 10px 0 0; font-size: var(--fs-xs); color: var(--text-3); }
+.hcard .linkbtn { border: 0; background: none; padding: 0; font-size: var(--fs-xs); color: var(--text-3); }
+.hcard .linkbtn:hover { color: var(--text); }
+@media (max-width: 860px) { .shome { grid-template-columns: minmax(0, 1fr); } }
+#s-index .notice { align-items: center; }
+#s-index .grow { flex: 1; min-width: 0; }
+.pbar { height: 4px; margin-top: 6px; border-radius: 2px; background: var(--surface-hover); overflow: hidden; }
+.pbar i { display: block; height: 100%; background: var(--accent-solid); transition: width var(--dur); }
 
 .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(132px, 1fr)); gap: 10px; }
 .kpi { display: flex; flex-direction: column; gap: 2px; padding: 12px 14px; border-radius: var(--r-lg); border: .5px solid var(--border-strong); background: var(--bg-raised); min-width: 0; text-align: left; color: inherit; font: inherit; }
@@ -631,6 +670,8 @@ body.redact .txt, body.redact pre, body.redact .md, body.redact .snip { filter: 
 <!--
 Harness icons: monochrome icons of lobe-icons 1.95.1 (@lobehub/icons-static-svg), https://github.com/lobehub/lobe-icons
 Only <path> d / clip-rule / opacity kept, one <symbol id="hi-<harness>"> each; mapping in THIRD_PARTY_NOTICES.md.
+Pi, DeepSeek Harness (DeepSeek) and ZCode (Z.ai) come from lobe-icons; oh-my-pi, WorkBuddy, Factory, Reasonix and Craft are redrawn
+as one colour from each vendor's own mark (<g>/<path transform> fits them to 24x24; sources in THIRD_PARTY_NOTICES.md).
 Trademarks belong to their respective owners. The gateway serves these same symbols at /v1/harnesses/{id}/icon.svg.
 
 MIT License
@@ -678,6 +719,14 @@ SOFTWARE.
 <symbol id="hi-qoder" viewBox="0 0 24 24"><path d="M23.376 14.458v-4.056c0-2.304-1.003-4.154-2.748-5.075L11.612.574l-.046.086-.045.086c1.68.886 2.644 2.673 2.644 4.902v4.056a7.928 7.928 0 01-.014.454l-.005.061c-.005.081-.01.164-.018.245a4.897 4.897 0 01-.011.1l-.01.076c-.008.068-.015.135-.025.203l-.018.113-.01.058a9.99 9.99 0 01-.098.513l-.007.03a7.209 7.209 0 01-.074.294l-.024.086c-.027.099-.056.197-.087.296l-.027.085a9.592 9.592 0 01-.111.323l-.033.085-.018.046c-.032.082-.064.166-.098.248-.019.048-.04.096-.061.145l-.007.017a6 6 0 01-.084.187c-.024.056-.05.11-.077.165-.03.061-.058.122-.089.182a9.423 9.423 0 01-.176.332c-.03.056-.062.111-.094.167-.031.053-.062.108-.095.16-.033.055-.066.11-.101.164-.033.053-.065.104-.1.155-.034.055-.07.107-.111.169l-.099.144a15.193 15.193 0 01-.34.457c-.04.05-.08.102-.121.151l-.107.128-.007.008a6.987 6.987 0 01-.262.298l-.149.16-.116.12a9.562 9.562 0 01-.204.198l-.03.03-.072.069a9.05 9.05 0 01-.263.235l-.025.022-.029.026-.042.035a11.7 11.7 0 01-.22.18l-.07.055-.018.013a8.904 8.904 0 01-.194.146c-.029.02-.057.042-.086.063a7.7 7.7 0 01-.22.152l-.057.04a8.865 8.865 0 01-.293.185l-.062.037a10.424 10.424 0 01-.307.173l-.037.02-.196.103-.108.052-.012.006a6.196 6.196 0 01-.315.143c-.065.028-.13.054-.196.08l-.035.014-.086.034c-.07.026-.143.05-.215.075l-.039.014-.064.023a8.056 8.056 0 01-.323.097l-.63.173a7.285 7.285 0 01-.33.08l-.07.015c-.053.012-.104.023-.157.032l-.065.011-.085.015a2.332 2.332 0 01-.194.027l-.085.01a4.715 4.715 0 01-.16.018l-.034.003a4.861 4.861 0 01-.246.016h-.033a2.714 2.714 0 01-.155.005h-.106a3.384 3.384 0 01-.225-.007H4.86l-.15-.012-.066-.006a5.586 5.586 0 01-.187-.02l-.04-.005a5.14 5.14 0 01-.219-.035l-.054-.01a6.943 6.943 0 01-.347-.082l-.03-.008-.038-.01a5.034 5.034 0 01-.269-.086l-.063-.023a4.216 4.216 0 01-.188-.073l-.071-.031-.016-.007a4.959 4.959 0 01-.16-.074l-.026-.013a.164.164 0 00-.014-.007l-.671-.351.486.486h.016l8.995 4.742.093.048.03.014.02.01c.056.026.111.052.169.076l.016.008.073.032.195.076.022.008a.718.718 0 01.03.012l.014.004a4.693 4.693 0 00.323.1l.027.007c.073.02.147.038.22.055l.018.004.027.006.066.013.088.016c.075.014.15.026.226.038l.042.004c.064.009.128.016.193.022l.126.012.06.003.05.002.098.005c.046.002.094.002.14.003h.12c.05 0 .1-.002.161-.005h.033l.07-.004a6.17 6.17 0 00.184-.014l.033-.003a.753.753 0 00.058-.005l.108-.012.081-.01.08-.01.129-.021.082-.014.071-.012c.054-.01.107-.021.16-.033l.066-.013.059-.013c.096-.022.192-.046.287-.073l.63-.172a7.354 7.354 0 00.397-.122l.04-.015c.075-.025.149-.051.222-.078.032-.011.062-.024.093-.037l.03-.012c.067-.027.135-.054.2-.082l.128-.056.195-.09.021-.01.102-.05c.068-.034.135-.069.202-.105l.037-.02.073-.038c.08-.044.16-.092.24-.139l.026-.015a8.086 8.086 0 00.322-.2l.065-.045 1.98.902a1.748 1.748 0 002.472-1.59v-7.33l.004.004z" opacity=".5"/><path d="M11.617.576a3.904 3.904 0 00-.093-.047c-.016-.009-.033-.016-.05-.024a5.854 5.854 0 00-.166-.077l-.09-.04a4.094 4.094 0 00-.194-.074c-.017-.006-.035-.015-.053-.02l-.013-.005a5.18 5.18 0 00-.277-.088l-.07-.019a4.034 4.034 0 00-.219-.053c-.015-.003-.03-.008-.044-.012L10.253.1l-.057-.011a5.177 5.177 0 00-.225-.036L9.928.047a5.972 5.972 0 00-.191-.022L9.669.02a1.33 1.33 0 00-.058-.005L9.515.009a4.058 4.058 0 00-.111-.005C9.354 0 9.304 0 9.254 0h-.109c-.052 0-.106.004-.16.004L8.884.01A5.32 5.32 0 008.7.022l-.083.006h-.008c-.05.005-.1.013-.15.019l-.12.014c-.056.008-.112.018-.169.028-.037.006-.074.011-.11.018a7.054 7.054 0 00-.572.133l-.63.172c-.111.031-.22.064-.33.1-.037.011-.072.025-.108.037a12.91 12.91 0 00-.345.126c-.067.027-.133.054-.2.083l-.128.055a11.916 11.916 0 00-.318.15 7.376 7.376 0 00-.311.163c-.082.045-.16.092-.24.14a9.424 9.424 0 00-.35.218l-.016.01-.06.04a9.242 9.242 0 00-.51.37 12.54 12.54 0 00-.315.254l-.043.034-.01.007-.045.041c-.09.078-.18.158-.268.24l-.106.101c-.07.067-.139.135-.207.204l-.056.054-.063.067-.153.164-.12.133-.148.17c-.024.03-.049.057-.073.086l-.043.053a5.96 5.96 0 00-.123.155l-.118.151c-.04.053-.08.106-.118.16l-.075.101-.038.056-.107.155-.11.164a9.91 9.91 0 00-.168.265c-.012.02-.023.043-.037.063a12.43 12.43 0 00-.192.335l-.09.168c-.019.034-.04.07-.057.105-.011.022-.02.043-.032.065l-.092.188-.08.167a19.15 19.15 0 00-.083.192c-.017.038-.035.076-.05.115-.008.016-.014.034-.021.051-.035.083-.067.167-.1.253l-.051.134c-.04.11-.077.22-.113.33l-.02.057c0 .002 0 .005-.002.007l-.008.026c-.032.1-.06.2-.09.301l-.023.089c-.027.1-.052.2-.075.301l-.007.03a7.63 7.63 0 00-.057.267l-.008.048c-.015.074-.026.148-.038.223L.082 8.4c-.011.078-.02.156-.029.234-.006.051-.013.103-.017.154a6.57 6.57 0 00-.02.26c-.003.044-.007.086-.009.13-.004.128-.007.257-.007.386v4.056c0 1.478.42 2.741 1.138 3.692A4.75 4.75 0 002.73 18.67l9.015 4.753c-1.656-.874-2.728-2.685-2.73-5.051v-4.056c0-.13.004-.26.01-.39.002-.043.006-.085.01-.128.005-.088.01-.174.019-.261l.017-.155c.01-.077.018-.155.029-.234l.026-.164c.013-.074.025-.15.039-.223.02-.105.04-.21.064-.313l.008-.031c.023-.1.048-.201.075-.301l.023-.088c.028-.1.058-.202.09-.302l.008-.025.021-.063c.036-.11.073-.22.113-.33l.052-.134c.031-.085.065-.169.1-.253.022-.056.047-.111.07-.166a13.856 13.856 0 01.164-.358c.03-.063.06-.126.092-.188l.088-.172a9.22 9.22 0 01.187-.338l.096-.164c.034-.057.069-.112.104-.168l.1-.159a10.49 10.49 0 01.567-.786l.123-.155.116-.139c.05-.057.098-.115.148-.171a14.092 14.092 0 01.272-.297 9.706 9.706 0 01.432-.425c.088-.083.177-.163.268-.241l.054-.048a10.08 10.08 0 01.553-.435l.092-.068c.075-.053.15-.105.226-.156.019-.013.038-.028.06-.04a9.18 9.18 0 01.362-.227c.08-.047.16-.094.241-.139l.11-.058a7.643 7.643 0 01.521-.256l.126-.056a7.509 7.509 0 01.546-.208l.107-.037c.11-.036.22-.069.33-.1l.63-.172c.095-.026.191-.05.287-.072l.097-.02c.062-.014.125-.029.187-.04l.114-.018c.055-.01.11-.02.166-.028.04-.006.08-.01.12-.014.053-.007.105-.014.157-.019l.083-.006c.061-.005.123-.01.184-.013.034-.003.067-.003.101-.004l.16-.006h.11a3.187 3.187 0 01.261.008l.153.01.067.007c.064.006.128.013.192.022l.043.005a5.232 5.232 0 01.281.047l.141.03c.073.016.146.035.218.053l.07.019c.094.026.187.055.278.087l.067.025a4.326 4.326 0 01.449.19l.143.072L11.617.576z"/></symbol>
 <symbol id="hi-qwen" viewBox="0 0 24 24"><path d="M12.604 1.34c.393.69.784 1.382 1.174 2.075a.18.18 0 00.157.091h5.552c.174 0 .322.11.446.327l1.454 2.57c.19.337.24.478.024.837-.26.43-.513.864-.76 1.3l-.367.658c-.106.196-.223.28-.04.512l2.652 4.637c.172.301.111.494-.043.77-.437.785-.882 1.564-1.335 2.34-.159.272-.352.375-.68.37-.777-.016-1.552-.01-2.327.016a.099.099 0 00-.081.05 575.097 575.097 0 01-2.705 4.74c-.169.293-.38.363-.725.364-.997.003-2.002.004-3.017.002a.537.537 0 01-.465-.271l-1.335-2.323a.09.09 0 00-.083-.049H4.982c-.285.03-.553-.001-.805-.092l-1.603-2.77a.543.543 0 01-.002-.54l1.207-2.12a.198.198 0 000-.197 550.951 550.951 0 01-1.875-3.272l-.79-1.395c-.16-.31-.173-.496.095-.965.465-.813.927-1.625 1.387-2.436.132-.234.304-.334.584-.335a338.3 338.3 0 012.589-.001.124.124 0 00.107-.063l2.806-4.895a.488.488 0 01.422-.246c.524-.001 1.053 0 1.583-.006L11.704 1c.341-.003.724.032.9.34zm-3.432.403a.06.06 0 00-.052.03L6.254 6.788a.157.157 0 01-.135.078H3.253c-.056 0-.07.025-.041.074l5.81 10.156c.025.042.013.062-.034.063l-2.795.015a.218.218 0 00-.2.116l-1.32 2.31c-.044.078-.021.118.068.118l5.716.008c.046 0 .08.02.104.061l1.403 2.454c.046.081.092.082.139 0l5.006-8.76.783-1.382a.055.055 0 01.096 0l1.424 2.53a.122.122 0 00.107.062l2.763-.02a.04.04 0 00.035-.02.041.041 0 000-.04l-2.9-5.086a.108.108 0 010-.113l.293-.507 1.12-1.977c.024-.041.012-.062-.035-.062H9.2c-.059 0-.073-.026-.043-.077l1.434-2.505a.107.107 0 000-.114L9.225 1.774a.06.06 0 00-.053-.031zm6.29 8.02c.046 0 .058.02.034.06l-.832 1.465-2.613 4.585a.056.056 0 01-.05.029.058.058 0 01-.05-.029L8.498 9.841c-.02-.034-.01-.052.028-.054l.216-.012 6.722-.012z"/></symbol>
 <symbol id="hi-roo" viewBox="0 0 24 24"><path d="M20.113 5.5l-.442 1.557a.157.157 0 01-.196.106l-7.414-2.157a.16.16 0 00-.143.028l-7.342 5.74a.159.159 0 01-.074.032l-4.37.656a.154.154 0 00-.132.162l.02.245c.005.078.071.14.152.141l5.074.128.058.002 3.75-1.953a.16.16 0 01.164.01l2.657 1.847a.152.152 0 01.066.125l-.023 2.45c0 .032.01.063.028.089l3.737 5.227c.03.04.077.065.129.065h1.182a.153.153 0 00.14-.224l-2.664-4.919a.15.15 0 01.005-.152l1.389-2.169a.156.156 0 01.062-.055l4.965-2.456a.16.16 0 01.158.01l1.418.921a.16.16 0 00.087.026h1.289c.125 0 .2-.136.13-.237l-3.578-5.29c-.074-.109-.246-.082-.282.044z"/></symbol>
+<symbol id="hi-pi" viewBox="0 0 24 24"><path clip-rule="evenodd" d="M1 1h16.5v11H12v5.5H6.5V23H1V1zm5.5 5.5V12H12V6.5H6.5z"/><path d="M17.5 12H23v11h-5.5V12z"/></symbol>
+<symbol id="hi-omp" viewBox="0 0 24 24"><path fill-rule="evenodd" transform="translate(-1.2 2.1) scale(0.22)" d="M10 8h100v12h-100zM25 20h12v62h-12zM75 20h12v35h-12zM71 55h20v16h-20zM76 59h3v8h-3zM82 59h3v8h-3z"/></symbol>
+<symbol id="hi-workbuddy" viewBox="0 0 24 24"><path fill-rule="evenodd" transform="translate(0.6397 0.1466) scale(0.4849)" d="M27.6897 3.3426C28.057 3.01322 28.0795 2.99983 28.3485 2.98366C28.7851 2.95177 29.1858 3.16107 29.8664 3.78072C31.4566 5.22574 33.6703 8.19724 35.047 10.7343L35.5796 11.7191L36.3309 12.0927C37.0562 12.4593 38.2459 13.2111 38.7428 13.614C38.9673 13.7997 38.9992 13.8032 39.2326 13.7124C40.2872 13.3017 41.7982 13.846 43.1307 15.1244C44.3302 16.274 45.479 18.2384 45.9191 19.8778C45.9833 20.1417 46.0683 20.709 46.0994 21.1314C46.1997 22.6144 45.7243 23.7986 44.8085 24.3349C44.6213 24.443 44.6085 24.4725 44.6137 24.939C44.6559 27.1604 44.0571 29.3777 42.8543 31.54C41.4965 33.9678 39.0794 36.4798 35.8073 38.846C34.0502 40.1247 29.8918 42.5469 28.0122 43.3973C23.5096 45.4244 19.8999 46.2022 16.7645 45.8181C14.8943 45.5915 12.7771 44.8611 11.5246 44.0137C11.1951 43.786 11.1428 43.7719 10.8909 43.8439C9.55017 44.2289 7.79442 43.4374 6.30272 41.7817C5.70771 41.1197 4.74709 39.4939 4.43575 38.6241C3.71569 36.5887 3.85859 34.752 4.81783 33.6551C5.0657 33.3725 5.07387 33.3607 5.01972 32.8856C4.93033 32.1079 4.88982 30.9566 4.93066 30.2138L4.96343 29.5205L3.92091 27.6777C2.3078 24.8074 1.28326 22.3968 0.887982 20.5554C0.679402 19.546 0.692781 19.0981 0.949061 18.7667C1.10529 18.5666 1.61622 18.3594 2.23252 18.2455C3.78518 17.9729 7.17203 18.2198 10.9394 18.885L11.3303 18.9525L12.1903 18.1921C13.6179 16.9275 14.5665 16.2176 16.315 15.1274C18.1373 13.9872 20.1943 13.0498 22.5103 12.3071L23.2533 12.0687L23.6615 10.9964C25.1239 7.13587 26.6218 4.28969 27.6897 3.3426ZM15.4393 23.1261C13.7864 24.0804 12.9602 24.5582 12.3529 25.093C9.89364 27.2585 8.9738 30.6888 10.0208 33.7938C10.2794 34.5606 10.7568 35.387 11.7111 37.0398C12.6653 38.6926 13.1424 39.5194 13.6771 40.1267C15.8426 42.5859 19.2732 43.5045 22.3783 42.4574C23.145 42.1989 23.972 41.7223 25.6248 40.768L35.1333 35.2783C36.7862 34.324 37.6124 33.8462 38.2196 33.3114C40.6789 31.1459 41.5988 27.7156 40.5518 24.6105C40.2932 23.8438 39.8157 23.0174 38.8615 21.3646C37.9072 19.7117 37.4302 18.885 36.8955 18.2777C34.7299 15.8185 31.2993 14.8999 28.1943 15.947C27.4275 16.2055 26.6006 16.6821 24.9478 17.6364L15.4393 23.1261ZM15.882 30.027L19.354 28.023L23.517 35.234L20.045 37.238zM26.698 23.781L30.170 21.777L34.333 28.988L30.861 30.992z"/></symbol>
+<symbol id="hi-factory" viewBox="0 0 24 24"><path transform="translate(1 1.3284) scale(0.3284)" d="M47.75 11.15a.867.867 0 0 1-.671-.806.84.84 0 0 1 .067-.362c1.688-4.007 2.433-7.213 1.23-8.555-3.183-3.56-15.952 3.52-20.024 5.919a.9.9 0 0 1-1.273-.41c-1.711-3.998-3.51-6.78-5.334-6.9-4.833-.323-8.73 13.49-9.87 17.992a.85.85 0 0 1-.459.563.9.9 0 0 1-.737.027c-4.109-1.647-7.398-2.373-8.773-1.2-3.651 3.104 3.609 15.557 6.068 19.528a.85.85 0 0 1-.11 1.031.9.9 0 0 1-.31.21C3.455 39.856.604 41.61.478 43.389c-.329 4.713 13.834 8.513 18.452 9.625q.186.046.337.163a.87.87 0 0 1 .332.642.84.84 0 0 1-.067.362c-1.688 4.007-2.433 7.214-1.23 8.555 3.183 3.561 15.954-3.519 20.025-5.917a.9.9 0 0 1 1.058.107.9.9 0 0 1 .215.302c1.711 3.997 3.509 6.779 5.334 6.9 4.833.322 8.73-13.49 9.868-17.993a.85.85 0 0 1 .168-.33.88.88 0 0 1 .659-.324.9.9 0 0 1 .371.066c4.109 1.647 7.397 2.372 8.773 1.2 3.651-3.105-3.61-15.559-6.07-19.53a.85.85 0 0 1 .111-1.03.9.9 0 0 1 .31-.21c4.1-1.67 6.952-3.424 7.075-5.203.331-4.713-13.833-8.513-18.45-9.623m-5.546-4.518c.93 1.624-3.858 12.446-7.42 20.015a.7.7 0 0 1-.28.303.71.71 0 0 1-.796-.059.7.7 0 0 1-.23-.341c-1.439-4.921-3.082-10.704-4.841-15.612a.84.84 0 0 1 .01-.594.87.87 0 0 1 .401-.446c4.392-2.34 11.908-5.446 13.156-3.266m-21.048 1.34c1.833.507 6.294 11.46 9.264 19.268a.67.67 0 0 1-.2.754.71.71 0 0 1-.794.08c-4.589-2.485-9.94-5.444-14.743-7.702a.87.87 0 0 1-.422-.427.84.84 0 0 1-.04-.591c1.414-4.679 4.471-12.063 6.935-11.383M7.243 23.433c1.664-.906 12.762 3.763 20.522 7.235.13.058.239.154.311.274a.67.67 0 0 1-.06.776.7.7 0 0 1-.35.225c-5.045 1.403-10.976 3.006-16.01 4.721a.9.9 0 0 1-.607-.01.88.88 0 0 1-.456-.391c-2.395-4.284-5.586-11.613-3.35-12.83M8.617 43.96c.519-1.788 11.752-6.14 19.758-9.035a.72.72 0 0 1 .773.195.67.67 0 0 1 .081.774c-2.548 4.475-5.582 9.694-7.898 14.377a.87.87 0 0 1-.437.413.9.9 0 0 1-.607.039c-4.797-1.37-12.37-4.36-11.67-6.763m15.855 13.568c-.93-1.623 3.859-12.446 7.42-20.014a.7.7 0 0 1 .28-.303.715.715 0 0 1 .796.059.7.7 0 0 1 .23.34c1.439 4.92 3.083 10.705 4.841 15.613a.84.84 0 0 1-.01.593.87.87 0 0 1-.402.445c-4.391 2.335-11.908 5.447-13.15 3.267zm21.049-1.34c-1.836-.506-6.297-11.461-9.266-19.269a.67.67 0 0 1 .2-.755.71.71 0 0 1 .795-.078c4.587 2.484 9.94 5.445 14.742 7.703.189.088.339.24.423.426a.84.84 0 0 1 .039.592c-1.413 4.686-4.47 12.063-6.933 11.381m13.912-15.462c-1.665.907-12.762-3.763-20.523-7.236a.7.7 0 0 1-.311-.273.67.67 0 0 1 .06-.777.7.7 0 0 1 .35-.225c5.046-1.402 10.975-3.005 16.009-4.72a.9.9 0 0 1 .609.01.88.88 0 0 1 .457.392c2.393 4.282 5.584 11.613 3.349 12.829M58.06 20.2c-.521 1.79-11.753 6.14-19.759 9.036a.72.72 0 0 1-.774-.195.67.67 0 0 1-.08-.776c2.547-4.474 5.581-9.694 7.897-14.377a.87.87 0 0 1 .437-.412.9.9 0 0 1 .607-.038c4.797 1.377 12.37 4.359 11.672 6.762"/></symbol>
+<symbol id="hi-reasonix" viewBox="0 0 24 24"><g transform="translate(-24.0546 -7.3052) scale(0.1002)"><path d="M369.75,185.3c2.09,1.76,4.98,2.41,7.95,1.06,1.18-.54,1.96-1.91,1.47-3.25-3.92-10.71-14.97-18.54-19.38-12.48-.54.74-.52,1.7-.11,2.29.32.47.97.57,1.82.4,2.68-.56,6.02,1.31,5.7,4.3-.33,3.12.3,5.79,2.56,7.69Z"/><path d="M434.28,204.78c10.12-11.32,16.46-25.01,18.67-40.07,5.04-32.93-11.31-63.01-42.11-75.75-10.83-4.35-21.95-6.2-33.76-6.09l-114.5.03v219.42s56.29-.04,56.29-.04v-77.17c-1.86-.69-3.15-1.27-3.15-1.27-12.24-5.59-21.6-15.29-26.74-27.44-6.56-15.51-4.54-32.9,5.78-46.12,10.28-12.84,24.31-16.92,40.41-14.67,5.95.83,12.3-6.15,24.4-4.81.81.09,1.63.7,1.71,1.18.28,1.65-4.4,2.54-4.4,7.05,0,1.9.85,4.1,2.65,5.36,6.17,4.33,11.51,9.19,17.1,14.22,2.72,2.44,11.93,9.31,14.27,3.72,1.37-3.26,2.27-6.68,3.18-10.15.45-1.72-.5-2.74-1.89-3.56-9.5-5.63-13.08-17.35-9.37-27.74.36-1,1.29-1.49,2.08-1.52,3.19-.14,1.49,5.78,9.38,8.21,7.49,2.31,7.71,8.53,11.35,6.05,8.48-5.78,11.54-1.05,19.41-8.46.81-.76,2.2-.82,3.04-.23.52.36.97,1.29.93,2.38-.23,6.26-2.67,12.24-6.95,16.84-8.09,8.69-14.89,4.53-15.33,10.62-1.29,17.86-7.13,35.69-19.81,48.66-.41.42-.65,1.01-.58,1.41.07.42.57.83,1.12,1.01l10.68,3.63c1.51.51,2.6,1.87,2.41,3.31-.17,1.26-1.17,2.37-2.61,2.85-7.84,2.59-16.26,2.14-24.24-.27-10.56,8.89-23.54,13.48-37.68,12.93l20.53,28.34,33.49,45.73,66.85-.09-56.68-76.53c13.19-3.89,24.78-10.87,34.07-20.94Z"/><path d="M300.31,167.85c-3.53.43-5.65,2.96-5.31,6.74,2.39,26.35,26.7,47.92,53.94,42.72,5.8-1.11,11.08-3.41,15.36-7.74-9.27-7.98-13.79-16.12-21.41-24.13-10.91-11.47-26.43-19.54-42.58-17.59Z"/><path d="M360.56 177.19a1.58 1.58 0 1 0 3.16 0a1.58 1.58 0 1 0 -3.16 0z"/></g></symbol>
+<symbol id="hi-dsh" viewBox="0 0 24 24"><path d="M23.748 4.482c-.254-.124-.364.113-.512.234-.051.039-.094.09-.137.136-.372.397-.806.657-1.373.626-.829-.046-1.537.214-2.163.848-.133-.782-.575-1.248-1.247-1.548-.352-.156-.708-.311-.955-.65-.172-.241-.219-.51-.305-.774-.055-.16-.11-.323-.293-.35-.2-.031-.278.136-.356.276-.313.572-.434 1.202-.422 1.84.027 1.436.633 2.58 1.838 3.393.137.093.172.187.129.323-.082.28-.18.552-.266.833-.055.179-.137.217-.329.14a5.526 5.526 0 01-1.736-1.18c-.857-.828-1.631-1.742-2.597-2.458a11.365 11.365 0 00-.689-.471c-.985-.957.13-1.743.388-1.836.27-.098.093-.432-.779-.428-.872.004-1.67.295-2.687.684a3.055 3.055 0 01-.465.137 9.597 9.597 0 00-2.883-.102c-1.885.21-3.39 1.102-4.497 2.623C.082 8.606-.231 10.684.152 12.85c.403 2.284 1.569 4.175 3.36 5.653 1.858 1.533 3.997 2.284 6.438 2.14 1.482-.085 3.133-.284 4.994-1.86.47.234.962.327 1.78.397.63.059 1.236-.03 1.705-.128.735-.156.684-.837.419-.961-2.155-1.004-1.682-.595-2.113-.926 1.096-1.296 2.746-2.642 3.392-7.003.05-.347.007-.565 0-.845-.004-.17.035-.237.23-.256a4.173 4.173 0 001.545-.475c1.396-.763 1.96-2.015 2.093-3.517.02-.23-.004-.467-.247-.588zM11.581 18c-2.089-1.642-3.102-2.183-3.52-2.16-.392.024-.321.471-.235.763.09.288.207.486.371.739.114.167.192.416-.113.603-.673.416-1.842-.14-1.897-.167-1.361-.802-2.5-1.86-3.301-3.307-.774-1.393-1.224-2.887-1.298-4.482-.02-.386.093-.522.477-.592a4.696 4.696 0 011.529-.039c2.132.312 3.946 1.265 5.468 2.774.868.86 1.525 1.887 2.202 2.891.72 1.066 1.494 2.082 2.48 2.914.348.292.625.514.891.677-.802.09-2.14.11-3.054-.614zm1-6.44a.306.306 0 01.415-.287.302.302 0 01.2.288.306.306 0 01-.31.307.303.303 0 01-.304-.308zm3.11 1.596c-.2.081-.399.151-.59.16a1.245 1.245 0 01-.798-.254c-.274-.23-.47-.358-.552-.758a1.73 1.73 0 01.016-.588c.07-.327-.008-.537-.239-.727-.187-.156-.426-.199-.688-.199a.559.559 0 01-.254-.078c-.11-.054-.2-.19-.114-.358.028-.054.16-.186.192-.21.356-.202.767-.136 1.146.016.352.144.618.408 1.001.782.391.451.462.576.685.914.176.265.336.537.445.848.067.195-.019.354-.25.452z"/></symbol>
+<symbol id="hi-zcode" viewBox="0 0 24 24"><path d="M12.105 2L9.927 4.953H.653L2.83 2h9.276zM23.254 19.048L21.078 22h-9.242l2.174-2.952h9.244zM24 2L9.264 22H0L14.736 2H24z"/></symbol>
+<symbol id="hi-craft" viewBox="0 0 24 24"><path fill-rule="nonzero" transform="translate(2.2222 1) scale(1.2222)" d="M0,0 L24,0 L24,24 L0,24 L0,0 Z"/></symbol>
 </svg>
 <header class="top">
   <div class="brand">
@@ -818,16 +867,52 @@ SOFTWARE.
 
 <section class="view" id="v-search" role="tabpanel" data-view="search" hidden>
   <div class="page narrow">
-    <div class="page-h"><div><h1>全文检索</h1><p>检索消息正文、思考、工具参数与输出。空格分隔的词需同时出现，<code>"引号"</code> 内为短语，<code>-词</code> 排除；中文与代码片段都按子串匹配。</p></div></div>
+    <div class="page-h"><div><h1>全文检索</h1>
+      <p>按<b>会话里说过的话</b>找会话：消息正文、思考、工具参数与工具输出都会被检索，命中后可直接跳到那一步。侧栏的搜索框只匹配标题、目录、harness 等会话信息，不看对话内容。</p>
+      <p class="s-ex">试试：<button type="button" class="chip" data-example="error">error</button><button type="button" class="chip" data-example="&quot;not found&quot;">"not found"</button></p>
+      <p>多个词需同时出现，<code>"引号"</code> 内为短语，<code>-词</code> 排除；中文与代码片段按子串匹配。</p></div></div>
     <form class="sform" id="s-form" role="search">
       <div class="sfield"><svg class="i" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
         <input class="input" id="s-q" type="search" placeholder="搜索正文，例如 缓存击穿 或 parse_rel" aria-label="检索正文" autocomplete="off" spellcheck="false"></div>
       <input class="input" id="s-f" placeholder="会话过滤：h:claude since:7d" aria-label="会话过滤（会话搜索语法）" autocomplete="off" spellcheck="false">
       <button class="btn primary" type="submit">搜索</button>
     </form>
+    <div id="s-index" role="status" data-state=""></div>
     <div class="status-line" id="s-status" role="status"></div>
     <div class="sres" id="s-results"></div>
     <button class="btn" id="s-more" hidden>加载更多会话</button>
+    <div class="shome" id="s-home" hidden>
+      <div class="hcol">
+        <section class="hcard" id="h-sessions" aria-labelledby="h-sessions-t"></section>
+        <section class="hcard" aria-labelledby="h-syn-t">
+          <h2 id="h-syn-t">检索语法</h2>
+          <dl class="hsyn">
+            <dt><code>a b</code></dt><dd>两个词同时出现</dd>
+            <dt><code>"a b"</code></dt><dd>整句短语</dd>
+            <dt><code>-a</code></dt><dd>排除含 a 的内容</dd>
+            <dt><code>h:claude</code></dt><dd>只看某个 harness（右侧过滤框）</dd>
+            <dt><code>s:work</code></dt><dd>只看某种状态：work / idle</dd>
+            <dt><code>since:7d</code></dt><dd>最近 7 天有活动的会话</dd>
+            <dt><code>in:dir</code></dt><dd>目录里含 dir 的会话</dd>
+          </dl>
+        </section>
+      </div>
+      <div class="hcol">
+        <section class="hcard" id="h-index" aria-labelledby="h-index-t"></section>
+        <section class="hcard" aria-labelledby="h-try-t">
+          <h2 id="h-try-t">试试这些</h2>
+          <div class="hchips">
+            <button type="button" class="chip s-try" data-example="error">error</button>
+            <button type="button" class="chip s-try" data-example="&quot;permission denied&quot;">"permission denied"</button>
+            <button type="button" class="chip s-try" data-example="timeout -retry">timeout -retry</button>
+            <button type="button" class="chip s-try" data-example="TODO">TODO</button>
+            <button type="button" class="chip s-try" data-example="refactor" data-filter="since:7d">refactor · since:7d</button>
+            <button type="button" class="chip s-try" data-example="npm install" data-filter="h:claude">npm install · h:claude</button>
+          </div>
+        </section>
+        <section class="hcard" id="h-recent" aria-labelledby="h-recent-t" hidden></section>
+      </div>
+    </div>
   </div>
 </section>
 
@@ -1742,6 +1827,31 @@ function toast(msg, bad) {
   $("#toasts").append(n);
   setTimeout(() => n.remove(), 3200);
 }
+// A failure the user can still act on: stays until dismissed, with a copy-the-command action.
+function toastRecover(msg, command) {
+  const n = document.createElement("div");
+  n.className = "toast bad sticky";
+  n.setAttribute("role", "alert");
+  const t = document.createElement("div");
+  t.textContent = msg;
+  const acts = document.createElement("div");
+  acts.className = "acts";
+  const copy = document.createElement("button");
+  copy.className = "btn sm primary";
+  copy.dataset.act = "copy-recover";
+  copy.textContent = "复制恢复命令";
+  copy.onclick = async () => {
+    try { await navigator.clipboard.writeText(command); toast("已复制恢复命令"); n.remove(); }
+    catch { toast("无法写入剪贴板，请手动复制：" + command, true); }
+  };
+  const close = document.createElement("button");
+  close.className = "btn sm";
+  close.textContent = "关闭";
+  close.onclick = () => n.remove();
+  acts.append(close, copy);
+  n.append(t, acts);
+  $("#toasts").append(n);
+}
 
 // ---------------------------------------------------------------- URL state
 // Every view and filter lives in the query string next to api/token/transport, so a refresh
@@ -2104,7 +2214,11 @@ async function openTerminal(term) {
   try {
     const r = await write("POST", `/v1/sessions/${encodeURIComponent(key)}/open-terminal`, undefined, { terminal: term });
     toast(`已在 ${r.terminal || term} 中打开`);
-  } catch (e) { toast("打开终端失败：" + e.message, true); }
+  } catch (e) {
+    const command = e.body?.command || resumeCache.get(key)?.command;
+    if (command) toastRecover(`打开终端失败：${e.body?.reason || e.message}`, command);
+    else toast("打开终端失败：" + e.message, true);
+  }
 }
 
 // ---------------------------------------------------------------- transcript
@@ -2793,7 +2907,7 @@ async function runFts(append = false) {
   const q = $("#s-q").value.trim(), f = $("#s-f").value.trim();
   setp({ sq: q, sf: f });
   const status = $("#s-status"), box = $("#s-results");
-  if (!q) { box.innerHTML = ""; status.textContent = "输入要找的词：可以是中文、代码片段、报错信息。"; $("#s-more").hidden = true; return; }
+  if (!q) { box.innerHTML = ""; status.textContent = "输入要找的词：可以是中文、代码片段、报错信息。"; $("#s-more").hidden = true; syncHome(); return; }
   const mine = ++S.seq;
   if (!append) S.offset = 0;
   status.className = "status-line";
@@ -2808,6 +2922,8 @@ async function runFts(append = false) {
     </article>`).join("");
     if (append) box.insertAdjacentHTML("beforeend", html); else box.innerHTML = html || `<div class="empty" style="height:auto;padding:48px 0"><h3>没有找到</h3><p>换个词，或去掉会话过滤再试。</p></div>`;
     S.offset = r.offset + r.results.length;
+    if (!append) rememberSearch(q, f);
+    syncHome();
     const more = r.total > S.offset;
     $("#s-more").hidden = !more;
     const notes = [];
@@ -2819,13 +2935,128 @@ async function runFts(append = false) {
   } catch (e) {
     if (mine !== S.seq) return;
     status.className = "status-line bad";
-    status.textContent = e.status === 503 ? "全文检索不可用：守护进程以 --no-fts 启动或索引无法打开。" : `检索失败：${e.message}`;
+    status.textContent = e.status === 503 ? "全文检索不可用，原因见上方说明。" : `检索失败：${e.message}`;
+    if (e.status === 503) refreshFtsIndex();
+    syncHome();
   }
 }
+// Index state comes from /v1/stats `fts`: null = no index (--no-fts, or it failed to open);
+// `indexing` + `progress` = backfill running (ETA from the rate seen between polls).
+const FI = { timer: null, samples: [], state: "", seq: 0 };
+const fmtEta = (sec) => sec < 90 ? `约 ${Math.max(5, Math.round(sec / 5) * 5)} 秒` : sec < 5400 ? `约 ${Math.round(sec / 60)} 分钟` : `约 ${Math.floor(sec / 3600)} 小时 ${Math.round((sec % 3600) / 60)} 分钟`;
+const fmtBytes = (b) => b < 1048576 ? `${Math.round(b / 1024)} KB` : b < 1073741824 ? `${(b / 1048576).toFixed(1)} MB` : `${(b / 1073741824).toFixed(2)} GB`;
+const icoInfo = '<svg class="i" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16.5v.01"/></svg>';
+function ftsEta(done, total) {
+  const now = Date.now();
+  FI.samples.push([now, done]);
+  FI.samples = FI.samples.filter(([t]) => now - t <= 90_000);
+  const [t0, d0] = FI.samples[0];
+  if (done <= d0 || now - t0 < 1500) return "";
+  return fmtEta((total - done) / ((done - d0) / ((now - t0) / 1000)));
+}
+function renderFtsIndex(st) {
+  HOME.st = st;
+  const box = $("#s-index");
+  const state = !st ? "off" : st.indexing ? "building" : "ready";
+  if (state !== FI.state) FI.samples = [];
+  const wasBuilding = FI.state === "building";
+  FI.state = state;
+  box.dataset.state = state;
+  const off = state === "off";
+  for (const el of $$("#s-form input, #s-form button, #v-search .chip")) el.disabled = off;
+  if (off) {
+    box.innerHTML = `<div class="notice warn">${icoInfo}<div><b>全文检索未启用</b>：守护进程以 <code>--no-fts</code> 启动，或索引无法打开（原因见守护进程日志）。去掉 <code>--no-fts</code> 重启守护进程即可开启；没有它，这里搜不到对话内容。</div></div>`;
+    renderHome();
+    return;
+  }
+  if (state === "building") {
+    const { done = 0, total = 0 } = st.progress || {};
+    const eta = total ? ftsEta(done, total) : "";
+    const pct = total ? Math.min(100, Math.round(done / total * 100)) : 0;
+    box.innerHTML = `<div class="notice">${icoInfo}<div class="grow"><b>正在建立全文索引</b>：${done} / ${total} 个会话${total ? `（${pct}%）` : ""} · 剩余时间${total ? (eta || "估算中") : "估算中"}。建好之前能搜，但结果可能不全。
+      <div class="pbar" role="progressbar" aria-label="索引进度" aria-valuemin="0" aria-valuemax="${total}" aria-valuenow="${done}"><i style="width:${pct}%"></i></div></div></div>`;
+    renderHome();
+    return;
+  }
+  const bad = st.errors > 0 && st.last_error;
+  const bits = [`全文索引已就绪 · ${fmtBytes(st.bytes || 0)}`];
+  if (st.warming) bits.push("正在合并预热，个别词第一次搜索可能稍慢");
+  box.innerHTML = bad
+    ? `<div class="notice warn">${icoInfo}<div><b>索引遇到 ${st.errors} 个错误</b>，最近一次：<code>${esc(st.last_error)}</code>。其余内容仍可检索。</div></div>`
+    : `<div class="status-line">${esc(bits.join(" · "))}</div>`;
+  if (wasBuilding && $("#s-q").value.trim()) runFts();
+  renderHome();
+}
+async function refreshFtsIndex() {
+  const mine = ++FI.seq;
+  clearTimeout(FI.timer);
+  try {
+    const st = (await getJson("/v1/stats")).fts ?? null;
+    if (mine !== FI.seq) return;
+    renderFtsIndex(st);
+    if (st?.indexing && view === "search") FI.timer = setTimeout(refreshFtsIndex, 2000);
+  } catch (e) {
+    if (mine !== FI.seq) return;
+    FI.state = "";
+    $("#s-index").innerHTML = `<div class="notice bad">${icoInfo}<div>读不到守护进程状态：${esc(e.message)}。</div></div>`;
+  }
+}
+// Empty state: what is running / recent, the index at a glance, examples, syntax, recent searches.
+const HOME = { list: null, st: null };
+const RECENT_KEY = "uniflo.recentSearches";
+const recents = () => { try { return JSON.parse(localStorage.getItem(RECENT_KEY) || "[]").filter((r) => r && r.q); } catch { return []; } };
+function rememberSearch(q, f) {
+  try { localStorage.setItem(RECENT_KEY, JSON.stringify([{ q, f }, ...recents().filter((r) => r.q !== q || r.f !== f)].slice(0, 8))); } catch {}
+}
+function homeSessions() {
+  const all = filtered() ? HOME.list || [] : [...sessions.values()];
+  return all.filter((x) => !x.archived);
+}
+function renderHome() {
+  const home = $("#s-home");
+  if (home.hidden) return;
+  const all = homeSessions();
+  const running = all.filter((x) => x.status === "work").sort((a, b) => b.status_since - a.status_since);
+  const rows = (list, work) => `<div class="hrows">${list.map((x) => `<button type="button" class="hrow" data-open="${esc(x.key)}">${hicon(x.harness, "lg")}<span class="t"><b>${esc(label(x))}</b><span>${esc(x.cwd || x.key)}</span></span><span class="age${work ? " work" : ""}" title="${esc(stamp(work ? x.status_since : x.updated_at))}">${work ? "运行 " : ""}${age(work ? x.status_since : x.updated_at)}</span></button>`).join("")}</div>`;
+  if (running.length) {
+    $("#h-sessions").innerHTML = `<h2 id="h-sessions-t"><span class="live">正在运行</span><small>${running.length} 个会话</small></h2>${rows(running.slice(0, 8), true)}`;
+  } else {
+    const recent = all.slice().sort((a, b) => b.updated_at - a.updated_at).slice(0, 8);
+    $("#h-sessions").innerHTML = `<h2 id="h-sessions-t">最近会话<small>现在没有在运行的会话</small></h2>${recent.length ? rows(recent, false) : '<p class="hnone">还没有会话。</p>'}`;
+  }
+  const st = HOME.st, card = $("#h-index");
+  if (!st) card.innerHTML = `<h2 id="h-index-t">全文索引<small>未启用</small></h2><p class="hnone">守护进程以 <code>--no-fts</code> 启动，或索引无法打开（原因见守护进程日志）。去掉 <code>--no-fts</code> 重启守护进程即可开启。</p>`;
+  else {
+    const { done = 0, total = 0 } = st.progress || {};
+    const stats = [[`${done} / ${total}`, "已索引会话"], [fmtBytes(st.bytes || 0), "索引大小"]];
+    if (st.build_ms != null) stats.push([st.build_ms < 1000 ? `${st.build_ms} ms` : `${(st.build_ms / 1000).toFixed(1)} s`, "上次建立耗时"]);
+    card.innerHTML = `<h2 id="h-index-t">全文索引<small>${st.indexing ? "建立中" : st.errors > 0 ? "有错误" : "已就绪"}</small></h2>
+      <div class="hstats">${stats.map(([v, k]) => `<div><b>${esc(v)}</b><span>${k}</span></div>`).join("")}</div>
+      ${st.indexing ? `<p class="hint">建好之前能搜，但结果可能不全，进度见上方。</p>` : st.errors > 0 && st.last_error ? `<p class="hint">最近一次错误：${esc(st.last_error)}</p>` : st.warming ? '<p class="hint">正在合并预热，个别词第一次搜索可能稍慢。</p>' : ""}`;
+  }
+  const rc = recents(), box = $("#h-recent");
+  box.hidden = !rc.length;
+  if (rc.length) box.innerHTML = `<h2 id="h-recent-t">最近搜索<button type="button" class="linkbtn" data-clear-recent>清除</button></h2><div class="hchips">${rc.map((r) => `<button type="button" class="chip s-try" data-example="${esc(r.q)}" data-filter="${esc(r.f || "")}">${esc(r.q)}${r.f ? ` · ${esc(r.f)}` : ""}</button>`).join("")}</div><p class="hint">只保存在这个浏览器里。</p>`;
+}
+// Show the empty state whenever no result groups are on screen.
+function syncHome() {
+  const empty = !$("#s-results .sgroup");
+  const was = $("#s-home").hidden;
+  $("#s-home").hidden = !empty;
+  if (empty) {
+    if (filtered() && !HOME.list) getJson("/v1/sessions", { limit: 60 }).then((l) => { HOME.list = l; renderHome(); }).catch(() => {});
+    renderHome();
+  }
+  if (empty && was) setTimeout(() => $("#s-home").hidden || renderHome(), 0);
+}
+setInterval(() => { if (view === "search") { if (filtered()) getJson("/v1/sessions", { limit: 60 }).then((l) => { HOME.list = l; renderHome(); }).catch(() => {}); else renderHome(); } }, 3000);
 let ftsTimer = null;
 const queueFts = () => { clearTimeout(ftsTimer); ftsTimer = setTimeout(() => runFts(), 300); };
 viewEnter.search = () => {
   const q = getp("sq"), f = getp("sf");
+  refreshFtsIndex();
+  HOME.list = null;
+  syncHome();
   if ($("#s-q").value !== q || $("#s-f").value !== f || !$("#s-results").childElementCount) { $("#s-q").value = q; $("#s-f").value = f; runFts(); }
 };
 
@@ -3244,6 +3475,18 @@ document.addEventListener("toggle", (e) => {
 }, true);
 $("#q").addEventListener("input", () => { setp({ q: $("#q").value.trim() }); syncFilters(); queueSearch(); });
 $("#s-form").addEventListener("submit", (e) => { e.preventDefault(); clearTimeout(ftsTimer); runFts(); });
+$("#v-search").addEventListener("click", (e) => {
+  const c = e.target.closest("[data-example]");
+  if (c) {
+    $("#s-q").value = c.dataset.example;
+    if (c.dataset.filter !== undefined) $("#s-f").value = c.dataset.filter;
+    clearTimeout(ftsTimer);
+    return runFts();
+  }
+  const o = e.target.closest("[data-open]");
+  if (o) return openSession(o.dataset.open);
+  if (e.target.closest("[data-clear-recent]")) { try { localStorage.removeItem(RECENT_KEY); } catch {} renderHome(); }
+});
 $("#s-q").addEventListener("input", queueFts);
 $("#s-f").addEventListener("input", queueFts);
 let mTimer = null;

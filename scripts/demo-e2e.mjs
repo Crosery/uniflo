@@ -21,6 +21,7 @@ const PORT = 20000 + Math.floor(Math.random() * 20000);
 const CDP_PORT = PORT + 1;
 const STATIC_PORT = PORT + 2;
 const RO_PORT = PORT + 3;
+const NOFTS_PORT = PORT + 4;
 const TOKEN = "e2e-not-a-secret";
 const LATENCY_BUDGET_MS = 300;
 
@@ -340,6 +341,10 @@ async function runIcons() {
   }).filter(Boolean))()`;
   const bad = await cdp.eval(check);
   report("[icons] every row shows its harness icon, letter block when there is none", bad.length === 0, bad.join(" ") || `${hs.filter((h) => h.icon).length} icons + ${hs.filter((h) => !h.icon).length} letter blocks`);
+  const NEW_ICONS = ["pi", "omp", "workbuddy", "factory", "reasonix", "dsh", "zcode", "craft"], LETTERS = ["crosery", "prime", "kodu"];
+  const wrong = [...NEW_ICONS.filter((id) => !hs.find((h) => h.id === id)?.icon), ...LETTERS.filter((id) => hs.find((h) => h.id === id)?.icon)];
+  const fallbacks = await cdp.eval(`${JSON.stringify(NEW_ICONS)}.filter((id) => document.querySelector('.row[data-key^="' + id + ':"] .ricon .hi.hl'))`);
+  report("[icons] pi, omp, workbuddy, factory, reasonix, dsh, zcode, craft draw brand icons; only crosery, prime, kodu keep the letter block", !wrong.length && !fallbacks.length, [...wrong, ...fallbacks].join(" ") || "8 icons, 3 letter blocks");
   for (const theme of ["dark", "light"]) {
     await scheme(theme);
     await sleep(150);
@@ -462,6 +467,7 @@ async function runDetail() {
   // Never open a real terminal window: intercept the write request inside the page.
   await cdp.eval(`window.__term = []; const f0 = window.fetch; window.fetch = (u, o) => { if (String(u).includes('/open-terminal')) {
     window.__term.push({ url: String(u), method: o?.method, write: o?.headers?.['X-Uniflo-Write'] });
+    if (window.__termFail) return Promise.resolve(new Response(JSON.stringify({ error: '无法打开 Terminal：stub', reason: '无法打开 Terminal：stub', command: 'cd /w && claude --resume s1' }), { status: 500, headers: { 'content-type': 'application/json' } }));
     return Promise.resolve(new Response(JSON.stringify({ opened: true, terminal: 'terminal' }), { status: 200, headers: { 'content-type': 'application/json' } })); }
     return f0(u, o); }; true`);
   if (mac) {
@@ -471,6 +477,21 @@ async function runDetail() {
     const term = await waitFor(`window.__term.length && window.__term[0]`, 3_000, "open-terminal call").catch(() => null);
     report("[detail] \"在 Terminal 中打开\" posts open-terminal with X-Uniflo-Write (stubbed, no window)",
       !!term && term.method === "POST" && term.write === "1" && term.url.includes(`/v1/sessions/${enc(key)}/open-terminal`) && term.url.includes("terminal=terminal"), term?.url || "");
+  }
+  if (mac) {
+    await cdp.eval(`window.__termFail = true`);
+    await click("#resume-btn");
+    await waitFor(`!document.querySelector('#menu').hidden`, 3_000, "resume menu for failure");
+    await click('#menu [data-term="terminal"]');
+    const failed = await waitFor(`document.querySelector('#toasts .toast.sticky [data-act="copy-recover"]') && document.querySelector('#toasts .toast.sticky').textContent`, 3_000, "failure toast").catch(() => "");
+    await sleep(3_600);
+    const kept = await cdp.eval(`!!document.querySelector('#toasts .toast.sticky')`);
+    await click('#toasts .toast.sticky [data-act="copy-recover"]');
+    await sleep(300);
+    const clip2 = await cdp.eval(`navigator.clipboard.readText()`).catch((e) => "ERR " + e.message);
+    report("[detail] open-terminal failure keeps a toast with the reason and a working \"复制恢复命令\"",
+      failed.includes("无法打开 Terminal：stub") && kept && clip2 === "cd /w && claude --resume s1", `${failed} | kept=${kept} | ${clip2}`);
+    await cdp.eval(`window.__termFail = false`);
   }
   await shot("detail.png");
   report("[detail] no page errors", cdp.errors.length === 0, cdp.errors.slice(0, 3).join(" | "));
@@ -498,6 +519,85 @@ async function runFts() {
     !!at && at.inView && at.before && at.after && at.selected === "claude:search-target" && at.view && at.url.includes(`at=${hit?.e}`), JSON.stringify(at));
   await shot("search-jump.png");
   report("[search] no page errors", cdp.errors.length === 0, cdp.errors.slice(0, 3).join(" | "));
+}
+
+// The view has to explain itself and say what state the index is in (ready / building / off).
+async function runSearchHelp() {
+  await load(`${api}/demo?token=${TOKEN}&view=search`);
+  await waitFor(`!document.querySelector('#v-search').hidden && document.querySelector('#s-index').dataset.state === 'ready'`, 10_000, "index ready state");
+  const help = await cdp.eval(`({ text: document.querySelector('#v-search .page-h').textContent, chips: [...document.querySelectorAll('.s-ex [data-example]')].map((c) => c.dataset.example),
+    index: document.querySelector('#s-index').textContent })`);
+  report("[search-help] the view says what it searches and how it differs from the sidebar search",
+    help.text.includes("会话里说过的话") && help.text.includes("侧栏的搜索框") && help.text.includes("工具参数与工具输出"), help.text.slice(0, 80));
+  report("[search-help] ready state names the index and its size", /全文索引已就绪 · \d+(\.\d+)? (KB|MB|GB)/.test(help.index), help.index);
+  report("[search-help] two example queries are offered", help.chips.length === 2 && help.chips[1].startsWith('"'), help.chips.join(" | "));
+  const home = await cdp.eval(`({ vis: !document.querySelector('#s-home').hidden, sec: document.querySelector('#h-sessions h2').textContent, rows: document.querySelectorAll('#h-sessions .hrow[data-open]').length,
+    running: [...document.querySelectorAll('#h-sessions .hrow .age.work')].length, tries: document.querySelectorAll('#s-home .s-try').length,
+    idx: document.querySelector('#h-index').textContent, syn: document.querySelector('#s-home .hsyn').textContent })`);
+  const runningNow = (await apiJson(api, "/v1/sessions?q=s:work&limit=50")).length;
+  report("[search-home] empty state lists what is running (or recent sessions) as clickable rows",
+    home.vis && home.rows > 0 && (runningNow ? home.sec.includes("正在运行") && home.running > 0 : home.sec.includes("最近会话")), `${home.sec} · ${home.rows} rows · ${runningNow} running`);
+  report("[search-home] empty state has the index card, several examples and the syntax cheat sheet",
+    /已索引会话/.test(home.idx) && /索引大小/.test(home.idx) && home.tries >= 6 && home.syn.includes("-a") && home.syn.includes("h:claude") && home.syn.includes("since:7d"), `${home.tries} examples`);
+  for (const [w, h, mobile] of [[1480, 920, false], [390, 844, true]]) {
+    await viewport(w, h, mobile);
+    for (const theme of ["dark", "light"]) {
+      await scheme(theme);
+      await sleep(200);
+      const audit = await cdp.eval(`__e2e.audit('#v-search')`);
+      report(`[search-home] ${w}px ${theme}: no overflow, no overlap, AA contrast`, !audit.overflow.length && !audit.overlap.length && !audit.contrast.length, [...audit.overflow, ...audit.overlap, ...audit.contrast].slice(0, 4).join(" | "));
+      await shot(`search-home-${w}-${theme}.png`);
+    }
+  }
+  await viewport(1480, 920);
+  await scheme(null);
+  await click('#h-sessions .hrow[data-open]');
+  const opened = await waitFor(`!document.querySelector('#app').hidden && !!document.querySelector('.row.sel')`, 5_000, "open session").catch(() => false);
+  report("[search-home] clicking a session row opens it", !!opened);
+  await load(`${api}/demo?token=${TOKEN}&view=search`);
+  await waitFor(`!document.querySelector('#s-home').hidden && document.querySelector('#s-index').dataset.state === 'ready'`, 10_000, "home again");
+  await click('#s-home .s-try[data-filter="since:7d"]');
+  const withFilter = await waitFor(`(() => { const st = document.querySelector('#s-status').textContent; return st && !st.startsWith('搜索中') && !st.startsWith('输入要找的词') ? { q: document.querySelector('#s-q').value, f: document.querySelector('#s-f').value } : null; })()`, 8_000, "try chip").catch(() => null);
+  report("[search-home] clicking a \"试试这些\" example fills query and filter and runs the search", withFilter?.q === "refactor" && withFilter?.f === "since:7d", JSON.stringify(withFilter));
+  await load(`${api}/demo?token=${TOKEN}&view=search`);
+  await waitFor(`!document.querySelector('#h-recent').hidden`, 8_000, "recent searches").catch(() => {});
+  const rec = await cdp.eval(`({ shown: !document.querySelector('#h-recent').hidden, text: document.querySelector('#h-recent').textContent })`);
+  report("[search-home] recent searches are kept in this browser and listed", rec.shown && rec.text.includes("refactor"), rec.text.slice(0, 60));
+  await click('#h-recent [data-clear-recent]');
+  report("[search-home] \"清除\" empties the recent searches", await cdp.eval(`document.querySelector('#h-recent').hidden && !localStorage.getItem('uniflo.recentSearches') || document.querySelector('#h-recent').hidden`));
+  await waitFor(`document.querySelector('#s-index').dataset.state === 'ready'`, 5_000).catch(() => {});
+  await click('.s-ex [data-example]');
+  const ran = await waitFor(`(() => { const q = document.querySelector('#s-q').value, st = document.querySelector('#s-status').textContent;
+    return st && !st.startsWith('搜索中') && !st.startsWith('输入要找的词') ? { q, st, url: location.search } : null; })()`, 8_000, "example search").catch(() => null);
+  report("[search-help] clicking an example fills the input and runs the search",
+    !!ran && ran.q === help.chips[0] && ran.url.includes(`sq=${enc(help.chips[0])}`) && /个会话命中|没有找到/.test(ran.st + (await cdp.eval(`document.querySelector('#s-results').textContent`))), JSON.stringify(ran));
+  await shot("search-help.png");
+
+  // Building: stub /v1/stats so the progress, the "estimating" ETA and the switch to ready are deterministic.
+  await cdp.eval(`window.__done = 0; const f1 = window.fetch; window.fetch = async (u, o) => { const r = await f1(u, o);
+    if (!String(u).includes('/v1/stats')) return r;
+    const j = await r.json(); window.__done += 20; const building = window.__done < 100;
+    j.fts = { ...(j.fts || {}), indexing: building, progress: { done: Math.min(window.__done, 100), total: 100 } };
+    return new Response(JSON.stringify(j), { status: 200, headers: { 'content-type': 'application/json' } }); }; true`);
+  await cdp.eval(`document.querySelector('[data-view=sessions]').click(); true`);
+  await sleep(100);
+  await cdp.eval(`document.querySelector('[data-view=search]').click(); true`);
+  const first = await waitFor(`document.querySelector('#s-index[data-state=building]')?.textContent`, 5_000, "building state").catch(() => "");
+  report("[search-help] building state shows done/total and \"估算中\" before two samples", /20 \/ 100/.test(first) && first.includes("估算中") && first.includes("结果可能不全"), first.slice(0, 120));
+  const eta = await waitFor(`(() => { const t = document.querySelector('#s-index[data-state=building]')?.textContent || ''; return /剩余时间约/.test(t) ? t : null; })()`, 12_000, "eta").catch(() => "");
+  report("[search-help] ETA appears once the rate is known and the page refreshes by itself", /剩余时间约 \d+ (秒|分钟)/.test(eta), eta.slice(0, 120));
+  await shot("search-building.png");
+  const done = await waitFor(`document.querySelector('#s-index').dataset.state === 'ready' && document.querySelector('#s-index').textContent`, 15_000, "ready again").catch(() => "");
+  report("[search-help] the notice turns into the ready line when the index finishes", done.includes("全文索引已就绪"), done);
+
+  report("[search-help] no page errors", cdp.errors.length === 0, cdp.errors.slice(0, 3).join(" | "));
+  // Off (the page's own search self-check gets the expected 503 there): a daemon started with --no-fts.
+  await load(`${noFtsApi}/demo?token=${TOKEN}&view=search`);
+  await waitFor(`document.querySelector('#s-index').dataset.state === 'off'`, 10_000, "off state").catch(() => {});
+  const off = await cdp.eval(`({ text: document.querySelector('#s-index').textContent, q: document.querySelector('#s-q').disabled, chip: document.querySelector('.s-ex .chip').disabled })`);
+  report("[search-help] --no-fts daemon: says search is off and how to turn it on, and disables the form",
+    off.text.includes("全文检索未启用") && off.text.includes("--no-fts") && off.text.includes("重启守护进程") && off.q && off.chip, off.text.slice(0, 120));
+  await shot("search-off.png");
 }
 
 const METRICS = { sessions: (r) => r.sessions, prompts: (r) => r.prompts, tokens: (r) => r.input + r.output + r.cache_read + r.cache_write, cost: (r) => r.cost_usd || 0, steps: (r) => r.steps };
@@ -768,14 +868,17 @@ let daemon;
 let cdp;
 const api = `http://127.0.0.1:${PORT}`;
 const roApi = `http://127.0.0.1:${RO_PORT}`;
+const noFtsApi = `http://127.0.0.1:${NOFTS_PORT}`;
 
 async function main() {
 daemon = start(BIN, ["daemon", "--bind", `127.0.0.1:${PORT}`, "--no-cache", "--no-price-sync", "--token", TOKEN], { UNIFLO_HOME: home, UNIFLO_TRASH_DIR: trash });
 start(BIN, ["daemon", "--bind", `127.0.0.1:${RO_PORT}`, "--no-cache", "--no-price-sync", "--read-only", "--token", TOKEN], { UNIFLO_HOME: roHome });
+start(BIN, ["daemon", "--bind", `127.0.0.1:${NOFTS_PORT}`, "--no-cache", "--no-price-sync", "--read-only", "--no-fts", "--token", TOKEN], { UNIFLO_HOME: roHome });
 const profile = mkdtempSync(join(tmpdir(), "uniflo-e2e-chrome-"));
 try {
   await until(async () => (await fetch(`${api}/v1/health?token=${TOKEN}`)).ok, 15_000, "daemon health");
   await until(async () => (await fetch(`${roApi}/v1/health?token=${TOKEN}`)).ok, 15_000, "read-only daemon health");
+  await until(async () => (await fetch(`${noFtsApi}/v1/health?token=${TOKEN}`)).ok, 15_000, "no-fts daemon health");
   report("daemon without token answers 401", (await fetch(`${api}/v1/health`)).status === 401);
 
   // Same page served from a different loopback origin: the third-party integration path (CORS).
@@ -804,7 +907,7 @@ try {
     for (const transport of ["sse", "ws", "ndjson"]) await runTransport(transport);
     await runCrossOrigin();
   }
-  for (const step of [runIdentity, runIcons, runUsage, runDetail, runFts, runInsights, runNotify, runVisual, runManage, runReadOnly]) {
+  for (const step of [runIdentity, runIcons, runUsage, runDetail, runFts, runSearchHelp, runInsights, runNotify, runVisual, runManage, runReadOnly]) {
     if (only.length && !only.includes(step.name)) continue;
     try { await step(); } catch (e) { report(`${step.name}`, false, String(e.message || e)); }
   }

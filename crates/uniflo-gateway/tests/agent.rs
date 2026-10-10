@@ -1,5 +1,5 @@
 //! Resume and open-terminal routes over real TCP, with an injected launcher: no test ever runs
-//! `osascript` or opens a window.
+//! `open` or opens a window.
 
 use serde_json::{Value, json};
 use std::path::PathBuf;
@@ -8,7 +8,7 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use uniflo_adapters::claude::ClaudeFamily;
-use uniflo_core::resume::{Terminal, sh_quote, terminal_argv};
+use uniflo_core::resume::{sh_quote, terminal_script};
 use uniflo_core::{Adapter, Engine, EngineOptions, HarnessInfo, JsonlAdapter};
 use uniflo_gateway::GuardOptions;
 use uniflo_gateway::agent::{Launcher, with_launcher};
@@ -94,9 +94,9 @@ async fn resume_commands_validate_ids_and_quote_paths() {
     assert_eq!(req(s.addr, "GET", "/v1/sessions/claude%3Anope/resume", &[]).await.0, 404);
 }
 
-/// Scenario: macOS 打开终端 — the write header, read-only mode, and the exact osascript argv.
+/// Scenario: macOS 打开终端 — the write header, read-only mode, and the exact `open` argv and script.
 #[tokio::test]
-async fn open_terminal_needs_the_write_header_and_passes_the_line_as_an_argument() {
+async fn open_terminal_needs_the_write_header_and_launches_through_open_without_apple_events() {
     let s = start(GuardOptions::default()).await;
     let (st, v) = req(s.addr, "POST", OPEN, &[]).await;
     assert_eq!((st, v["error"].as_str()), (403, Some("missing X-Uniflo-Write: 1")));
@@ -111,7 +111,12 @@ async fn open_terminal_needs_the_write_header_and_passes_the_line_as_an_argument
         assert_eq!(st, 200, "{v}");
         let line = format!("cd {} && claude --resume s1", sh_quote(s.cwd.to_str().unwrap()));
         assert_eq!(v["command"].as_str(), Some(line.as_str()));
-        assert_eq!(*s.calls.lock().unwrap(), vec![terminal_argv(Terminal::Terminal, &line)]);
+        let calls = s.calls.lock().unwrap();
+        let [argv] = &calls[..] else { panic!("{calls:?}") };
+        assert_eq!(argv[..3], ["open", "-a", "Terminal"]);
+        assert!(!argv.iter().any(|a| a.contains("osascript")), "{argv:?}");
+        assert_eq!(std::fs::read_to_string(&argv[3]).unwrap(), terminal_script(&line));
+        let _ = std::fs::remove_dir_all(std::path::Path::new(&argv[3]).parent().unwrap());
     } else {
         assert_eq!(st, 501);
         assert!(v["command"].as_str().unwrap().ends_with("claude --resume s1"));
