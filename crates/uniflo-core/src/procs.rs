@@ -90,15 +90,21 @@ pub fn list(keep: fn(&str) -> bool, files: Option<fn(&Path) -> bool>) -> Vec<Pro
 }
 
 #[cfg(windows)]
-static RAW_PROCS: Mutex<Option<(Instant, Vec<(u32, String)>)>> = Mutex::new(None);
+struct RawProcCache {
+    at: Instant,
+    procs: Vec<(u32, String)>,
+}
+
+#[cfg(windows)]
+static RAW_PROCS: Mutex<Option<RawProcCache>> = Mutex::new(None);
 
 #[cfg(windows)]
 fn raw_procs() -> Vec<(u32, String)> {
     let mut g = RAW_PROCS.lock().unwrap();
-    if let Some((at, v)) = g.as_ref()
-        && at.elapsed() < Duration::from_secs(2)
+    if let Some(c) = g.as_ref()
+        && c.at.elapsed() < Duration::from_secs(2)
     {
-        return v.clone();
+        return c.procs.clone();
     }
     let ps = std::env::var("SystemRoot")
         .map(|r| format!(r"{r}\System32\WindowsPowerShell\v1.0\powershell.exe"))
@@ -114,7 +120,7 @@ fn raw_procs() -> Vec<(u32, String)> {
     else {
         return Vec::new();
     };
-    let list: Vec<(u32, String)> = String::from_utf8_lossy(&out.stdout)
+    let procs: Vec<(u32, String)> = String::from_utf8_lossy(&out.stdout)
         .lines()
         .filter_map(|l| {
             let l = l.trim();
@@ -123,8 +129,8 @@ fn raw_procs() -> Vec<(u32, String)> {
             Some((pid, args.to_owned()))
         })
         .collect();
-    *g = Some((Instant::now(), list.clone()));
-    list
+    *g = Some(RawProcCache { at: Instant::now(), procs: procs.clone() });
+    procs
 }
 
 #[cfg(windows)]
