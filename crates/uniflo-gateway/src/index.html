@@ -428,6 +428,14 @@ details[open] > summary .chev { transform: rotate(90deg); }
 .panel-b { padding: 12px 16px 16px; min-width: 0; }
 .status-line { font-size: var(--fs-xs); color: var(--text-3); min-height: 18px; }
 .status-line.bad { color: var(--danger); }
+.s-ex { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.s-ex .chip { font-family: var(--font-mono); background: var(--surface); }
+.s-ex .chip:disabled { opacity: .5; }
+#s-index:empty { display: none; }
+#s-index .notice { align-items: center; }
+#s-index .grow { flex: 1; min-width: 0; }
+.pbar { height: 4px; margin-top: 6px; border-radius: 2px; background: var(--surface-hover); overflow: hidden; }
+.pbar i { display: block; height: 100%; background: var(--accent-solid); transition: width var(--dur); }
 
 .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(132px, 1fr)); gap: 10px; }
 .kpi { display: flex; flex-direction: column; gap: 2px; padding: 12px 14px; border-radius: var(--r-lg); border: .5px solid var(--border-strong); background: var(--bg-raised); min-width: 0; text-align: left; color: inherit; font: inherit; }
@@ -830,13 +838,17 @@ SOFTWARE.
 
 <section class="view" id="v-search" role="tabpanel" data-view="search" hidden>
   <div class="page narrow">
-    <div class="page-h"><div><h1>全文检索</h1><p>检索消息正文、思考、工具参数与输出。空格分隔的词需同时出现，<code>"引号"</code> 内为短语，<code>-词</code> 排除；中文与代码片段都按子串匹配。</p></div></div>
+    <div class="page-h"><div><h1>全文检索</h1>
+      <p>按<b>会话里说过的话</b>找会话：消息正文、思考、工具参数与工具输出都会被检索，命中后可直接跳到那一步。侧栏的搜索框只匹配标题、目录、harness 等会话信息，不看对话内容。</p>
+      <p class="s-ex">试试：<button type="button" class="chip" data-example="error">error</button><button type="button" class="chip" data-example="&quot;not found&quot;">"not found"</button></p>
+      <p>多个词需同时出现，<code>"引号"</code> 内为短语，<code>-词</code> 排除；中文与代码片段按子串匹配。</p></div></div>
     <form class="sform" id="s-form" role="search">
       <div class="sfield"><svg class="i" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
         <input class="input" id="s-q" type="search" placeholder="搜索正文，例如 缓存击穿 或 parse_rel" aria-label="检索正文" autocomplete="off" spellcheck="false"></div>
       <input class="input" id="s-f" placeholder="会话过滤：h:claude since:7d" aria-label="会话过滤（会话搜索语法）" autocomplete="off" spellcheck="false">
       <button class="btn primary" type="submit">搜索</button>
     </form>
+    <div id="s-index" role="status" data-state=""></div>
     <div class="status-line" id="s-status" role="status"></div>
     <div class="sres" id="s-results"></div>
     <button class="btn" id="s-more" hidden>加载更多会话</button>
@@ -2860,13 +2872,72 @@ async function runFts(append = false) {
   } catch (e) {
     if (mine !== S.seq) return;
     status.className = "status-line bad";
-    status.textContent = e.status === 503 ? "全文检索不可用：守护进程以 --no-fts 启动或索引无法打开。" : `检索失败：${e.message}`;
+    status.textContent = e.status === 503 ? "全文检索不可用，原因见上方说明。" : `检索失败：${e.message}`;
+    if (e.status === 503) refreshFtsIndex();
+  }
+}
+// Index state comes from /v1/stats `fts`: null = no index (--no-fts, or it failed to open);
+// `indexing` + `progress` = backfill running (ETA from the rate seen between polls).
+const FI = { timer: null, samples: [], state: "", seq: 0 };
+const fmtEta = (sec) => sec < 90 ? `约 ${Math.max(5, Math.round(sec / 5) * 5)} 秒` : sec < 5400 ? `约 ${Math.round(sec / 60)} 分钟` : `约 ${Math.floor(sec / 3600)} 小时 ${Math.round((sec % 3600) / 60)} 分钟`;
+const fmtBytes = (b) => b < 1048576 ? `${Math.round(b / 1024)} KB` : b < 1073741824 ? `${(b / 1048576).toFixed(1)} MB` : `${(b / 1073741824).toFixed(2)} GB`;
+const icoInfo = '<svg class="i" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16.5v.01"/></svg>';
+function ftsEta(done, total) {
+  const now = Date.now();
+  FI.samples.push([now, done]);
+  FI.samples = FI.samples.filter(([t]) => now - t <= 90_000);
+  const [t0, d0] = FI.samples[0];
+  if (done <= d0 || now - t0 < 1500) return "";
+  return fmtEta((total - done) / ((done - d0) / ((now - t0) / 1000)));
+}
+function renderFtsIndex(st) {
+  const box = $("#s-index");
+  const state = !st ? "off" : st.indexing ? "building" : "ready";
+  if (state !== FI.state) FI.samples = [];
+  const wasBuilding = FI.state === "building";
+  FI.state = state;
+  box.dataset.state = state;
+  const off = state === "off";
+  for (const el of $$("#s-form input, #s-form button, .s-ex .chip")) el.disabled = off;
+  if (off) {
+    box.innerHTML = `<div class="notice warn">${icoInfo}<div><b>全文检索未启用</b>：守护进程以 <code>--no-fts</code> 启动，或索引无法打开（原因见守护进程日志）。去掉 <code>--no-fts</code> 重启守护进程即可开启；没有它，这里搜不到对话内容。</div></div>`;
+    return;
+  }
+  if (state === "building") {
+    const { done = 0, total = 0 } = st.progress || {};
+    const eta = total ? ftsEta(done, total) : "";
+    const pct = total ? Math.min(100, Math.round(done / total * 100)) : 0;
+    box.innerHTML = `<div class="notice">${icoInfo}<div class="grow"><b>正在建立全文索引</b>：${done} / ${total} 个会话${total ? `（${pct}%）` : ""} · 剩余时间${total ? (eta || "估算中") : "估算中"}。建好之前能搜，但结果可能不全。
+      <div class="pbar" role="progressbar" aria-label="索引进度" aria-valuemin="0" aria-valuemax="${total}" aria-valuenow="${done}"><i style="width:${pct}%"></i></div></div></div>`;
+    return;
+  }
+  const bad = st.errors > 0 && st.last_error;
+  const bits = [`全文索引已就绪 · ${fmtBytes(st.bytes || 0)}`];
+  if (st.warming) bits.push("正在合并预热，个别词第一次搜索可能稍慢");
+  box.innerHTML = bad
+    ? `<div class="notice warn">${icoInfo}<div><b>索引遇到 ${st.errors} 个错误</b>，最近一次：<code>${esc(st.last_error)}</code>。其余内容仍可检索。</div></div>`
+    : `<div class="status-line">${esc(bits.join(" · "))}</div>`;
+  if (wasBuilding && $("#s-q").value.trim()) runFts();
+}
+async function refreshFtsIndex() {
+  const mine = ++FI.seq;
+  clearTimeout(FI.timer);
+  try {
+    const st = (await getJson("/v1/stats")).fts ?? null;
+    if (mine !== FI.seq) return;
+    renderFtsIndex(st);
+    if (st?.indexing && view === "search") FI.timer = setTimeout(refreshFtsIndex, 2000);
+  } catch (e) {
+    if (mine !== FI.seq) return;
+    FI.state = "";
+    $("#s-index").innerHTML = `<div class="notice bad">${icoInfo}<div>读不到守护进程状态：${esc(e.message)}。</div></div>`;
   }
 }
 let ftsTimer = null;
 const queueFts = () => { clearTimeout(ftsTimer); ftsTimer = setTimeout(() => runFts(), 300); };
 viewEnter.search = () => {
   const q = getp("sq"), f = getp("sf");
+  refreshFtsIndex();
   if ($("#s-q").value !== q || $("#s-f").value !== f || !$("#s-results").childElementCount) { $("#s-q").value = q; $("#s-f").value = f; runFts(); }
 };
 
@@ -3285,6 +3356,13 @@ document.addEventListener("toggle", (e) => {
 }, true);
 $("#q").addEventListener("input", () => { setp({ q: $("#q").value.trim() }); syncFilters(); queueSearch(); });
 $("#s-form").addEventListener("submit", (e) => { e.preventDefault(); clearTimeout(ftsTimer); runFts(); });
+$(".s-ex").addEventListener("click", (e) => {
+  const c = e.target.closest("[data-example]");
+  if (!c) return;
+  $("#s-q").value = c.dataset.example;
+  clearTimeout(ftsTimer);
+  runFts();
+});
 $("#s-q").addEventListener("input", queueFts);
 $("#s-f").addEventListener("input", queueFts);
 let mTimer = null;
