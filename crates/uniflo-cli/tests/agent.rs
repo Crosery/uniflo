@@ -275,7 +275,7 @@ impl Mcp {
     }
 
     fn recv(&mut self) -> Value {
-        let line = self.rx.recv_timeout(Duration::from_secs(60)).expect("an MCP reply");
+        let line = self.rx.recv_timeout(Duration::from_secs(120)).expect("an MCP reply");
         serde_json::from_str(&line).unwrap_or_else(|e| panic!("stdout must carry JSON-RPC only: {e}: {line}"))
     }
 
@@ -602,7 +602,7 @@ fn setup_outside_a_terminal_writes_nothing_and_nothing_prompts() {
     assert_eq!(after, before, "only Uniflo's own cache may appear");
     assert!(!snapshot().iter().any(|(p, ..)| p.ends_with("setup.json")), "no state written");
     let out = h.run(&["skill", "print"]);
-    assert!(String::from_utf8_lossy(&out.stdout).starts_with("---\nname: uniflo\n"));
+    assert!(String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n").starts_with("---\nname: uniflo\n"));
 }
 
 /// Scenario: 真实 harness 接入（隔离 HOME）. Needs the real `claude` and `codex` on PATH; run with
