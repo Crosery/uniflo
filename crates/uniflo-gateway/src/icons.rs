@@ -1,5 +1,5 @@
 //! Harness brand icons: `GET /v1/harnesses/{id}/icon.svg` and `Harness.icon`. The monochrome
-//! lobe-icons symbols (MIT) live once, in the demo page's `#harness-icons` sprite; the gateway
+//! lobe-icons symbols (MIT) and vendor marks live once, in the demo page's `#harness-icons` sprite; the gateway
 //! cuts them out of the embedded page so the page and the API never drift apart.
 
 use crate::ApiError;
@@ -70,7 +70,10 @@ mod tests {
         assert!(s.contains("<path d=") || s.contains("<path clip-rule="), "{s}");
         assert!(!s.contains("<symbol"));
         assert_eq!(path("codex").as_deref(), Some("/v1/harnesses/codex/icon.svg"));
-        assert_eq!(path("pi"), None, "no brand icon: clients draw a letter block");
+        for id in ["pi", "omp", "workbuddy", "factory", "reasonix", "dsh", "zcode", "craft"] {
+            assert!(svg(id).is_some_and(|s| s.contains("<path")), "{id}");
+        }
+        assert_eq!(path("prime"), None, "no brand icon: clients draw a letter block");
         assert_eq!(svg("../index"), None);
     }
 }

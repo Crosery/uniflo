@@ -14,7 +14,7 @@
 | `GET /demo` | 页面参数见 `examples/web/index.html` 头注释 | 内置网页演示（单文件，无外部运行时依赖；内嵌副本 `crates/uniflo-gateway/src/index.html`） |
 | `GET /v1/health` | — | `{ok, version, schema, seq, sessions, working, uptime_ms, update_available, latest_version, latest_prerelease, read_only}`；`read_only` 为 true 表示守护进程以 `--read-only` 启动，写接口全部 403 |
 | `GET /v1/harnesses` | — | `Harness[]`：`{id, name, roots, sessions, working, icon}`；`icon` 是下一行的路径，没有品牌图标的 harness 不输出（客户端自己画字母块） |
-| `GET /v1/harnesses/{id}/icon.svg` | — | 单色品牌图标，`image/svg+xml`，路径用 `fill="currentColor"`：内联进页面或当 CSS `mask` 用即可随主题着色，直接放进 `<img>` 是黑色。来源 lobe-icons（MIT，见 `THIRD_PARTY_NOTICES.md`），与网页演示内嵌的是同一份；没有图标的 harness 404 |
+| `GET /v1/harnesses/{id}/icon.svg` | — | 单色品牌图标，`image/svg+xml`，路径用 `fill="currentColor"`：内联进页面或当 CSS `mask` 用即可随主题着色，直接放进 `<img>` 是黑色。来源 lobe-icons（MIT）与各家官方标识（见 `THIRD_PARTY_NOTICES.md`；仍显示字母块的 harness：`crosery`、`prime`、`kodu`，原因同处），与网页演示内嵌的是同一份；没有图标的 harness 404 |
 | `GET /v1/stats` | — | 索引与读取计数：`sessions`、`sources`、`bad_lines`、`unknown`、`read_errors`、`index_ms`…；`usage` 为后台用量索引进度 `{ready, done, total}`（关闭用量索引时为 `null`）；`update` 为守护进程最近一次 crates.io 检查结果 `{current, latest, available, latest_prerelease, checked_at, error}`（`latest`/`available` 只看正式版，`latest_prerelease` 仅为探测到的更新预发布版、供用户自行决定是否安装），未开启后台检查时为 `null`；`fts` 为全文索引状态 `FtsStatus`（`docs/schema.md#全文检索`），`--no-fts` 时为 `null` |
 | `GET /v1/sessions` | `q` 查询（`docs/search.md`）、`limit`（默认 100）、`format=ndjson` | `Session[]`，有 `q` 时按相关度、否则按 `updated_at` 倒序 |
 | `GET /v1/sessions/{key}` | — | `Session`；未知 key 返回 404 |

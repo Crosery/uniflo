@@ -157,7 +157,7 @@ es.addEventListener("event", (m) => upsertEvent(JSON.parse(m.data).event)); // �
 - 中间：归一后的会话流——用户气泡、Markdown 回复（代码块可复制）、折叠的思考、一行一个的工具调用（参数 + 输出 + 耗时 + 状态），按回合汇总 token。
 - 右侧：14 个接口的实时自检与延迟、索引健康度、实时 Envelope 流。
 - 顶栏切换 SSE / WebSocket / NDJSON；跟随系统明暗主题；`/` 搜索，`j` `k` 切换会话。
-- harness 显示单色品牌图标（[lobe-icons](https://github.com/lobehub/lobe-icons)，MIT，见 `THIRD_PARTY_NOTICES.md`），没有图标的显示字母块。
+- harness 显示单色品牌图标（[lobe-icons](https://github.com/lobehub/lobe-icons)，MIT，加各家官方标识，来源见 `THIRD_PARTY_NOTICES.md`）。没有图标的显示字母块：`crosery`（自家 harness，没有矢量标识）、`prime`（Prime Intellect 官方站点无法取得矢量标识）、`kodu`（仓库为 AGPL-3.0，已停止维护）。
 - 回合结束通知（铃铛按钮，默认关闭）：页面在后台时，会话从工作转为空闲会弹系统通知，标题是会话标题，同一会话 30 秒内最多一次，点击通知打开该会话。
 - 响应式布局：宽屏三栏，≤1180px 自动收起右栏，≤760px 改为会话列表 / 会话内容单栏切换；「会话列表」按钮或 `Esc` 返回列表，`/` 打开搜索。通知与工具标题按内容撑高，不遮挡相邻行。
 - URL 参数：`?api=http://127.0.0.1:7311`（从其他本地端口打开时）、`?token=`、`?transport=ws`、`?select=<key>`、`?redact`（模糊所有正文，便于录屏）。
