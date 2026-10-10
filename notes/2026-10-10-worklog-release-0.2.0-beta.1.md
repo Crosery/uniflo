@@ -16,7 +16,8 @@
 |---|---|---|
 | release 38030306268（tag @ 8837797） | CI stable 是 Rust 1.99，新增 `clippy::unnecessary_sort_by`（`engine_usage.rs:168`）；本机 stable 是 1.94.1 | cce32d2 修复；本机 `RUSTUP_TOOLCHAIN=1.99.0 scripts/verify.sh --e2e` 全过（e2e 125/0），`cargo +1.99.0 package --workspace --locked` 6 个 crate 打包与校验通过 |
 | release 38032110407（tag @ cce32d2） | ubuntu 上 `crates/uniflo-gateway/tests/cleanup.rs` 不稳定：`execute_archives_then_trashes_and_the_archive_stays_usable` 第 428 行归档后会话列表里该 key 计数为 0（期望 1）；同次 `restoring_from_the_trash_brings_the_source_back` 第 271 行还原后子代理会话 404。stage 的 ci 运行 38030842581 里只有前者失败 → 时序相关 | **未修**，见下 |
-| ci 38030842581（stage @ cce32d2） | windows-latest clippy：`agent.rs:162` 多余 `mut`、`craft.rs:329` 未使用变量 | 18cc771 修复，待 CI 确认 |
+| ci 38030842581（stage @ cce32d2） | windows-latest clippy：`agent.rs:162` 多余 `mut`、`craft.rs:329` 未使用变量 | 18cc771 修复 |
+| ci（stage @ 564fb8b） | windows-latest：`crates/uniflo-cli/tests/agent.rs:468` 在非 unix 上用了 `std::os::unix`；ubuntu：两个清理测试这次都在 `cleanup.rs:271`（`get` 断言 200）失败，已稳定复现 | Windows 一处改为 `#[cfg(unix)]` 块，待 CI 确认；Linux 未修 |
 
 ## Linux 清理测试排查记录（未定位）
 

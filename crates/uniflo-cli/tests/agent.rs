@@ -457,26 +457,30 @@ fn resume_commands_and_injection_guard() {
     // The shell line reproduces cwd and argv byte for byte.
     let c4 = resume("claude:c4");
     assert_eq!(c4["argv"], json!(["claude", "--resume", "c4"]));
-    let stub = h.root().join("stub");
-    std::fs::create_dir_all(&stub).unwrap();
-    let rec = h.root().join("argv.txt");
-    std::fs::write(
-        stub.join("claude"),
-        format!("#!/bin/sh\n{{ pwd; for a in \"$@\"; do printf '%s\\n' \"$a\"; done; }} > '{}'\n", rec.display()),
-    )
-    .unwrap();
-    std::fs::set_permissions(stub.join("claude"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-    let st = Command::new("/bin/sh")
-        .args(["-c", c4["command"].as_str().unwrap()])
-        .env("PATH", format!("{}:/usr/bin:/bin", stub.display()))
-        .status()
+    // The command line runs in a POSIX shell with a stub `claude` on PATH.
+    #[cfg(unix)]
+    {
+        let stub = h.root().join("stub");
+        std::fs::create_dir_all(&stub).unwrap();
+        let rec = h.root().join("argv.txt");
+        std::fs::write(
+            stub.join("claude"),
+            format!("#!/bin/sh\n{{ pwd; for a in \"$@\"; do printf '%s\\n' \"$a\"; done; }} > '{}'\n", rec.display()),
+        )
         .unwrap();
-    assert!(st.success());
-    let got = std::fs::read_to_string(&rec).unwrap();
-    let mut lines = got.lines();
-    let pwd = PathBuf::from(lines.next().unwrap());
-    assert_eq!(pwd.canonicalize().unwrap(), h.quoted_cwd().canonicalize().unwrap());
-    assert_eq!(lines.collect::<Vec<_>>(), ["--resume", "c4"]);
+        std::fs::set_permissions(stub.join("claude"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let st = Command::new("/bin/sh")
+            .args(["-c", c4["command"].as_str().unwrap()])
+            .env("PATH", format!("{}:/usr/bin:/bin", stub.display()))
+            .status()
+            .unwrap();
+        assert!(st.success());
+        let got = std::fs::read_to_string(&rec).unwrap();
+        let mut lines = got.lines();
+        let pwd = PathBuf::from(lines.next().unwrap());
+        assert_eq!(pwd.canonicalize().unwrap(), h.quoted_cwd().canonicalize().unwrap());
+        assert_eq!(lines.collect::<Vec<_>>(), ["--resume", "c4"]);
+    }
 
     // `uniflo resume --print` prints the same line; unsupported sessions exit 2.
     let out = h.run(&["--url", &d.url, "resume", "claude:c4", "--print"]);
