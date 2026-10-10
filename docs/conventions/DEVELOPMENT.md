@@ -2,14 +2,14 @@
 
 > 模块边界、代码风格、性能预算和隐私红线；改任何 crate 前读。
 
-状态：`current` · 更新：2026-10-09
+状态：`current` · 更新：2026-10-10
 
 ## 模块边界
 
 | crate | 职责 | 允许依赖 |
 |---|---|---|
 | `uniflo-schema` | wire 类型（`Session`/`Event`/`Envelope`），唯一对外契约 | serde、serde_json |
-| `uniflo-core` | 适配器 trait、JSONL 驱动、状态机、引擎、缓存、文件监听、进程探测、用量账本与价格目录（`usage/`、`pricing/`）、自有目录（`paths`）、会话清理与归档（`cleanup/`、`archive/`）、恢复命令 / 记忆文件 / 接力上下文（`resume`、`memory`、`context`） | schema |
+| `uniflo-core` | 适配器 trait、JSONL 驱动、状态机、引擎、缓存、文件监听、进程探测、用量账本与价格目录（`usage/`、`pricing/`）、自有目录（`paths`）、会话清理与归档（`cleanup/`、`archive/`）、恢复命令 / 记忆文件 / 接力上下文（`resume`、`memory`、`context`）、安装方式识别与预编译包自升级（`install`） | schema |
 | `uniflo-search` | 查询语法解析 + 模糊排序；全文索引 `fts`（SQLite FTS5，读 `Engine`） | schema、core |
 | `uniflo-adapters` | 每个 harness 一个模块，每个模块一个 cargo feature | core、schema |
 | `uniflo-gateway` | HTTP/SSE/NDJSON/WS 网关、Host/Origin/token 守卫，写请求另过 `write::check` | core、search、schema |
@@ -52,7 +52,7 @@
 - 调试真实数据只输出计数、键名、类型分布；日志里不打印会话正文。
 - 凭据只走环境变量（`UNIFLO_TOKEN`）或钥匙串；不进源码、日志、产物。
 - Uniflo 自己的文件只写到 `uniflo_core::paths` 给出的目录（数据、配置、缓存）；测试用 `UNIFLO_HOME` / `UNIFLO_DATA_DIR` 指到临时目录。
-- 联网只用系统 `curl`，且只在规范写明的地方（更新检查、价格同步），都可关闭（`--no-update-check`、`--no-price-sync`），请求里不带任何会话数据。测试用本地 HTTP 服务（`UNIFLO_PRICING_URL`），不访问互联网。
+- 联网只用系统 `curl`，且只在规范写明的地方（更新检查、价格同步），都可关闭（`--no-update-check`、`--no-price-sync`），请求里不带任何会话数据。测试用本地 HTTP 服务（`UNIFLO_PRICING_URL`），不访问互联网。用户显式运行 `uniflo update` 时，binary 安装会下载发布包和 `SHA256SUMS`（ADR-0009）；测试用 `UNIFLO_RELEASE_BASE_URL`、`UNIFLO_UPDATE_INDEX_URL` 指向本地服务，安装目录与配置目录都用临时目录，不替换真实安装，也不重启真实的 launchd 服务。
 
 ## 测试
 

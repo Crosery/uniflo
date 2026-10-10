@@ -2,7 +2,9 @@
 
 > 更新检查用系统 `curl` 拉 crates.io 稀疏索引（一次 HTTPS GET），安装用 `cargo install uniflo --force`；不引入任何 HTTP/TLS/semver 依赖。
 
-状态：`accepted` · 更新：2026-10-06
+状态：`accepted` · 更新：2026-10-10
+
+> 修订：[ADR-0009](ADR-0009-预编译分发与自升级.md) 增加 GitHub Releases 预编译包渠道，`uniflo update` 改为按安装方式升级（cargo / binary / unknown），launchd 服务只在运行的就是被升级的可执行文件时才重启。下文"安装"与"否决项"中的 GitHub Releases 一条以 ADR-0009 为准。
 
 ## 背景
 

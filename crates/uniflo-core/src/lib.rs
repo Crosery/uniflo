@@ -4,7 +4,8 @@
 //! - [`jsonl`]: generic driver for append-only transcript files
 //! - [`status`]: the shared work/idle state machine
 //! - [`engine`]: live index, change detection and event fan-out
-//! - [`update`]: crates.io version check via the system curl
+//! - [`update`]: crates.io version check via the system curl; [`install`]: install method and
+//!   the self-upgrade of a prebuilt release binary
 //! - [`pricing`]: model price catalog (snapshot + sync + overrides) and per-step cost
 //! - [`usage`]: per-step usage ledgers and their aggregations
 //! - [`paths`]: Uniflo's own data / config / cache directories
@@ -20,6 +21,7 @@ pub mod cache;
 pub mod cleanup;
 pub mod context;
 pub mod engine;
+pub mod install;
 pub mod jsonl;
 pub mod memory;
 pub mod paths;
