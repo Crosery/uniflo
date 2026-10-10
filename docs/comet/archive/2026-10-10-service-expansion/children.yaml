@@ -1,0 +1,51 @@
+schema: comet.native.children.v2
+acceptance_index:
+  A1:
+    source: brief.md
+    text: "harness-adapters 子任务：`specs/harness-adapters/spec.md` 的全部 Scenario 通过。本机真实数据跑 `uniflo scan --no-cache --json`：`grok` 会话数等于本机 `~/.grok/sessions` 下非空会话数；全部 harness 的 `stats.unknown` 为空，`bad_lines` 与 `read_errors` 为 0。"
+  A2:
+    source: brief.md
+    text: "usage-cost 子任务：`specs/usage-cost/spec.md` 的全部 Scenario 通过。在本机真实数据上，`GET /v1/usage?group_by=model` 与 `uniflo usage --by model --json` 给出相同的各模型 token 与费用合计；未定价模型单独计数，不记为 0。"
+  A3:
+    source: brief.md
+    text: "fulltext-search 子任务：`specs/fulltext-search/spec.md` 的全部 Scenario 通过。在本机真实数据上，索引在后台建完后，中文词与代码子串查询的 p50 延迟小于 50 ms。"
+  A4:
+    source: brief.md
+    text: "session-cleanup 子任务：`specs/session-cleanup/spec.md` 的全部 Scenario 通过。合成会话经\"计划 → 确认\"后，源文件进入回收站（测试中用注入的回收站目录），归档文件不大于源文件的 20%，归档会话仍出现在列表、检索与用量统计中。"
+  A5:
+    source: brief.md
+    text: "agent-access 子任务：`specs/agent-access/spec.md` 的全部 Scenario 通过。在隔离 HOME 中用真实 Claude Code 与 Codex 完成 `uniflo setup --mcp` 后，`claude mcp list` 显示 `uniflo` 已连接；对同一查询，REST、CLI `--json` 与 MCP `structuredContent` 返回的数字一致。"
+  A6:
+    source: brief.md
+    text: "distribution 子任务：`specs/distribution/spec.md` 的全部 Scenario 通过。用本机构建的当前平台发布包和本地模拟的发布服务器，`install.sh` 完成下载、校验、安装；校验值不符时中止且不留下文件。"
+  A7:
+    source: brief.md
+    text: "web-console 子任务：`specs/web-console/spec.md` 的全部 Scenario 通过。真实浏览器在合成数据上完成用量、检索、管理、洞察、通知各视图的 e2e，并留存明暗主题的宽屏与窄屏截图证据。"
+children:
+  - name: usage-cost
+    depends_on: []
+    covers: [A2]
+  - name: fulltext-search
+    depends_on: []
+    covers: [A3]
+  - name: harness-adapters
+    depends_on: [usage-cost]
+    covers: [A1]
+  - name: session-cleanup
+    depends_on: [usage-cost, fulltext-search]
+    covers: [A4]
+  - name: agent-access
+    depends_on: [usage-cost, fulltext-search]
+    covers: [A5]
+  - name: distribution
+    depends_on: [agent-access]
+    covers: [A6]
+  - name: web-console
+    depends_on: [harness-adapters, usage-cost, fulltext-search, session-cleanup, agent-access]
+    covers: [A7]
+  - name: acceptance-fixes
+    depends_on: [web-console]
+    covers: [A5, A7]
+  - name: ui-polish
+    depends_on: [acceptance-fixes]
+    covers: [A7]
