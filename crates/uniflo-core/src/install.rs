@@ -390,7 +390,7 @@ mod tests {
     #[test]
     fn swap_replace_and_aside() {
         let d = tmp("swap");
-        let exe = d.join("uniflo.exe");
+        let exe = d.join("uniflo-bin");
         let new = d.join("new-build");
         std::fs::write(&exe, "old").unwrap();
         std::fs::write(&new, "new").unwrap();
@@ -402,7 +402,7 @@ mod tests {
         std::fs::write(&new, "newer").unwrap();
         swap(&new, &exe, Swap::Aside).unwrap();
         assert_eq!(std::fs::read_to_string(&exe).unwrap(), "newer");
-        assert_eq!(aside_path(&exe), d.join("uniflo.exe.old"));
+        assert_eq!(aside_path(&exe), d.join("uniflo-bin.old"));
         assert_eq!(std::fs::read_to_string(aside_path(&exe)).unwrap(), "new");
         // a leftover from an earlier upgrade does not block the next one
         std::fs::write(&new, "newest").unwrap();
