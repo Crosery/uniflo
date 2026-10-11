@@ -47,7 +47,7 @@ jobs:
           scripts/verify.sh
 
       - name: Publish crates to crates.io
-        if: ${{ secrets.CARGO_REGISTRY_TOKEN != '' }}
+        if: env.CARGO_REGISTRY_TOKEN != ''
         run: |
           scripts/publish-crates.sh
 
