@@ -40,7 +40,3 @@ trash = "5"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading"] }
-
-[profile.release]
-lto = "thin"
-codegen-units = 4
