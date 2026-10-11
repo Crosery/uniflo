@@ -35,6 +35,9 @@ pub fn watch(roots: &[PathBuf], on_change: impl Fn(Change) + Send + 'static) -> 
         Err(_) => on_change(Change::Rescan),
     })?;
     for r in &roots {
+        if !r.exists() {
+            continue;
+        }
         if let Err(err) = w.watch(r, RecursiveMode::Recursive) {
             tracing::warn!("cannot watch {}: {err}", r.display());
         }

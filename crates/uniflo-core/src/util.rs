@@ -155,6 +155,30 @@ pub fn pid_alive(pid: u32) -> bool {
     }
 }
 
+/// Terminate a process id (`SIGTERM` on Unix, `TerminateProcess` on Windows).
+pub fn terminate_pid(pid: u32) -> bool {
+    if pid == 0 || pid > i32::MAX as u32 {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        // SAFETY: sends SIGTERM to pid.
+        unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) == 0 }
+    }
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_TERMINATE, TerminateProcess};
+        let handle = unsafe { OpenProcess(PROCESS_TERMINATE, 0, pid) };
+        if handle.is_null() {
+            return false;
+        }
+        let ok = unsafe { TerminateProcess(handle, 1) };
+        unsafe { CloseHandle(handle) };
+        ok != 0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

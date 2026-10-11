@@ -49,12 +49,15 @@ cargo binstall uniflo
 ### 启动服务
 
 ```sh
-uniflo daemon                             # 前台启动网关，默认 http://127.0.0.1:7311
+uniflo daemon                             # 后台静默启动网关，默认 http://127.0.0.1:7311
+uniflo daemon -f                          # 前台启动网关并实时输出日志（--foreground）
+uniflo daemon --stop                      # 停止后台运行的守护进程
+uniflo daemon --restart                   # 重启后台守护进程
 uniflo daemon --no-fts                    # 不建全文索引（/v1/search 返回 503）
 uniflo daemon --read-only                 # 关闭全部写接口（会话清理等返回 403）
 open http://127.0.0.1:7311/demo           # 打开内置网页演示
 
-# macOS 可一键安装 launchd 后台常驻服务（登录自启、静默运行）
+# macOS 也可一键安装 launchd 后台常驻服务（登录自启）
 scripts/install-service.sh
 ```
 

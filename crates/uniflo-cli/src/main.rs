@@ -75,6 +75,15 @@ enum Cmd {
         /// Disable every write endpoint (cleanup, archive deletion): they answer 403.
         #[arg(long)]
         read_only: bool,
+        /// Run in the foreground instead of detaching into the background.
+        #[arg(short = 'f', long)]
+        foreground: bool,
+        /// Stop the running background daemon.
+        #[arg(long)]
+        stop: bool,
+        /// Restart the running background daemon.
+        #[arg(long)]
+        restart: bool,
     },
     /// Check crates.io for a newer stable release, or install it the way this executable was
     /// installed (`cargo install`, or the prebuilt release package for an install-script install).
@@ -215,6 +224,9 @@ fn main() -> Result<()> {
             price_sync_delay,
             no_fts,
             read_only,
+            foreground,
+            stop,
+            restart,
         } => {
             let guard = GuardOptions {
                 token: cli.token.clone(),
@@ -224,6 +236,19 @@ fn main() -> Result<()> {
             };
             if !allow_hosts.is_empty() && guard.token.is_none() {
                 bail!("--allow-host exposes transcripts beyond loopback; set --token as well");
+            }
+            if stop {
+                stop_daemon(false)?;
+                return Ok(());
+            }
+            if restart {
+                let _ = stop_daemon(true);
+            }
+            use std::io::IsTerminal;
+            let detach =
+                !foreground && (restart || (std::io::stdin().is_terminal() && std::io::stderr().is_terminal()));
+            if detach {
+                return spawn_detached(bind, cli.token.clone());
             }
             let price_sync = (!no_price_sync)
                 .then(|| PriceSync { delay: Duration::from_secs(price_sync_delay), ..Default::default() });
@@ -248,6 +273,116 @@ fn engine_opts(no_cache: bool, stale_after: u64) -> EngineOptions {
         stale_after: Duration::from_secs(stale_after),
         cache_path: if no_cache { None } else { EngineOptions::default().cache_path },
         ..Default::default()
+    }
+}
+
+fn pid_file() -> std::path::PathBuf {
+    uniflo_core::paths::cache_dir().join("daemon.pid")
+}
+
+fn log_file() -> std::path::PathBuf {
+    uniflo_core::paths::cache_dir().join("daemon.log")
+}
+
+fn read_daemon_pid() -> Option<u32> {
+    let raw = std::fs::read_to_string(pid_file()).ok()?;
+    let pid: u32 = raw.trim().parse().ok()?;
+    uniflo_core::util::pid_alive(pid).then_some(pid)
+}
+
+pub(crate) fn stop_daemon(quiet: bool) -> Result<bool> {
+    let Some(pid) = read_daemon_pid() else {
+        let _ = std::fs::remove_file(pid_file());
+        if !quiet {
+            eprintln!("uniflo: no background daemon is running");
+        }
+        return Ok(false);
+    };
+    uniflo_core::util::terminate_pid(pid);
+    let t0 = Instant::now();
+    while uniflo_core::util::pid_alive(pid) && t0.elapsed() < Duration::from_secs(5) {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let _ = std::fs::remove_file(pid_file());
+    if !quiet {
+        eprintln!("uniflo: stopped background daemon (pid {pid})");
+    }
+    Ok(true)
+}
+
+pub(crate) fn spawn_detached(bind: &str, token: Option<String>) -> Result<()> {
+    let url = format!("http://{bind}");
+    let client = Client::new(&url, token)?;
+    if client.alive() {
+        let pid_note = read_daemon_pid().map(|p| format!(" (pid {p})")).unwrap_or_default();
+        eprintln!(
+            "uniflo: daemon is already running{pid_note} on {url} (use `uniflo daemon --restart` or `uniflo daemon --stop`)"
+        );
+        return Ok(());
+    }
+    let log_path = log_file();
+    if let Some(dir) = log_path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let out = std::fs::OpenOptions::new().create(true).append(true).open(&log_path)?;
+    let err = out.try_clone()?;
+
+    let exe = std::env::current_exe().context("locate current executable")?;
+    let mut cmd = std::process::Command::new(&exe);
+    let args: Vec<_> = std::env::args_os().skip(1).collect();
+    if args.iter().any(|a| a == "daemon") {
+        for arg in args {
+            if arg != "--restart" {
+                cmd.arg(arg);
+            }
+        }
+    } else {
+        cmd.arg("daemon");
+    }
+    cmd.arg("--foreground").stdin(std::process::Stdio::null()).stdout(out).stderr(err);
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        cmd.creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+
+    let mut child = cmd.spawn().context("spawn background daemon")?;
+    let pid = child.id();
+    let _ = std::fs::write(pid_file(), format!("{pid}\n"));
+
+    let t0 = Instant::now();
+    loop {
+        if let Ok(mut r) = client.get("/v1/health")
+            && r.status == 200
+        {
+            let v: serde_json::Value = serde_json::from_slice(&r.body().unwrap_or_default()).unwrap_or_default();
+            let sessions = v["sessions"].as_u64().unwrap_or(0);
+            eprintln!("uniflo: daemon started in background (pid {pid}) · {sessions} sessions · listening on {url}");
+            eprintln!(
+                "uniflo: log at {} (stop: `uniflo daemon --stop`, foreground: `uniflo daemon -f`)",
+                log_path.display()
+            );
+            return Ok(());
+        }
+        if let Ok(Some(status)) = child.try_wait() {
+            let _ = std::fs::remove_file(pid_file());
+            bail!("daemon exited early ({status}); see {}", log_path.display());
+        }
+        if t0.elapsed() > Duration::from_secs(15) {
+            eprintln!("uniflo: daemon starting in background (pid {pid}) · listening on {url}");
+            eprintln!("uniflo: log at {} (stop: `uniflo daemon --stop`)", log_path.display());
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(50));
     }
 }
 
@@ -294,6 +429,9 @@ fn daemon(
         runner.abort();
         engine.save_cache()?;
         engine.save_usage_cache()?;
+        if read_daemon_pid() == Some(std::process::id()) {
+            let _ = std::fs::remove_file(pid_file());
+        }
         eprintln!("uniflo: index cache saved, bye");
         Ok(())
     })

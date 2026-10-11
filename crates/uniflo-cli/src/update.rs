@@ -183,15 +183,12 @@ fn restart_daemon(exe: &Path, method: Method) {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = exe;
-        println!(
-            "{}",
-            if method == Method::Cargo {
-                "守护进程若正在运行，请先停掉再启动新版（Windows 上运行中的二进制无法被覆盖，建议 update 前停 daemon）。"
-            } else {
-                "守护进程若正在运行，重启后生效：`uniflo daemon`（旧进程仍是旧版本）。"
-            }
-        );
+        let _ = (exe, method);
+        if crate::stop_daemon(true).unwrap_or(false) && crate::spawn_detached("127.0.0.1:7311", None).is_ok() {
+            println!("后台守护进程已自动重启，新版本已在运行。");
+            return;
+        }
+        println!("守护进程若正在运行，重启后生效：`uniflo daemon --restart`（旧进程仍是旧版本）。");
     }
 }
 
