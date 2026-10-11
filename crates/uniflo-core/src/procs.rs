@@ -106,10 +106,7 @@ fn raw_procs() -> Vec<(u32, String)> {
     {
         return c.procs.clone();
     }
-    let ps = std::env::var("SystemRoot")
-        .map(|r| format!(r"{r}\System32\WindowsPowerShell\v1.0\powershell.exe"))
-        .unwrap_or_else(|_| "powershell".into());
-    let Ok(out) = Command::new(ps)
+    let Ok(out) = Command::new("powershell")
         .args([
             "-NoProfile",
             "-NonInteractive",

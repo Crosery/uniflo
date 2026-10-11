@@ -155,27 +155,6 @@ pub fn pid_alive(pid: u32) -> bool {
     }
 }
 
-/// Terminate a process id (`SIGTERM` on Unix, `TerminateProcess` on Windows).
-pub fn terminate_pid(pid: u32) -> bool {
-    if pid == 0 || pid > i32::MAX as u32 {
-        return false;
-    }
-    #[cfg(unix)]
-    {
-        // SAFETY: sends SIGTERM to pid.
-        unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) == 0 }
-    }
-    #[cfg(windows)]
-    {
-        std::process::Command::new("taskkill")
-            .args(["/PID", &pid.to_string(), "/F"])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

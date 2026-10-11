@@ -298,12 +298,11 @@ pub(crate) fn stop_daemon(quiet: bool) -> Result<bool> {
         }
         return Ok(false);
     };
-    uniflo_core::util::terminate_pid(pid);
+    let _ = std::fs::remove_file(pid_file());
     let t0 = Instant::now();
     while uniflo_core::util::pid_alive(pid) && t0.elapsed() < Duration::from_secs(5) {
         std::thread::sleep(Duration::from_millis(50));
     }
-    let _ = std::fs::remove_file(pid_file());
     if !quiet {
         eprintln!("uniflo: stopped background daemon (pid {pid})");
     }
@@ -339,7 +338,7 @@ pub(crate) fn spawn_detached(bind: &str, token: Option<String>) -> Result<()> {
     } else {
         cmd.arg("daemon");
     }
-    cmd.arg("--foreground").stdin(std::process::Stdio::null()).stdout(out).stderr(err);
+    cmd.arg("--foreground").env("UNIFLO_DETACHED", "1").stdin(std::process::Stdio::null()).stdout(out).stderr(err);
 
     #[cfg(windows)]
     {
@@ -357,7 +356,6 @@ pub(crate) fn spawn_detached(bind: &str, token: Option<String>) -> Result<()> {
 
     let mut child = cmd.spawn().context("spawn background daemon")?;
     let pid = child.id();
-    let _ = std::fs::write(pid_file(), format!("{pid}\n"));
 
     let t0 = Instant::now();
     loop {
@@ -422,8 +420,29 @@ fn daemon(
         let cleanup = Cleanup::new(engine.clone(), CleanupOptions::from_env()).ok().map(Arc::new);
         let runner = tokio::spawn(engine.clone().run());
         let router = uniflo_gateway::router_with(engine.clone(), guard, uniflo_gateway::Services { fts, cleanup });
-        uniflo_gateway::serve(listener, router, async {
-            let _ = tokio::signal::ctrl_c().await;
+        let my_pid = std::process::id();
+        let tracked = std::env::var_os("UNIFLO_DETACHED").is_some();
+        if tracked {
+            if let Some(dir) = pid_file().parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            let _ = std::fs::write(pid_file(), format!("{my_pid}\n"));
+        }
+        uniflo_gateway::serve(listener, router, async move {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                _ = async {
+                    if !tracked {
+                        std::future::pending::<()>().await;
+                    }
+                    loop {
+                        tokio::time::sleep(Duration::from_millis(200)).await;
+                        if read_daemon_pid() != Some(my_pid) {
+                            break;
+                        }
+                    }
+                } => {}
+            }
         })
         .await?;
         runner.abort();
