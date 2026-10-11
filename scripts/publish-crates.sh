@@ -15,8 +15,8 @@ fi
 CRATES=(
   "uniflo-schema"
   "uniflo-core"
-  "uniflo-search"
   "uniflo-adapters"
+  "uniflo-search"
   "uniflo-gateway"
   "uniflo"
 )
@@ -24,14 +24,14 @@ CRATES=(
 for crate in "${CRATES[@]}"; do
   printf "\n==> Publishing %s...\n" "$crate"
   attempts=0
-  max_attempts=6
+  max_attempts=8
   while true; do
     attempts=$((attempts + 1))
     if out=$(cargo publish -p "$crate" ${DRY_RUN:+"$DRY_RUN"} 2>&1); then
       printf "%s\n" "$out"
       if [[ -z "$DRY_RUN" ]]; then
-        printf "Waiting 15s for %s to index on crates.io before downstream...\n" "$crate"
-        sleep 15
+        printf "Waiting 20s for %s to index on crates.io before downstream...\n" "$crate"
+        sleep 20
       fi
       break
     else
