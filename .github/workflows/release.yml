@@ -11,6 +11,8 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    env:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
     outputs:
       tag: ${{ steps.tag_info.outputs.tag }}
       version: ${{ steps.tag_info.outputs.version }}
@@ -45,9 +47,7 @@ jobs:
           scripts/verify.sh
 
       - name: Publish crates to crates.io
-        if: env.CARGO_REGISTRY_TOKEN != ''
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        if: ${{ secrets.CARGO_REGISTRY_TOKEN != '' }}
         run: |
           scripts/publish-crates.sh
 
@@ -148,8 +148,12 @@ jobs:
           # Hand-written notes for this tag go first; GitHub's generated list is appended.
           NOTES=()
           if [[ -f "docs/releases/$TAG.md" ]]; then NOTES=(--notes-file "docs/releases/$TAG.md"); fi
-          gh release create "$TAG" dist/* \
-            --title "$TITLE" \
-            "${NOTES[@]}" \
-            --generate-notes \
-            $PRERELEASE_FLAG
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" dist/* \
+              --title "$TITLE" \
+              "${NOTES[@]}" \
+              --generate-notes \
+              $PRERELEASE_FLAG
+          fi
