@@ -80,7 +80,7 @@ pub fn run(check: bool, prerelease: bool, json: bool) -> Result<()> {
     }
     match record {
         Some(rec) => binary_upgrade(&exe, rec, &record_file, version)?,
-        None => cargo_install(version)?,
+        None => cargo_install(&exe, version)?,
     }
     println!("已安装 uniflo {}{}。", version, if is_pre { "（预发布版）" } else { "" });
     restart_daemon(&exe, method);
@@ -88,11 +88,37 @@ pub fn run(check: bool, prerelease: bool, json: bool) -> Result<()> {
     Ok(())
 }
 
-fn cargo_install(version: &str) -> Result<()> {
+fn cargo_install(#[cfg_attr(not(windows), allow(unused_variables))] exe: &Path, version: &str) -> Result<()> {
+    #[cfg(windows)]
+    let moved_aside = if exe.is_file() {
+        let old = install::aside_path(exe);
+        let _ = std::fs::remove_file(&old);
+        std::fs::rename(exe, &old).is_ok()
+    } else {
+        false
+    };
+
     let status = std::process::Command::new("cargo")
         .args(["install", "uniflo", "--force", "--version", version])
         .status()
-        .with_context(|| format!("cargo 不可用；手动运行 `cargo install uniflo --force --version {version}`"))?;
+        .with_context(|| format!("cargo 不可用；手动运行 `cargo install uniflo --force --version {version}`"));
+
+    #[cfg(windows)]
+    if moved_aside {
+        let old = install::aside_path(exe);
+        match &status {
+            Ok(s) if s.success() => {
+                let _ = std::fs::remove_file(&old);
+            }
+            _ => {
+                if !exe.is_file() {
+                    let _ = std::fs::rename(&old, exe);
+                }
+            }
+        }
+    }
+
+    let status = status?;
     if !status.success() {
         bail!("cargo install 失败（exit {:?}）", status.code());
     }
