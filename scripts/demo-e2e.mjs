@@ -15,7 +15,8 @@ import { spawn } from "node:child_process";
 import { writeAllHarnesses } from "./e2e-fixtures.mjs";
 const ROOT = new URL("..", import.meta.url).pathname;
 const BIN = process.env.UNIFLO_BIN || join(ROOT, "target/release/uniflo");
-const CHROME = process.env.CHROME || "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+const HEADLESS_SHELL = join(process.env.HOME || "", ".local/bin/chrome-headless-shell");
+const CHROME = process.env.CHROME || (existsSync(HEADLESS_SHELL) ? HEADLESS_SHELL : "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome");
 const SHOTS = process.env.E2E_SHOTS || join(ROOT, "target/demo-e2e");
 const PORT = 20000 + Math.floor(Math.random() * 20000);
 const CDP_PORT = PORT + 1;
@@ -776,6 +777,11 @@ async function runUsageControls() {
   // date range
   await click('#u-range [data-range="custom"]');
   await waitFor(`!!document.querySelector('.air-datepicker.-active-')`, 3_000, "date picker opens");
+  await click("#v-usage h1");
+  await waitFor(`!document.querySelector('.air-datepicker.-active-')`, 3_000, "date picker closes on outside click");
+  await click("#u-dates");
+  await waitFor(`!!document.querySelector('.air-datepicker.-active-')`, 3_000, "date picker reopens on input click");
+  report("[usage-ui] date picker closes on outside click and reopens on input click", true);
   const cells = await cdp.eval(`[...document.querySelectorAll('.air-datepicker.-active- .air-datepicker-cell.-day-:not(.-disabled-):not(.-other-month-)')].map((c) => c.dataset.year + '-' + String(+c.dataset.month + 1).padStart(2, '0') + '-' + String(c.dataset.date).padStart(2, '0'))`);
   const a = cells[0], b = cells[Math.min(cells.length - 1, 3)];
   await shot("usage-ui-date-open.png");

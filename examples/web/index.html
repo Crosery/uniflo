@@ -265,8 +265,8 @@ input[type=checkbox].cb:disabled { opacity: .5; cursor: not-allowed; }
   --adp-cell-background-color-in-range: var(--accent-bg); --adp-cell-background-color-in-range-hover: var(--accent-bg); --adp-cell-border-color-in-range: transparent;
   --adp-btn-color: var(--accent); --adp-btn-color-hover: var(--text); --adp-btn-background-color-hover: var(--surface-hover); --adp-btn-background-color-active: var(--surface-active);
   --adp-nav-arrow-color: var(--text-3); --adp-nav-color-secondary: var(--text-3);
-  --adp-day-cell-height: 30px; --adp-nav-height: 34px; --adp-nav-action-size: 30px;
-  box-shadow: var(--shadow-lg); font-variant-numeric: tabular-nums; }
+  --adp-day-cell-height: 30px; --adp-nav-height: 34px; --adp-nav-action-size: 30px; --adp-transition-duration: 0s;
+  transition: none; box-shadow: var(--shadow-lg); font-variant-numeric: tabular-nums; }
 .air-datepicker .air-datepicker-cell.-selected- { color: var(--on-solid); }
 .air-datepicker .air-datepicker-nav--title { font-weight: 600; }
 .air-datepicker .air-datepicker--pointer { display: none; }
@@ -1945,6 +1945,7 @@ function showView(v, push = false) {
   setp({ view: v }, push && changed);
   closeMenu();
   hideTip();
+  if (v !== "usage") closeDatePicker();
   if (ready) viewEnter[v]?.();
 }
 
@@ -2697,15 +2698,23 @@ const ZH = { days: ["周日", "周一", "周二", "周三", "周四", "周五", 
   monthsShort: ["1 月", "2 月", "3 月", "4 月", "5 月", "6 月", "7 月", "8 月", "9 月", "10 月", "11 月", "12 月"],
   today: "今天", clear: "清除", dateFormat: "yyyy-MM-dd", timeFormat: "HH:mm", firstDay: 1 };
 const datePicker = new AirDatepicker("#u-dates", {
-  locale: ZH, range: true, dynamicRange: true, multipleDatesSeparator: " 至 ", autoClose: true, maxDate: new Date(), toggleSelected: false,
+  locale: ZH, range: true, dynamicRange: true, multipleDatesSeparator: " 至 ", autoClose: true, maxDate: new Date(),
+  toggleSelected({ datepicker, date }) {
+    if (datepicker.selectedDates.length === 2) datepicker.selectDate(date);
+    return false;
+  },
   isMobile: matchMedia("(max-width: 600px)").matches, navTitles: { days: "yyyy 年 MMMM" }, position: "bottom left", offset: 6,
   onSelect({ date }) {
     if (!Array.isArray(date) || date.length !== 2) return;
     const [from, to] = date.map(dayKey).sort();
     setp({ range: "custom", from, to });
     loadUsage();
+    setTimeout(closeDatePicker, 0);
   },
 });
+function closeDatePicker() {
+  if (typeof datePicker !== "undefined" && datePicker.visible) datePicker.hide();
+}
 const UCOLS = [["label", "名称"], ["sessions", "会话"], ["prompts", "提示"], ["steps", "步数"], ["input", "输入"], ["output", "输出"],
   ["cache_read", "缓存读"], ["cache_write", "缓存写"], ["cost_usd", "费用"], ["unpriced_steps", "未定价"]];
 const RANGES = { "24h": 1, "7d": 7, "30d": 30, "90d": 90 };
@@ -3485,6 +3494,12 @@ viewEnter.insights = loadInsights;
 document.addEventListener("click", (e) => {
   const t = e.target;
   if (!t.closest("#menu") && !t.closest("#resume-btn")) closeMenu();
+  const inPicker = e.composedPath().some((n) => n.classList?.contains("air-datepicker") || n.id === "u-dates");
+  if (!inPicker && !t.closest('#u-range [data-range="custom"]')) closeDatePicker();
+  if (t.closest("#u-dates")) {
+    if (!datePicker.visible) datePicker.show();
+    return;
+  }
   const nav = t.closest("#nav [data-view]");
   if (nav) return showView(nav.dataset.view, true);
   const chip = t.closest(".chip[data-tok]");
@@ -3536,9 +3551,12 @@ document.addEventListener("click", (e) => {
   const rg = t.closest("#u-range [data-range]");
   if (rg) {
     const custom = rg.dataset.range === "custom";
+    const wasCustom = getp("range") === "custom";
     setp({ range: rg.dataset.range, from: null, to: null });
     loadUsage();
-    if (custom) setTimeout(() => datePicker.show(), 0);
+    if (!custom) closeDatePicker();
+    else if (wasCustom && datePicker.visible) closeDatePicker();
+    else setTimeout(() => { $("#u-dates").focus(); datePicker.show(); }, 0);
     return;
   }
   const gr = t.closest("#u-group [data-group]");
@@ -3683,7 +3701,7 @@ document.addEventListener("keydown", (e) => {
     $("#q").select();
     return;
   }
-  if (e.key === "Escape") { closeMenu(); hideTip(); }
+  if (e.key === "Escape") { closeMenu(); hideTip(); closeDatePicker(); }
   if (typing) {
     if (e.key === "Escape") e.target.blur();
     if (e.key === "Enter" && e.target.id === "q" && shown.length) {

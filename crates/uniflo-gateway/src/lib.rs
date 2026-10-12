@@ -159,8 +159,8 @@ async fn index() -> impl IntoResponse {
     }))
 }
 
-async fn demo() -> Html<&'static str> {
-    Html(include_str!("index.html"))
+async fn demo() -> impl IntoResponse {
+    ([(header::CACHE_CONTROL, "no-cache, must-revalidate")], Html(include_str!("index.html")))
 }
 
 async fn health(State(s): State<AppState>) -> impl IntoResponse {
