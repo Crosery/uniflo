@@ -122,13 +122,13 @@ impl<D: Sidecar> WithSidecars<D> {
     }
 
     fn split(c: &Cursor) -> (Cursor, SideState) {
-        let side = serde_json::from_value::<SideState>(c.state.clone()).unwrap_or(SideState {
-            d: Value::Null,
-            sig: Vec::new(),
-            content: false,
-            held: Held::default(),
-        });
-        (Cursor { state: side.d.clone(), ..c.clone() }, side)
+        match serde_json::from_value::<SideState>(c.state.clone()) {
+            Ok(side) => (Cursor { state: side.d.clone(), ..c.clone() }, side),
+            Err(_) => (
+                Cursor { offset: u64::MAX, state: Value::Null, ..c.clone() },
+                SideState { d: Value::Null, sig: Vec::new(), content: false, held: Held::default() },
+            ),
+        }
     }
 
     /// Append sidecar records for `id` when they may differ from what was sent, then wrap the

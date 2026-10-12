@@ -277,7 +277,7 @@ pub struct Engine {
 impl Engine {
     pub fn new(adapters: Vec<Arc<dyn Adapter>>, opts: EngineOptions) -> Arc<Self> {
         let ids: Vec<&str> = adapters.iter().map(|a| a.info().id).collect();
-        let tag = format!("uniflo-core/{}/schema{}/{}", env!("CARGO_PKG_VERSION"), SCHEMA_VERSION, ids.join(","));
+        let tag = format!("uniflo-core/{}/schema{}-r2/{}", env!("CARGO_PKG_VERSION"), SCHEMA_VERSION, ids.join(","));
         let (tx, _) = broadcast::channel(opts.replay.max(1024));
         let probing = adapters.iter().map(|_| AtomicBool::new(false)).collect();
         let pricing = Pricing::new(opts.data_dir.as_ref().map(|d| d.join("pricing")));
@@ -448,6 +448,7 @@ impl Engine {
             for k in &source.keys {
                 if let Some(e) = st.sessions.get_mut(k) {
                     e.tracker = StatusTracker::default();
+                    e.session.preview = None;
                 }
             }
         }

@@ -68,7 +68,6 @@ const IGNORED: &[&str] = &[
     "tag",
     "session-meta",
     "resend-fork-notice",
-    "continued-in",
     "fork-context-ref",
     "agent-setting",
 ];
@@ -157,6 +156,9 @@ impl LineDecoder for ClaudeFamily {
                     cx.meta().model = Some(m);
                 }
             }
+            "continued-in" => {
+                cx.emit(format!("continued:{}", cx.pos), t, Body::TurnEnd { reason: Some("continued_in".into()) });
+            }
             _ if IGNORED.contains(&ty) => {}
             _ => cx.unknown(format!("type={ty}")),
         }
@@ -175,9 +177,16 @@ impl LineDecoder for ClaudeFamily {
             let (Some(pid), Some(id)) = (v.get("pid").and_then(Value::as_u64), string_of(&v, "sessionId")) else {
                 continue;
             };
-            // `status` in this registry goes stale; only liveness is trusted.
+            // `busy` can linger when a background job is parked; `idle`/`shell` or a parked
+            // job reliably mean the interactive REPL is not running an agent turn.
+            let parked = string_of(&v, "parkedJobId").is_some();
+            let status = match str_of(&v, "status") {
+                _ if parked => Some(uniflo_schema::Status::Idle),
+                Some("idle" | "shell") => Some(uniflo_schema::Status::Idle),
+                _ => None,
+            };
             if pid_alive(pid as u32) {
-                out.push(LiveSession { id, pid: pid as u32, status: None });
+                out.push(LiveSession { id, pid: pid as u32, status });
             }
         }
         Some(out)
@@ -330,7 +339,10 @@ fn system(v: &Value, t: i64, cx: &mut Cx<'_, ()>) {
         return;
     }
     let text = v.get("content").map(text_of).unwrap_or_default();
-    cx.emit(id, t, Body::System { subtype: sub.to_owned(), text });
+    cx.emit(id.clone(), t, Body::System { subtype: sub.to_owned(), text });
+    if matches!(sub, "away_summary" | "agents_killed") {
+        cx.emit(format!("{id}:end"), t, Body::TurnEnd { reason: Some(sub.to_owned()) });
+    }
 }
 
 #[cfg(test)]
@@ -502,10 +514,26 @@ mod tests {
     fn live_registry_only_reports_alive_pids() {
         let fx = Fixture::new();
         let a = fam(fx.root());
-        fx.write("live/1.json", &json!({"pid": std::process::id(), "sessionId": "me", "status": "busy"}).to_string());
+        let me = std::process::id();
+        fx.write("live/1.json", &json!({"pid": me, "sessionId": "me", "status": "busy"}).to_string());
         fx.write("live/2.json", &json!({"pid": 9_999_999, "sessionId": "dead"}).to_string());
         fx.write("live/3.key", "secret");
-        let live = uniflo_core::Adapter::live(&a).unwrap();
-        assert_eq!(live, vec![LiveSession { id: "me".into(), pid: std::process::id(), status: None }]);
+        fx.write("live/4.json", &json!({"pid": me, "sessionId": "idle-s", "status": "idle"}).to_string());
+        fx.write("live/5.json", &json!({"pid": me, "sessionId": "shell-s", "status": "shell"}).to_string());
+        fx.write(
+            "live/6.json",
+            &json!({"pid": me, "sessionId": "parked-s", "status": "busy", "parkedJobId": "j1"}).to_string(),
+        );
+        let mut live = uniflo_core::Adapter::live(&a).unwrap();
+        live.sort_by(|x, y| x.id.cmp(&y.id));
+        assert_eq!(
+            live,
+            vec![
+                LiveSession { id: "idle-s".into(), pid: me, status: Some(Status::Idle) },
+                LiveSession { id: "me".into(), pid: me, status: None },
+                LiveSession { id: "parked-s".into(), pid: me, status: Some(Status::Idle) },
+                LiveSession { id: "shell-s".into(), pid: me, status: Some(Status::Idle) },
+            ]
+        );
     }
 }

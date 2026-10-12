@@ -21,7 +21,7 @@
 | `roo` | Roo Code | 同 Cline 路径结构，覆盖 `rooveterinaryinc.roo-cline`, `roovscode.roo-cline`, `kilocode.kilo-code` | 同 Cline | 同 Cline | — | — |
 | `kodu` | Kodu | 同 Cline 路径结构，`kodu-ai.kodu` | 同 Cline | 同 Cline | — | — |
 | `gemini` | Gemini CLI | `~/.gemini/tmp/<project>/chats/session-*.jsonl`（旧版 `.json`） | JSONL，消息原地重写 | 无工具调用的回复 | — | — |
-| `antigravity` | Antigravity | `~/.gemini/antigravity{,-cli}/brain/<id>/…/transcript.jsonl` | 步骤 JSONL | 无工具调用的规划步骤 `DONE` | — | `agy --conversation=<id>` |
+| `antigravity` | Antigravity | `~/.gemini/antigravity{,-cli}/brain/<id>/…/transcript.jsonl`，旁路 `annotations/<id>.pbtxt`、`conversations/<id>.db`、`conversation_summaries.db`、`cache/last_conversations.json` | 步骤 JSONL + 旁路元数据（标题、cwd、父会话） | 无工具调用的规划步骤 `DONE` | `ps` + `lsof`（Win: PowerShell） | `agy --conversation=<id>` |
 | `opencode` | OpenCode | `~/.local/share/opencode/opencode.db`（Windows: `%LOCALAPPDATA%\opencode\opencode.db`） | SQLite | 助手消息完成且 `finish != tool-calls` | `ps` + cwd 查询（Win: PowerShell） | `opencode --session <id>` |
 | `kilo` | Kilo Code | `~/.local/share/kilo/kilo.db`（Windows: `%LOCALAPPDATA%\kilo\kilo.db`） | 同 OpenCode | 同 OpenCode | `ps` + cwd 查询（Win: PowerShell） | `kilo --session <id>`（需 cwd） |
 | `zcode` | ZCode | `~/.zcode/cli/db/db.sqlite` | 同 OpenCode | 同 OpenCode | `ps` + cwd 查询（Win: PowerShell） | — |

@@ -54,6 +54,7 @@ pub mod prime;
 #[cfg(feature = "reasonix")]
 pub mod reasonix;
 #[cfg(any(
+    feature = "antigravity",
     feature = "opencode",
     feature = "hermes",
     feature = "minimax",

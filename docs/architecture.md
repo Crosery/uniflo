@@ -155,14 +155,14 @@ agent（Claude Code、Codex…）──stdio JSON-RPC──► uniflo mcp（unif
 叠加规则（`effective()`）：
 
 1. harness 给出明确在线状态（`LiveSession.status`）时以它为准。
-2. 有存活进程（`pid`）时不判超时；进程消失而状态是 `work` → 强制 `idle`，原因 `exited`。
+2. 有存活进程（`pid`）时禁用 90 s `settle`，并将静默超时窗口放宽至 `3 × stale_after`（默认 30 min）；进程消失而状态是 `work` → 强制 `idle`，原因 `exited`。
 3. 无进程、`work` 且静默超过 10 min → `idle`（`stale`）；最后活动是助手文本时窗口缩到 90 s（`settle`，覆盖不写回合结束标记的子代理）。
 
 ## 存活探测
 
 | harness | 来源 |
 |---|---|
-| Claude Code | `~/.claude/sessions/<pid>.json` 注册表，只用来判断 pid 是否存活（其中的 `status` 会过期，不采信） |
+| Claude Code | `~/.claude/sessions/<pid>.json` 注册表：判断 pid 是否存活；当 `status` 为 `idle`/`shell` 或含 `parkedJobId` 时给出明确 `idle` |
 | WorkBuddy / CodeBuddy | `~/.workbuddy/sessions/<pid>.json` / `~/.codebuddy/sessions/<pid>.json`（同一内核） |
 | omp / Pi | `core::procs`：`ps` 取启动时间与参数 + 一次批量 `lsof` 取 cwd 和打开的 `.jsonl`；映射优先级 `--resume` 参数 → 进程持有的会话文件 → 同 cwd 自启动以来写过的最新会话 |
 | 其他 | 无进程映射，靠回合事件 + 超时 |

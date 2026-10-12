@@ -89,10 +89,19 @@ pub struct Windows {
 
 pub fn effective(t: &StatusTracker, live_pid: bool, live_status: Option<Status>, now: i64, w: Windows) -> Effective {
     if let Some(s) = live_status {
-        return Effective { status: s, since: t.since, reason: "live".into() };
+        if s == t.status && !t.reason.is_empty() {
+            return Effective { status: s, since: t.since, reason: t.reason.clone() };
+        }
+        return Effective { status: s, since: t.since.max(t.last), reason: "live".into() };
     }
-    let window = if t.reason == "assistant_message" { w.settle_ms.min(w.stale_ms) } else { w.stale_ms };
-    if t.status == Status::Work && !live_pid && window > 0 && now - t.last > window {
+    let window = if live_pid {
+        w.stale_ms.saturating_mul(3)
+    } else if t.reason == "assistant_message" {
+        w.settle_ms.min(w.stale_ms)
+    } else {
+        w.stale_ms
+    };
+    if t.status == Status::Work && window > 0 && now - t.last > window {
         return Effective { status: Status::Idle, since: t.last + window, reason: "stale".into() };
     }
     Effective { status: t.status, since: t.since, reason: t.reason.clone() }
@@ -148,6 +157,8 @@ mod tests {
         assert_eq!((stale.status, stale.since, stale.reason.as_str()), (Status::Idle, 61_000, "stale"));
         let alive = effective(&t, true, None, 1_000 + 60_001, w);
         assert_eq!(alive.status, Status::Work, "a live process keeps a long tool call working");
+        let abandoned = effective(&t, true, None, 1_000 + 180_001, w);
+        assert_eq!((abandoned.status, abandoned.reason.as_str()), (Status::Idle, "stale"));
         let fresh = effective(&t, false, None, 2_000, w);
         assert_eq!(fresh.status, Status::Work);
         let forced = effective(&t, true, Some(Status::Idle), 2_000, w);
