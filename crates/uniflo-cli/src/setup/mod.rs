@@ -1048,7 +1048,7 @@ fn remove_file_entry(
 /// Run a harness CLI without a terminal, at most a minute. In a sandbox (`UNIFLO_HOME`) it sees
 /// that directory as `HOME` and none of its own config-dir overrides.
 fn run_cli(ctx: &Ctx, argv: &[String]) -> Result<(), String> {
-    let mut cmd = Command::new(&argv[0]);
+    let mut cmd = uniflo_core::util::silent_cmd(&argv[0]);
     cmd.args(&argv[1..]).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     if ctx.env.sandboxed {
         cmd.env("HOME", &ctx.env.home).env_remove("CLAUDE_CONFIG_DIR").env_remove("CODEX_HOME");
@@ -1117,7 +1117,7 @@ fn symlink(target: &Path, link: &Path) -> std::io::Result<()> {
                 link.parent().unwrap_or(Path::new(".")).join(target)
             };
             let abs = uniflo_core::install::canon(&abs);
-            let out = Command::new("cmd").args(["/c", "mklink", "/J"]).arg(link).arg(&abs).output()?;
+            let out = uniflo_core::util::silent_cmd("cmd").args(["/c", "mklink", "/J"]).arg(link).arg(&abs).output()?;
             if out.status.success() { Ok(()) } else { Err(e) }
         }
         other => other,

@@ -95,7 +95,7 @@ pub fn fetch_releases() -> Result<Releases, String> {
     #[cfg(not(windows))]
     let bin = "curl";
     let url = std::env::var("UNIFLO_UPDATE_INDEX_URL").ok().filter(|s| !s.is_empty());
-    let out = std::process::Command::new(bin)
+    let out = crate::util::silent_cmd(bin)
         .args(["-fsS", "--max-time", "15", "--user-agent", &format!("uniflo/{}", current_version())])
         .arg(url.as_deref().unwrap_or(INDEX_URL))
         .stdout(std::process::Stdio::piped())

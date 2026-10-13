@@ -237,7 +237,7 @@ pub fn fetch(url: &str) -> Result<Value, String> {
     let bin = "curl.exe";
     #[cfg(not(windows))]
     let bin = "curl";
-    let out = std::process::Command::new(bin)
+    let out = crate::util::silent_cmd(bin)
         .args([
             "-fsS",
             "--max-time",

@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::process::Command;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -99,14 +100,71 @@ struct RawProcCache {
 static RAW_PROCS: Mutex<Option<RawProcCache>> = Mutex::new(None);
 
 #[cfg(windows)]
+fn has_candidate_processes() -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
+    };
+
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+    if snapshot == INVALID_HANDLE_VALUE {
+        return true;
+    }
+
+    let mut entry = PROCESSENTRY32W {
+        dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+        cntUsage: 0,
+        th32ProcessID: 0,
+        th32DefaultHeapID: 0,
+        th32ModuleID: 0,
+        cntThreads: 0,
+        th32ParentProcessID: 0,
+        pcPriClassBase: 0,
+        dwFlags: 0,
+        szExeFile: [0; 260],
+    };
+
+    let mut found = false;
+    let mut ok = unsafe { Process32FirstW(snapshot, &mut entry) };
+    while ok != 0 {
+        let len = entry.szExeFile.iter().position(|&c| c == 0).unwrap_or(entry.szExeFile.len());
+        let name = String::from_utf16_lossy(&entry.szExeFile[..len]).to_ascii_lowercase();
+        if name.contains("bun")
+            || name.contains("node")
+            || name.contains("omp")
+            || name.contains("agy")
+            || name.contains("antigravity")
+            || name.contains("dsh")
+            || name.contains("opencode")
+            || name.contains("prime")
+            || name.contains("minimax")
+            || name.contains("droid")
+            || name.contains("qwen")
+            || name.contains("pi")
+        {
+            found = true;
+            break;
+        }
+        ok = unsafe { Process32NextW(snapshot, &mut entry) };
+    }
+    unsafe { CloseHandle(snapshot) };
+    found
+}
+
+#[cfg(windows)]
 fn raw_procs() -> Vec<(u32, String)> {
     let mut g = RAW_PROCS.lock().unwrap();
     if let Some(c) = g.as_ref()
-        && c.at.elapsed() < Duration::from_secs(2)
+        && c.at.elapsed() < Duration::from_secs(5)
     {
         return c.procs.clone();
     }
-    let Ok(out) = Command::new("powershell")
+    if !has_candidate_processes() {
+        let empty = Vec::new();
+        *g = Some(RawProcCache { at: Instant::now(), procs: empty.clone() });
+        return empty;
+    }
+    let Ok(out) = crate::util::silent_cmd("powershell")
         .args([
             "-NoProfile",
             "-NonInteractive",

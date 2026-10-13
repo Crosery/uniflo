@@ -10,7 +10,7 @@
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 /// GitHub Releases of the repository; `UNIFLO_RELEASE_BASE_URL` replaces it (tests, mirrors).
 /// Assets live at `<base>/download/v<version>/<file>`, the newest stable at `<base>/latest/download/<file>`.
@@ -170,7 +170,7 @@ pub fn upgrade_binary(exe: &Path, target: &str, version: &str, base: &str) -> Re
     if !new.is_file() {
         bail!("{name} does not contain {}", asset_binary(version, target));
     }
-    let reported = Command::new(&new)
+    let reported = crate::util::silent_cmd(&new)
         .arg("--version")
         .stdin(Stdio::null())
         .stderr(Stdio::null())
@@ -205,7 +205,7 @@ fn fetch(url: &str, dest: &Path) -> Result<()> {
     let bin = "curl.exe";
     #[cfg(not(windows))]
     let bin = "curl";
-    let out = Command::new(bin)
+    let out = crate::util::silent_cmd(bin)
         .args(["-fsSL", "--max-time", "600", "--user-agent", &format!("uniflo/{}", crate::update::current_version())])
         .arg("-o")
         .arg(dest)
@@ -228,7 +228,7 @@ fn unpack(pkg: &Path, into: &Path) -> Result<()> {
         if !cfg!(windows) {
             bail!("zip packages are only unpacked on Windows");
         }
-        let mut c = Command::new("powershell");
+        let mut c = crate::util::silent_cmd("powershell");
         c.args([
             "-NoProfile",
             "-NonInteractive",
@@ -239,7 +239,7 @@ fn unpack(pkg: &Path, into: &Path) -> Result<()> {
         .env("UNIFLO_OUT", into);
         c
     } else {
-        let mut c = Command::new("tar");
+        let mut c = crate::util::silent_cmd("tar");
         c.arg("-xzf").arg(pkg).arg("-C").arg(into);
         c
     };
