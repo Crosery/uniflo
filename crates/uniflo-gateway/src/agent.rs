@@ -95,6 +95,8 @@ fn open(sess: &Session, terminal: Option<&str>, env: &Env) -> (StatusCode, Value
             }),
         );
     }
+    // Windows: Windows Terminal whenever it is installed (the terminal Windows itself opens on
+    // double-click), otherwise PowerShell, which is always there.
     let default_term =
         if env.windows { if (env.installed)(Terminal::Wt) { "wt" } else { "powershell" } } else { "terminal" };
     let Some(t) = Terminal::parse(terminal.unwrap_or(default_term)) else {
@@ -377,6 +379,25 @@ mod tests {
         let calls = calls.into_inner().unwrap();
         assert_eq!(calls[0][0], "powershell");
         assert_eq!(calls[0][1], "-NoExit");
+        // No terminal given: Windows Terminal when it is installed, PowerShell when it is not.
+        // On Windows only `wt` needs probing, so a missing one still leaves PowerShell available.
+        let argv = resume::argv("claude", "s1").unwrap().0;
+        let want_command = resume::powershell_line(&argv, Some(cwd.to_str().unwrap()));
+        let no_wt = |t: Terminal| t != Terminal::Wt;
+        let all = |_t: Terminal| true;
+        for (installed, want) in [(&all as &dyn Fn(Terminal) -> bool, "wt"), (&no_wt, "powershell")] {
+            let env = Env { macos: false, windows: true, installed, launch: &|_: &[String]| Ok(()), tmp: tmp.path() };
+            let (code, body) = open(&s, None, &env);
+            assert_eq!((code, body["terminal"].as_str()), (StatusCode::OK, Some(want)), "{body}");
+            assert_eq!(body["command"].as_str(), Some(want_command.as_str()));
+        }
+        // No terminal installed at all: nothing is launched and the command still comes back.
+        let nothing = |_t: Terminal| false;
+        let env =
+            Env { macos: false, windows: true, installed: &nothing, launch: &|_: &[String]| Ok(()), tmp: tmp.path() };
+        let (code, body) = open(&s, None, &env);
+        assert_eq!(code, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        assert_eq!(body["command"].as_str(), Some(want_command.as_str()));
     }
 
     #[test]

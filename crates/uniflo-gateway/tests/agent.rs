@@ -8,7 +8,7 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use uniflo_adapters::claude::ClaudeFamily;
-use uniflo_core::resume::{sh_quote, terminal_script};
+use uniflo_core::resume::{powershell_line, sh_quote, terminal_script};
 use uniflo_core::{Adapter, Engine, EngineOptions, HarnessInfo, JsonlAdapter};
 use uniflo_gateway::GuardOptions;
 use uniflo_gateway::agent::{Launcher, with_launcher};
@@ -117,6 +117,13 @@ async fn open_terminal_needs_the_write_header_and_launches_through_open_without_
         assert!(!argv.iter().any(|a| a.contains("osascript")), "{argv:?}");
         assert_eq!(std::fs::read_to_string(&argv[3]).unwrap(), terminal_script(&line));
         let _ = std::fs::remove_dir_all(std::path::Path::new(&argv[3]).parent().unwrap());
+    } else if cfg!(target_os = "windows") {
+        // `terminal` is a macOS name: on Windows it is simply not installed and nothing is launched.
+        assert_eq!((st, v["terminal"].as_str()), (422, None), "{v}");
+        assert!(v["reason"].as_str().unwrap().contains("Terminal"), "{v}");
+        let argv = ["claude", "--resume", "s1"].map(str::to_owned);
+        assert_eq!(v["command"].as_str(), Some(powershell_line(&argv, Some(s.cwd.to_str().unwrap())).as_str()));
+        assert!(s.calls.lock().unwrap().is_empty(), "nothing is launched");
     } else {
         assert_eq!(st, 501);
         assert!(v["command"].as_str().unwrap().ends_with("claude --resume s1"));

@@ -155,13 +155,7 @@ pub enum Terminal {
 impl Terminal {
     pub fn parse(s: &str) -> Option<Terminal> {
         match s.to_ascii_lowercase().as_str() {
-            "" | "terminal" | "terminal.app" => {
-                if cfg!(windows) {
-                    Some(Terminal::Wt)
-                } else {
-                    Some(Terminal::Terminal)
-                }
-            }
+            "" | "terminal" | "terminal.app" => Some(Terminal::Terminal),
             "iterm" | "iterm2" => Some(Terminal::Iterm),
             "ghostty" => Some(Terminal::Ghostty),
             "wt" | "windowsterminal" | "windows-terminal" => Some(Terminal::Wt),
@@ -390,6 +384,7 @@ mod tests {
         assert_eq!(ghostty_argv(None, "x")[4], "-e");
         assert_eq!(Terminal::parse("iTerm2"), Some(Terminal::Iterm));
         assert_eq!(Terminal::parse("wt"), Some(Terminal::Wt));
+        assert_eq!(Terminal::parse("Windows-Terminal"), Some(Terminal::Wt));
         assert_eq!(Terminal::parse("powershell"), Some(Terminal::Powershell));
         assert_eq!(Terminal::parse("cmd"), Some(Terminal::Cmd));
         assert_eq!(Terminal::parse("xterm"), None);
