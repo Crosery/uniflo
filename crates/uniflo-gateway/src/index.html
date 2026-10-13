@@ -313,6 +313,9 @@ input[type=checkbox].cb:disabled { opacity: .5; cursor: not-allowed; }
 .sh-meta > span { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
 .sh-meta .mono { font-size: 12px; color: var(--text-2); }
 .sh-meta .key { cursor: copy; border-bottom: 1px dashed var(--border-strong); }
+.sh-meta .resume-cmd { display: inline-flex; align-items: center; gap: 4px; padding: 1px 6px; border-radius: var(--r-sm); background: var(--surface); color: var(--text-2); border: .5px solid var(--border); font-size: 11px; cursor: copy; }
+.sh-meta .resume-cmd:hover { background: var(--surface-hover); color: var(--text); border-color: var(--border-strong); }
+.sh-meta .resume-cmd svg { width: 10px; height: 10px; fill: currentColor; opacity: .7; }
 .sh-usage { display: grid; grid-template-columns: auto minmax(0, 1fr) minmax(180px, 240px); gap: 10px 22px; align-items: center; margin-top: 12px; padding: 10px 12px; border-radius: var(--r-lg); border: .5px solid var(--border); background: var(--surface); }
 .sh-usage:empty { display: none; }
 .us-cost b { display: block; font: 600 var(--fs-lg) var(--font-sans); font-variant-numeric: tabular-nums; letter-spacing: -.01em; }
@@ -1634,6 +1637,7 @@ if (P.has("redact")) document.body.classList.add("redact");
 const narrowLayout = matchMedia("(max-width: 760px)");
 const TZ = Intl.DateTimeFormat().resolvedOptions().timeZone || "";
 const IS_MAC = /mac/i.test(navigator.userAgentData?.platform || navigator.platform || "");
+const IS_WIN = /win/i.test(navigator.userAgentData?.platform || navigator.platform || "") || /windows/i.test(navigator.userAgent);
 
 let API = "";
 let READ_ONLY = false;
@@ -2201,7 +2205,9 @@ function renderHead(s, rebuild = false) {
     ${s.pid ? `<span>进程 <span class="mono">${s.pid}</span></span>` : ""}
     ${s.parent ? `<span>父会话 <span class="mono">${esc(short(s.parent))}</span></span>` : ""}
     <span>${esc(s.status_reason || "")} · ${age(s.status_since)} 前</span>
-    <span class="mono key" data-copy-text="${esc(s.key)}" title="点击复制">${esc(short(s.key))}</span>`;
+    <span class="mono key" data-copy-text="${esc(s.key)}" title="点击复制">${esc(short(s.key))}</span>
+    <span id="sh-resume-chip" class="mono resume-cmd" title="点击复制恢复命令" data-act="copy-resume-quick" hidden>${icon("play")}<code></code></span>`;
+  loadHeadResume(s.key);
   renderUsageStrip(s.usage);
   if (T?.steps && s.usage && s.usage.steps !== T.steps.totals?.steps) {
     clearTimeout(T.stepsTimer);
@@ -2275,6 +2281,37 @@ function openMenu(btn, html) {
   m.querySelector("button:not(:disabled)")?.focus();
 }
 const resumeCache = new Map();
+
+async function loadHeadResume(key) {
+  let info = resumeCache.get(key);
+  if (!info) {
+    try {
+      info = await getJson(`/v1/sessions/${encodeURIComponent(key)}/resume`);
+      resumeCache.set(key, info);
+    } catch { return; }
+  }
+  if (selected !== key) return;
+  const chip = $("#sh-resume-chip");
+  if (!chip) return;
+  const cmd = (IS_WIN ? (info.command_powershell || info.command) : info.command) || "";
+  if (!cmd) { chip.hidden = true; return; }
+  const shortCmd = cmd.length > 38 ? cmd.slice(0, 36) + "…" : cmd;
+  chip.querySelector("code").textContent = shortCmd;
+  chip.title = `点击复制恢复命令：\n${cmd}`;
+  chip.hidden = false;
+}
+
+async function copyResumeText(text, label = "已复制恢复命令") {
+  closeMenu();
+  if (!text) return;
+  try {
+    await navigator.clipboard.writeText(text);
+    toast(label);
+  } catch {
+    toast("无法写入剪贴板，请手动复制：" + text, true);
+  }
+}
+
 async function openResume(btn) {
   if (menuFor === btn) return closeMenu();
   const key = selected;
@@ -2283,19 +2320,60 @@ async function openResume(btn) {
     try { info = await getJson(`/v1/sessions/${encodeURIComponent(key)}/resume`); resumeCache.set(key, info); }
     catch (e) { toast("无法获取恢复命令：" + e.message, true); return; }
   }
-  const terms = [["terminal", "Terminal"], ["iterm", "iTerm2"], ["ghostty", "Ghostty"]];
-  openMenu(btn, `${info.supported ? `<div class="cmd" title="${esc(info.command)}">${esc(info.command)}</div>` : `<p>${esc(info.reason || "这个 harness 不支持恢复")}</p>`}
-    <button role="menuitem" data-act="copy-resume" ${info.supported ? "" : "disabled"}>${icon("copy")}复制恢复命令</button>
-    ${IS_MAC && !READ_ONLY && info.supported ? `<div class="sep"></div>${terms.map(([t, n]) => `<button role="menuitem" data-act="open-term" data-term="${t}">${icon("term")}在 ${n} 中打开</button>`).join("")}` : ""}
-    ${!IS_MAC ? "<p>其他平台请复制命令，在终端里运行。</p>" : READ_ONLY ? "<p>只读模式下不能直接打开终端。</p>" : ""}`);
+  const cmdPs = info.command_powershell || "";
+  const cmdSh = info.command || "";
+  const primaryCmd = (IS_WIN ? (cmdPs || cmdSh) : (cmdSh || cmdPs)) || "";
+  const macTerms = [["terminal", "Terminal"], ["iterm", "iTerm2"], ["ghostty", "Ghostty"]];
+  const winTerms = [["wt", "Windows Terminal"], ["powershell", "PowerShell"], ["cmd", "命令提示符 (CMD)"]];
+
+  let body = "";
+  if (primaryCmd) {
+    body += `<div class="cmd" title="${esc(primaryCmd)}">${esc(primaryCmd)}</div>`;
+    if (info.reason) {
+      body += `<p style="margin:2px 8px 6px;color:var(--warn);font-size:11px">${esc(info.reason)}</p>`;
+    }
+    if (IS_WIN && cmdPs && cmdSh && cmdPs !== cmdSh) {
+      body += `<button role="menuitem" data-act="copy-resume-ps">${icon("copy")}复制 PowerShell 命令</button>`;
+      body += `<button role="menuitem" data-act="copy-resume-sh">${icon("copy")}复制 CMD / Bash 命令</button>`;
+    } else {
+      body += `<button role="menuitem" data-act="copy-resume">${icon("copy")}复制恢复命令</button>`;
+    }
+    if (!READ_ONLY) {
+      if (IS_MAC) {
+        body += `<div class="sep"></div>${macTerms.map(([t, n]) => `<button role="menuitem" data-act="open-term" data-term="${t}">${icon("term")}在 ${n} 中打开</button>`).join("")}`;
+      } else if (IS_WIN) {
+        body += `<div class="sep"></div>${winTerms.map(([t, n]) => `<button role="menuitem" data-act="open-term" data-term="${t}">${icon("term")}在 ${n} 中打开</button>`).join("")}`;
+      }
+    }
+  } else {
+    body += `<p style="margin:8px 10px">${esc(info.reason || "这个 harness 不支持恢复")}</p>`;
+    body += `<button role="menuitem" disabled>${icon("copy")}复制恢复命令</button>`;
+  }
+
+  if (!IS_MAC && !IS_WIN && primaryCmd) {
+    body += `<p style="margin:4px 10px">其他平台请复制命令在终端里运行。</p>`;
+  } else if (READ_ONLY && primaryCmd) {
+    body += `<p style="margin:4px 10px">只读模式下不能直接打开终端。</p>`;
+  }
+  openMenu(btn, body);
 }
+
 async function copyResume() {
   const info = resumeCache.get(selected);
-  closeMenu();
-  if (!info?.command) return;
-  try { await navigator.clipboard.writeText(info.command); toast("已复制恢复命令"); }
-  catch { toast("无法写入剪贴板，请手动复制：" + info.command, true); }
+  const text = (IS_WIN ? (info?.command_powershell || info?.command) : info?.command) || "";
+  copyResumeText(text);
 }
+
+async function copyResumePs() {
+  const info = resumeCache.get(selected);
+  copyResumeText(info?.command_powershell || info?.command || "", "已复制 PowerShell 恢复命令");
+}
+
+async function copyResumeSh() {
+  const info = resumeCache.get(selected);
+  copyResumeText(info?.command || "", "已复制 CMD / Bash 恢复命令");
+}
+
 async function openTerminal(term) {
   const key = selected;
   closeMenu();
@@ -2303,7 +2381,8 @@ async function openTerminal(term) {
     const r = await write("POST", `/v1/sessions/${encodeURIComponent(key)}/open-terminal`, undefined, { terminal: term });
     toast(`已在 ${r.terminal || term} 中打开`);
   } catch (e) {
-    const command = e.body?.command || resumeCache.get(key)?.command;
+    const info = resumeCache.get(key);
+    const command = e.body?.command || (IS_WIN ? (info?.command_powershell || info?.command) : info?.command);
     if (command) toastRecover(`打开终端失败：${e.body?.reason || e.message}`, command);
     else toast("打开终端失败：" + e.message, true);
   }
@@ -3544,8 +3623,18 @@ document.addEventListener("click", (e) => {
     return;
   }
   if (t.closest("#resume-btn")) return openResume(t.closest("#resume-btn"));
+  if (t.closest('[data-act="copy-resume-quick"]')) {
+    const info = resumeCache.get(selected);
+    const text = (IS_WIN ? (info?.command_powershell || info?.command) : info?.command) || "";
+    return copyResumeText(text);
+  }
   const act = t.closest("#menu [data-act]");
-  if (act) return act.dataset.act === "copy-resume" ? copyResume() : openTerminal(act.dataset.term);
+  if (act) {
+    if (act.dataset.act === "copy-resume") return copyResume();
+    if (act.dataset.act === "copy-resume-ps") return copyResumePs();
+    if (act.dataset.act === "copy-resume-sh") return copyResumeSh();
+    if (act.dataset.act === "open-term") return openTerminal(act.dataset.term);
+  }
   if (t.closest("#clean-btn")) return cleanupSession(selected);
   // usage
   const rg = t.closest("#u-range [data-range]");

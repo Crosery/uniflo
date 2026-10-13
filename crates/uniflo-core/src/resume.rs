@@ -25,6 +25,11 @@ const RECIPES: &[(&str, &str, &str, bool, bool, bool)] = &[
     ("devin", "devin", "--resume", false, true, true),
     ("hermes", "hermes", "--resume", false, false, true),
     ("antigravity", "agy", "--conversation", true, false, true),
+    ("workbuddy", "workbuddy", "--resume", false, true, true),
+    ("qwen", "qwen", "--resume", false, true, false),
+    ("minimax", "minimax", "--resume", false, true, true),
+    ("prime", "prime", "--resume", false, false, true),
+    ("factory", "droid", "--resume", false, true, true),
 ];
 
 pub const INVALID_ID: &str = "会话 id 不合法";
@@ -78,17 +83,18 @@ pub fn resume(s: &Session) -> ResumeInfo {
         return info;
     }
     let Some((argv, needs_cwd)) = argv(&s.harness, &s.id) else { return info };
-    let cwd = match (needs_cwd, s.cwd.as_deref()) {
-        (true, None | Some("")) => {
-            info.reason = Some(format!("{} 需要在会话的工作目录中恢复，但该会话没有记录 cwd", s.harness));
-            return info;
-        }
-        (true, Some(c)) => Some(c),
-        (false, _) => None,
+    let (cwd, missing_cwd) = match (needs_cwd, s.cwd.as_deref()) {
+        (true, None | Some("")) => (None, true),
+        (true, Some(c)) => (Some(c), false),
+        (false, _) => (None, false),
     };
     info.command = Some(shell_line(&argv, cwd));
     info.command_powershell = Some(powershell_line(&argv, cwd));
     info.argv = argv;
+    if missing_cwd {
+        info.reason = Some(format!("{} 需要在会话的工作目录中恢复，但该会话没有记录 cwd", s.harness));
+        return info;
+    }
     info.supported = true;
     info
 }
@@ -135,20 +141,32 @@ pub fn ps_quote(s: &str) -> String {
     out
 }
 
-/// macOS terminal applications `POST /v1/sessions/{key}/open-terminal` can drive.
+/// Terminal applications `POST /v1/sessions/{key}/open-terminal` can drive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Terminal {
     Terminal,
     Iterm,
     Ghostty,
+    Wt,
+    Powershell,
+    Cmd,
 }
 
 impl Terminal {
     pub fn parse(s: &str) -> Option<Terminal> {
         match s.to_ascii_lowercase().as_str() {
-            "" | "terminal" | "terminal.app" => Some(Terminal::Terminal),
+            "" | "terminal" | "terminal.app" => {
+                if cfg!(windows) {
+                    Some(Terminal::Wt)
+                } else {
+                    Some(Terminal::Terminal)
+                }
+            }
             "iterm" | "iterm2" => Some(Terminal::Iterm),
             "ghostty" => Some(Terminal::Ghostty),
+            "wt" | "windowsterminal" | "windows-terminal" => Some(Terminal::Wt),
+            "powershell" | "pwsh" => Some(Terminal::Powershell),
+            "cmd" | "command" => Some(Terminal::Cmd),
             _ => None,
         }
     }
@@ -158,6 +176,9 @@ impl Terminal {
             Terminal::Terminal => "terminal",
             Terminal::Iterm => "iterm",
             Terminal::Ghostty => "ghostty",
+            Terminal::Wt => "wt",
+            Terminal::Powershell => "powershell",
+            Terminal::Cmd => "cmd",
         }
     }
 
@@ -167,6 +188,7 @@ impl Terminal {
             Terminal::Terminal => &["Utilities/Terminal.app", "Terminal.app"],
             Terminal::Iterm => &["iTerm.app"],
             Terminal::Ghostty => &["Ghostty.app"],
+            _ => &[],
         }
     }
 }
@@ -186,7 +208,7 @@ pub fn terminal_argv(t: Terminal, script: &str) -> Option<Vec<String>> {
     let app = match t {
         Terminal::Terminal => "Terminal",
         Terminal::Iterm => "iTerm",
-        Terminal::Ghostty => return None,
+        _ => return None,
     };
     Some(["open", "-a", app, script].map(str::to_owned).to_vec())
 }
@@ -201,6 +223,37 @@ pub fn ghostty_argv(cwd: Option<&str>, line: &str) -> Vec<String> {
     argv.extend(["-e", "/bin/sh", "-c"].map(str::to_owned));
     argv.push(format!("{line}\nexec \"${{SHELL:-/bin/zsh}}\" -l"));
     argv
+}
+
+/// Builds argv for Windows terminals.
+pub fn windows_terminal_argv(t: Terminal, cwd: Option<&str>, cmd: &str) -> Vec<String> {
+    match t {
+        Terminal::Wt => {
+            let mut argv = vec!["wt".to_owned()];
+            if let Some(c) = cwd {
+                argv.push("-d".to_owned());
+                argv.push(c.to_owned());
+            }
+            argv.push("powershell".to_owned());
+            argv.push("-NoExit".to_owned());
+            argv.push("-Command".to_owned());
+            argv.push(cmd.to_owned());
+            argv
+        }
+        Terminal::Powershell => {
+            let full_cmd = if let Some(c) = cwd {
+                format!("Set-Location -LiteralPath {} -ErrorAction Stop; {cmd}", ps_quote(c))
+            } else {
+                cmd.to_owned()
+            };
+            vec!["powershell".to_owned(), "-NoExit".to_owned(), "-Command".to_owned(), full_cmd]
+        }
+        Terminal::Cmd => {
+            let full_cmd = if let Some(c) = cwd { format!("cd /d {} && {cmd}", sh_quote(c)) } else { cmd.to_owned() };
+            vec!["cmd".to_owned(), "/k".to_owned(), full_cmd]
+        }
+        _ => Vec::new(),
+    }
 }
 
 #[cfg(test)]
@@ -248,6 +301,11 @@ mod tests {
             ("devin", &["devin", "--resume", "s1"], true),
             ("hermes", &["hermes", "--resume", "s1"], false),
             ("antigravity", &["agy", "--conversation=s1"], false),
+            ("workbuddy", &["workbuddy", "--resume", "s1"], true),
+            ("qwen", &["qwen", "--resume", "s1"], true),
+            ("minimax", &["minimax", "--resume", "s1"], true),
+            ("prime", &["prime", "--resume", "s1"], false),
+            ("factory", &["droid", "--resume", "s1"], true),
         ];
         assert_eq!(supported_harnesses().count(), want.len());
         for (h, argv_want, cwd) in want {
@@ -260,7 +318,7 @@ mod tests {
             assert!(r.supported, "{h}: {r:?}");
             assert_eq!(r.argv, a);
         }
-        for h in ["dsh", "gemini", "workbuddy", "minimax", "factory", "cline", "craft", "openclaw", "kiro"] {
+        for h in ["dsh", "gemini", "cline", "craft", "openclaw", "kiro", "roo", "kodu"] {
             let r = resume(&session(h, "s1", Some("/w")));
             assert!(!r.supported && r.argv.is_empty() && r.command.is_none(), "{h}");
             assert!(r.reason.unwrap().starts_with(h));
@@ -331,6 +389,24 @@ mod tests {
         assert_eq!(g[8], format!("{line}\nexec \"${{SHELL:-/bin/zsh}}\" -l"));
         assert_eq!(ghostty_argv(None, "x")[4], "-e");
         assert_eq!(Terminal::parse("iTerm2"), Some(Terminal::Iterm));
+        assert_eq!(Terminal::parse("wt"), Some(Terminal::Wt));
+        assert_eq!(Terminal::parse("powershell"), Some(Terminal::Powershell));
+        assert_eq!(Terminal::parse("cmd"), Some(Terminal::Cmd));
         assert_eq!(Terminal::parse("xterm"), None);
+
+        let wt = windows_terminal_argv(Terminal::Wt, Some("C:\\proj"), "claude --resume s1");
+        assert_eq!(wt, vec!["wt", "-d", "C:\\proj", "powershell", "-NoExit", "-Command", "claude --resume s1"]);
+        let pwsh = windows_terminal_argv(Terminal::Powershell, Some("C:\\proj"), "claude --resume s1");
+        assert_eq!(
+            pwsh,
+            vec![
+                "powershell",
+                "-NoExit",
+                "-Command",
+                "Set-Location -LiteralPath 'C:\\proj' -ErrorAction Stop; claude --resume s1"
+            ]
+        );
+        let cmd = windows_terminal_argv(Terminal::Cmd, Some("C:\\proj"), "claude --resume s1");
+        assert_eq!(cmd, vec!["cmd", "/k", "cd /d 'C:\\proj' && claude --resume s1"]);
     }
 }

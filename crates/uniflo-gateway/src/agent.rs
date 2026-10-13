@@ -49,7 +49,13 @@ pub(crate) async fn open_terminal(
     let launch = launcher.map_or_else(system_launcher, |Extension(l)| l);
     let res = tokio::task::spawn_blocking(move || {
         let tmp = std::env::temp_dir();
-        let env = Env { macos: cfg!(target_os = "macos"), installed: &installed, launch: &*launch, tmp: &tmp };
+        let env = Env {
+            macos: cfg!(target_os = "macos"),
+            windows: cfg!(target_os = "windows"),
+            installed: &installed,
+            launch: &*launch,
+            tmp: &tmp,
+        };
         open(&sess, p.terminal.as_deref(), &env)
     })
     .await;
@@ -62,6 +68,7 @@ pub(crate) async fn open_terminal(
 /// What `open-terminal` needs from the machine, injectable so tests never open a window.
 struct Env<'a> {
     macos: bool,
+    windows: bool,
     installed: &'a dyn Fn(Terminal) -> bool,
     launch: &'a dyn Fn(&[String]) -> std::io::Result<()>,
     /// Where the private directory holding the `.command` script is created.
@@ -70,27 +77,31 @@ struct Env<'a> {
 
 /// Open a new terminal window that changes into the session's cwd (when it still exists) and runs
 /// its resume command. Terminal and iTerm get a self-deleting `.command` script through `open -a`;
-/// Ghostty gets the command as argv. No Apple events, so a launchd daemon needs no Automation
-/// permission.
+/// Ghostty gets the command as argv. On Windows, wt.exe / powershell.exe / cmd.exe are spawned directly.
 fn open(sess: &Session, terminal: Option<&str>, env: &Env) -> (StatusCode, Value) {
     let info = resume::resume(sess);
     if !info.supported {
         let reason = info.reason.clone().unwrap_or_default();
         return (StatusCode::UNPROCESSABLE_ENTITY, json!({ "error": reason, "resume": info }));
     }
-    if !env.macos {
+    if !env.macos && !env.windows {
         return (
             StatusCode::NOT_IMPLEMENTED,
             json!({
-                "error": "opening a terminal is only implemented on macOS; run `command` in a terminal yourself",
+                "error": "opening a terminal is only implemented on macOS and Windows; run `command` in a terminal yourself",
                 "command": info.command,
                 "command_powershell": info.command_powershell,
                 "cwd": info.cwd,
             }),
         );
     }
-    let Some(t) = Terminal::parse(terminal.unwrap_or("")) else {
-        return (StatusCode::BAD_REQUEST, json!({ "error": "terminal must be terminal, iterm or ghostty" }));
+    let default_term =
+        if env.windows { if (env.installed)(Terminal::Wt) { "wt" } else { "powershell" } } else { "terminal" };
+    let Some(t) = Terminal::parse(terminal.unwrap_or(default_term)) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            json!({ "error": "terminal must be terminal, iterm, ghostty, wt, powershell or cmd" }),
+        );
     };
     let cwd = info.cwd.as_deref().filter(|c| std::path::Path::new(c).is_dir());
     let needs_cwd = resume::argv(&sess.harness, &sess.id).is_some_and(|(_, c)| c);
@@ -98,7 +109,11 @@ fn open(sess: &Session, terminal: Option<&str>, env: &Env) -> (StatusCode, Value
         let msg = format!("the session's working directory no longer exists: {}", info.cwd.as_deref().unwrap_or(""));
         return (StatusCode::UNPROCESSABLE_ENTITY, json!({ "error": msg, "command": info.command }));
     }
-    let line = resume::shell_line(&info.argv, cwd);
+    let line = if env.windows {
+        info.command_powershell.as_deref().or(info.command.as_deref()).unwrap_or("")
+    } else {
+        &resume::shell_line(&info.argv, cwd)
+    };
     let fail = |msg: String| {
         (StatusCode::INTERNAL_SERVER_ERROR, json!({ "error": msg, "reason": msg, "command": line, "cwd": cwd }))
     };
@@ -106,12 +121,16 @@ fn open(sess: &Session, terminal: Option<&str>, env: &Env) -> (StatusCode, Value
         let msg = format!("没有安装 {}，请复制恢复命令到终端里运行", terminal_name(t));
         return (StatusCode::UNPROCESSABLE_ENTITY, json!({ "error": msg, "reason": msg, "command": line }));
     }
-    let (argv, script_dir) = match t {
-        Terminal::Ghostty => (resume::ghostty_argv(cwd, &line), None),
-        _ => match write_script(env.tmp, &resume::terminal_script(&line)) {
-            Ok((dir, path)) => (resume::terminal_argv(t, &path.to_string_lossy()).unwrap_or_default(), Some(dir)),
-            Err(e) => return fail(format!("无法写入临时启动脚本：{e}；请复制恢复命令到终端里运行")),
-        },
+    let (argv, script_dir) = if env.windows {
+        (resume::windows_terminal_argv(t, cwd, line), None)
+    } else {
+        match t {
+            Terminal::Ghostty => (resume::ghostty_argv(cwd, line), None),
+            _ => match write_script(env.tmp, &resume::terminal_script(line)) {
+                Ok((dir, path)) => (resume::terminal_argv(t, &path.to_string_lossy()).unwrap_or_default(), Some(dir)),
+                Err(e) => return fail(format!("无法写入临时启动脚本：{e}；请复制恢复命令到终端里运行")),
+            },
+        }
     };
     match (env.launch)(&argv) {
         Ok(()) => (StatusCode::OK, json!({ "opened": true, "terminal": t.as_str(), "command": line, "cwd": cwd })),
@@ -129,6 +148,9 @@ fn terminal_name(t: Terminal) -> &'static str {
         Terminal::Terminal => "Terminal",
         Terminal::Iterm => "iTerm2",
         Terminal::Ghostty => "Ghostty",
+        Terminal::Wt => "Windows Terminal",
+        Terminal::Powershell => "PowerShell",
+        Terminal::Cmd => "命令提示符 (CMD)",
     }
 }
 
@@ -174,26 +196,53 @@ fn private_dir(root: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
 
 fn system_launcher() -> Launcher {
     Arc::new(|argv: &[String]| {
-        let out = std::process::Command::new(&argv[0])
-            .args(&argv[1..])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::piped())
-            .output()?;
-        if out.status.success() {
+        #[cfg(windows)]
+        {
+            let mut cmd = std::process::Command::new(&argv[0]);
+            cmd.args(&argv[1..]);
+            cmd.spawn()?;
             Ok(())
-        } else {
-            Err(std::io::Error::other(String::from_utf8_lossy(&out.stderr).trim().to_owned()))
+        }
+        #[cfg(not(windows))]
+        {
+            let out = std::process::Command::new(&argv[0])
+                .args(&argv[1..])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::piped())
+                .output()?;
+            if out.status.success() {
+                Ok(())
+            } else {
+                Err(std::io::Error::other(String::from_utf8_lossy(&out.stderr).trim().to_owned()))
+            }
         }
     })
 }
 
-/// Terminal.app always exists; others are looked up in `/Applications` and `~/Applications`.
+/// Terminal detection per platform.
 fn installed(t: Terminal) -> bool {
-    t == Terminal::Terminal
-        || t.bundles().iter().any(|b| {
-            std::path::Path::new("/Applications").join(b).exists() || home().join("Applications").join(b).exists()
-        })
+    #[cfg(target_os = "windows")]
+    {
+        match t {
+            Terminal::Powershell | Terminal::Cmd => true,
+            Terminal::Wt => {
+                let in_path = std::env::var_os("PATH")
+                    .is_some_and(|paths| std::env::split_paths(&paths).any(|p| p.join("wt.exe").is_file()));
+                let in_app_data = std::env::var_os("LOCALAPPDATA")
+                    .is_some_and(|d| std::path::Path::new(&d).join("Microsoft\\WindowsApps\\wt.exe").is_file());
+                in_path || in_app_data
+            }
+            _ => false,
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        t == Terminal::Terminal
+            || t.bundles().iter().any(|b| {
+                std::path::Path::new("/Applications").join(b).exists() || home().join("Applications").join(b).exists()
+            })
+    }
 }
 
 #[derive(Deserialize)]
@@ -303,8 +352,31 @@ mod tests {
             outcome.lock().unwrap().take().unwrap_or(Ok(()))
         };
         let installed = |t: Terminal| t != Terminal::Iterm || iterm;
-        let (code, body) = open(sess, terminal, &Env { macos, installed: &installed, launch: &launch, tmp });
+        let (code, body) =
+            open(sess, terminal, &Env { macos, windows: false, installed: &installed, launch: &launch, tmp });
         (code, body, calls.into_inner().unwrap())
+    }
+
+    #[test]
+    fn launches_windows_terminals() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().join("proj");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let s = session("claude", "s1", cwd.to_str().unwrap());
+        let calls = Mutex::new(Vec::new());
+        let launch = |argv: &[String]| {
+            calls.lock().unwrap().push(argv.to_vec());
+            Ok(())
+        };
+        let installed = |_t: Terminal| true;
+        let tmp = tempfile::tempdir().unwrap();
+        let env = Env { macos: false, windows: true, installed: &installed, launch: &launch, tmp: tmp.path() };
+        let (code, body) = open(&s, Some("powershell"), &env);
+        assert_eq!(code, StatusCode::OK, "{body}");
+        assert_eq!(body["terminal"], "powershell");
+        let calls = calls.into_inner().unwrap();
+        assert_eq!(calls[0][0], "powershell");
+        assert_eq!(calls[0][1], "-NoExit");
     }
 
     #[test]
@@ -380,7 +452,7 @@ mod tests {
         assert_eq!(body["command"], "cd '/w d' && claude --resume s1");
         assert!(body["command_powershell"].as_str().unwrap().starts_with("Set-Location"));
         assert!(calls.is_empty());
-        let (code, body, calls) = run(&session("dsh", "s1", "/w"), None, true, true);
+        let (code, body, calls) = run(&session("cline", "s1", "/w"), None, true, true);
         assert_eq!((code, calls.len()), (StatusCode::UNPROCESSABLE_ENTITY, 0));
         assert_eq!(body["resume"]["supported"], false);
     }
