@@ -91,100 +91,43 @@ pub fn list(keep: fn(&str) -> bool, files: Option<fn(&Path) -> bool>) -> Vec<Pro
 }
 
 #[cfg(windows)]
-struct RawProcCache {
-    at: Instant,
-    procs: Vec<(u32, String)>,
-}
-
-#[cfg(windows)]
-static RAW_PROCS: Mutex<Option<RawProcCache>> = Mutex::new(None);
-
-#[cfg(windows)]
-fn has_candidate_processes() -> bool {
+fn raw_procs() -> Vec<(u32, String)> {
     use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
     };
 
-    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
-    if snapshot == INVALID_HANDLE_VALUE {
-        return true;
-    }
-
-    let mut entry = PROCESSENTRY32W {
-        dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
-        cntUsage: 0,
-        th32ProcessID: 0,
-        th32DefaultHeapID: 0,
-        th32ModuleID: 0,
-        cntThreads: 0,
-        th32ParentProcessID: 0,
-        pcPriClassBase: 0,
-        dwFlags: 0,
-        szExeFile: [0; 260],
-    };
-
-    let mut found = false;
-    let mut ok = unsafe { Process32FirstW(snapshot, &mut entry) };
-    while ok != 0 {
-        let len = entry.szExeFile.iter().position(|&c| c == 0).unwrap_or(entry.szExeFile.len());
-        let name = String::from_utf16_lossy(&entry.szExeFile[..len]).to_ascii_lowercase();
-        if name.contains("bun")
-            || name.contains("node")
-            || name.contains("omp")
-            || name.contains("agy")
-            || name.contains("antigravity")
-            || name.contains("dsh")
-            || name.contains("opencode")
-            || name.contains("prime")
-            || name.contains("minimax")
-            || name.contains("droid")
-            || name.contains("qwen")
-            || name.contains("pi")
-        {
-            found = true;
-            break;
+    let mut procs = Vec::new();
+    unsafe {
+        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snapshot == INVALID_HANDLE_VALUE {
+            return procs;
         }
-        ok = unsafe { Process32NextW(snapshot, &mut entry) };
-    }
-    unsafe { CloseHandle(snapshot) };
-    found
-}
+        let mut entry = PROCESSENTRY32W {
+            dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+            cntUsage: 0,
+            th32ProcessID: 0,
+            th32DefaultHeapID: 0,
+            th32ModuleID: 0,
+            cntThreads: 0,
+            th32ParentProcessID: 0,
+            pcPriClassBase: 0,
+            dwFlags: 0,
+            szExeFile: [0; 260],
+        };
 
-#[cfg(windows)]
-fn raw_procs() -> Vec<(u32, String)> {
-    let mut g = RAW_PROCS.lock().unwrap();
-    if let Some(c) = g.as_ref()
-        && c.at.elapsed() < Duration::from_secs(5)
-    {
-        return c.procs.clone();
+        if Process32FirstW(snapshot, &mut entry) != 0 {
+            loop {
+                let len = entry.szExeFile.iter().position(|&c| c == 0).unwrap_or(entry.szExeFile.len());
+                let exe = String::from_utf16_lossy(&entry.szExeFile[..len]);
+                procs.push((entry.th32ProcessID, exe));
+                if Process32NextW(snapshot, &mut entry) == 0 {
+                    break;
+                }
+            }
+        }
+        CloseHandle(snapshot);
     }
-    if !has_candidate_processes() {
-        let empty = Vec::new();
-        *g = Some(RawProcCache { at: Instant::now(), procs: empty.clone() });
-        return empty;
-    }
-    let Ok(out) = crate::util::silent_cmd("powershell")
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            "Get-CimInstance Win32_Process | ForEach-Object { \"$($_.ProcessId) $($_.CommandLine)\" }",
-        ])
-        .output()
-    else {
-        return Vec::new();
-    };
-    let procs: Vec<(u32, String)> = String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .filter_map(|l| {
-            let l = l.trim();
-            let (pid_str, args) = l.split_once(' ')?;
-            let pid: u32 = pid_str.parse().ok()?;
-            Some((pid, args.to_owned()))
-        })
-        .collect();
-    *g = Some(RawProcCache { at: Instant::now(), procs: procs.clone() });
     procs
 }
 
