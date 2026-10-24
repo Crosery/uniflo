@@ -208,7 +208,7 @@ fn list_newest_first(old: &Connection) -> Result<Vec<(OldSess, i64)>> {
         };
         out.push((s, upd));
     }
-    out.sort_by(|a, b| b.1.cmp(&a.1));
+    out.sort_by_key(|a| std::cmp::Reverse(a.1));
     Ok(out)
 }
 

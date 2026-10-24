@@ -400,7 +400,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(n as i64, stats.blocks);
+        assert_eq!(n, stats.blocks);
         let (drows, dtokens) = delete_blocks(&c, 1).unwrap();
         assert_eq!(drows, 40);
         assert!(dtokens > 0);

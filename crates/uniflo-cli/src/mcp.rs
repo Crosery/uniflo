@@ -1052,7 +1052,7 @@ fn step_summary(steps: &[Value]) -> String {
         }
     }
     if !models.is_empty() {
-        models.sort_by(|a, b| b.1.cmp(&a.1));
+        models.sort_by_key(|a| std::cmp::Reverse(a.1));
         let list: Vec<String> = models.iter().map(|(m, k, c)| format!("{m} {k} steps {}", usd(&json!(c)))).collect();
         let _ = write!(text, "\nmodels: {}", list.join(", "));
     }
