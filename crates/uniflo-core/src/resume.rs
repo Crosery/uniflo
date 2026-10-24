@@ -116,6 +116,17 @@ pub fn powershell_line(argv: &[String], cwd: Option<&str>) -> String {
     }
 }
 
+/// argv as a cmd.exe line: words with spaces or cmd metacharacters go in double quotes (Windows
+/// paths and valid session ids never contain `"`).
+pub fn cmd_line(argv: &[String]) -> String {
+    argv.iter().map(|a| cmd_quote(a)).collect::<Vec<_>>().join(" ")
+}
+
+fn cmd_quote(s: &str) -> String {
+    let safe = |c: char| c.is_ascii_alphanumeric() || "_./\\:@+,=-".contains(c);
+    if !s.is_empty() && s.chars().all(safe) { s.to_owned() } else { format!("\"{s}\"") }
+}
+
 /// One POSIX shell word: bare when only safe characters, else single-quoted (`'` → `'"'"'`).
 /// A leading `=` is quoted too (zsh expands `=cmd`).
 pub fn sh_quote(s: &str) -> String {
@@ -243,7 +254,7 @@ pub fn windows_terminal_argv(t: Terminal, cwd: Option<&str>, cmd: &str) -> Vec<S
             vec!["powershell".to_owned(), "-NoExit".to_owned(), "-Command".to_owned(), full_cmd]
         }
         Terminal::Cmd => {
-            let full_cmd = if let Some(c) = cwd { format!("cd /d {} && {cmd}", sh_quote(c)) } else { cmd.to_owned() };
+            let full_cmd = if let Some(c) = cwd { format!("cd /d {} && {cmd}", cmd_quote(c)) } else { cmd.to_owned() };
             vec!["cmd".to_owned(), "/k".to_owned(), full_cmd]
         }
         _ => Vec::new(),
@@ -402,6 +413,9 @@ mod tests {
             ]
         );
         let cmd = windows_terminal_argv(Terminal::Cmd, Some("C:\\proj"), "claude --resume s1");
-        assert_eq!(cmd, vec!["cmd", "/k", "cd /d 'C:\\proj' && claude --resume s1"]);
+        assert_eq!(cmd, vec!["cmd", "/k", "cd /d C:\\proj && claude --resume s1"]);
+        let line = cmd_line(&["codex".into(), "resume".into(), "s1".into()]);
+        let cmd = windows_terminal_argv(Terminal::Cmd, Some("C:\\my proj (2)"), &line);
+        assert_eq!(cmd[2], "cd /d \"C:\\my proj (2)\" && codex resume s1");
     }
 }

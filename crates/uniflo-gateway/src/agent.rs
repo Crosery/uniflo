@@ -111,10 +111,10 @@ fn open(sess: &Session, terminal: Option<&str>, env: &Env) -> (StatusCode, Value
         let msg = format!("the session's working directory no longer exists: {}", info.cwd.as_deref().unwrap_or(""));
         return (StatusCode::UNPROCESSABLE_ENTITY, json!({ "error": msg, "command": info.command }));
     }
-    let line = if env.windows {
-        info.command_powershell.as_deref().or(info.command.as_deref()).unwrap_or("")
-    } else {
-        &resume::shell_line(&info.argv, cwd)
+    let line = match (env.windows, t) {
+        (true, Terminal::Cmd) => &resume::cmd_line(&info.argv),
+        (true, _) => info.command_powershell.as_deref().or(info.command.as_deref()).unwrap_or(""),
+        _ => &resume::shell_line(&info.argv, cwd),
     };
     let fail = |msg: String| {
         (StatusCode::INTERNAL_SERVER_ERROR, json!({ "error": msg, "reason": msg, "command": line, "cwd": cwd }))
@@ -196,13 +196,24 @@ fn private_dir(root: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
     Err(last.unwrap_or_else(|| std::io::Error::other("无法创建临时目录")))
 }
 
+#[cfg(windows)]
+fn windows_command(argv: &[String]) -> std::process::Command {
+    use std::os::windows::process::CommandExt;
+    let mut cmd = std::process::Command::new(&argv[0]);
+    // cmd.exe reads its command line itself and does not undo the quoting `args` adds.
+    if argv[0] == "cmd" {
+        argv[1..].iter().for_each(|a| _ = cmd.raw_arg(a));
+    } else {
+        cmd.args(&argv[1..]);
+    }
+    cmd
+}
+
 fn system_launcher() -> Launcher {
     Arc::new(|argv: &[String]| {
         #[cfg(windows)]
         {
-            let mut cmd = std::process::Command::new(&argv[0]);
-            cmd.args(&argv[1..]);
-            cmd.spawn()?;
+            windows_command(argv).spawn()?;
             Ok(())
         }
         #[cfg(not(windows))]
@@ -359,6 +370,19 @@ mod tests {
         (code, body, calls.into_inner().unwrap())
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn cmd_runs_the_line_as_written() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("my proj (2)");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut argv = resume::windows_terminal_argv(Terminal::Cmd, dir.to_str(), "cd");
+        argv[1] = "/c".into();
+        let out = windows_command(&argv).output().unwrap();
+        assert!(out.status.success(), "{argv:?}");
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), dir.to_str().unwrap());
+    }
+
     #[test]
     fn launches_windows_terminals() {
         let dir = tempfile::tempdir().unwrap();
@@ -379,6 +403,18 @@ mod tests {
         let calls = calls.into_inner().unwrap();
         assert_eq!(calls[0][0], "powershell");
         assert_eq!(calls[0][1], "-NoExit");
+        // cmd gets a cmd.exe line, not the PowerShell one.
+        let launched = Mutex::new(Vec::new());
+        let launch = |argv: &[String]| {
+            launched.lock().unwrap().push(argv.to_vec());
+            Ok(())
+        };
+        let env = Env { macos: false, windows: true, installed: &installed, launch: &launch, tmp: tmp.path() };
+        let (code, body) = open(&s, Some("cmd"), &env);
+        assert_eq!((code, body["command"].as_str()), (StatusCode::OK, Some("claude --resume s1")), "{body}");
+        let argv = launched.into_inner().unwrap().remove(0);
+        assert_eq!(argv[..2], ["cmd", "/k"]);
+        assert!(argv[2].starts_with("cd /d ") && argv[2].ends_with(" && claude --resume s1"), "{argv:?}");
         // No terminal given: Windows Terminal when it is installed, PowerShell when it is not.
         // On Windows only `wt` needs probing, so a missing one still leaves PowerShell available.
         let argv = resume::argv("claude", "s1").unwrap().0;
