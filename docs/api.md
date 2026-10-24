@@ -40,7 +40,7 @@
 | `group_by` | `harness`（默认）、`model`、`project`、`cwd`、`dir`、`day`、`hour`、`weekday`、`session`、`weekday_hour` |
 | `q` | 会话搜索语法过滤（`docs/search.md`），如 `h:claude in:~/work since:7d`；其中的 `since:` / `before:` 作用于**事件时间**，`in:~/…` 展开家目录 |
 | `since` / `until` | 事件时间窗口 `[since, until)`：`30m`、`2h`、`7d`、`1w`（相对现在）、`YYYY-MM-DD`（`tz` 时区的零点）或 epoch 毫秒；与 `q` 里的窗口取交集；默认全部历史 |
-| `tz` | `day` / `hour` / `weekday` / `weekday_hour` 分桶与日期参数的时区：`local`（默认）、`UTC`、`+08:00`、IANA 名（`Asia/Shanghai`，读系统 zoneinfo） |
+| `tz` | `day` / `hour` / `weekday` / `weekday_hour` 分桶与日期参数的时区：`local`（默认）、`UTC`、`+08:00`、IANA 名（`Asia/Shanghai`，读系统 zoneinfo；没有 zoneinfo 的平台如 Windows 按 `local` 计算，响应的 `tz` 为 `local`） |
 | `under` | 只统计 cwd 在该目录及其下的会话；`group_by=dir` 时返回它的直接子目录（`.` 行是目录本身） |
 | `depth` | `group_by=dir` 的下钻层数，默认 1；不给 `under` 时从所有 cwd 的公共根算起 |
 | `limit` | 只保留前 N 行，其余折叠成 `key="(other)"` 一行，合计仍等于 `totals` |

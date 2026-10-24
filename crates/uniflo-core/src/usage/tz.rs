@@ -25,6 +25,10 @@ pub struct Civil {
 
 impl Tz {
     pub fn parse(s: &str) -> Result<Tz, String> {
+        Tz::parse_in(s, &["/usr/share/zoneinfo", "/usr/lib/zoneinfo", "/usr/share/lib/zoneinfo"])
+    }
+
+    fn parse_in(s: &str, zoneinfo: &[&str]) -> Result<Tz, String> {
         let s = s.trim();
         if s.is_empty() || s.eq_ignore_ascii_case("local") {
             return Ok(Tz::Local);
@@ -39,12 +43,18 @@ impl Tz {
         {
             return Err(format!("unknown time zone {s:?}"));
         }
-        for dir in ["/usr/share/zoneinfo", "/usr/lib/zoneinfo", "/usr/share/lib/zoneinfo"] {
+        for dir in zoneinfo {
             if let Ok(bytes) = std::fs::read(std::path::Path::new(dir).join(s)) {
                 return Zone::parse(&bytes)
                     .map(|z| Tz::Zone(s.to_owned(), Arc::new(z)))
                     .ok_or_else(|| format!("bad zoneinfo for {s}"));
             }
+        }
+        // Windows has no zoneinfo database. The gateway serves this machine, so an IANA name almost
+        // always comes from a browser here and names the local zone; count in local time, and
+        // `name()` reports `local` so the substitution stays visible.
+        if !zoneinfo.iter().any(|d| std::path::Path::new(d).is_dir()) {
+            return Ok(Tz::Local);
         }
         Err(format!("unknown time zone {s:?} (use local, UTC, ±HH:MM or an IANA name)"))
     }
@@ -277,7 +287,6 @@ mod tests {
         assert_eq!(Tz::parse("utc").unwrap().name(), "UTC");
         assert_eq!(Tz::parse("+8").unwrap().name(), "+08:00");
         assert!(Tz::parse("../etc/passwd").is_err());
-        assert!(Tz::parse("Nowhere/Atlantis").is_err());
     }
 
     #[test]
@@ -300,6 +309,16 @@ mod tests {
         let syd = Rule::parse("AEST-10AEDT,M10.1.0,M4.1.0/3").unwrap();
         assert_eq!(syd.offset_at(1_768_478_400), 11 * 3600, "southern summer");
         assert_eq!(syd.offset_at(1_782_907_200), 10 * 3600);
+    }
+
+    #[test]
+    fn iana_name_without_zoneinfo_counts_local() {
+        let none = ["/nonexistent-uniflo-zoneinfo"];
+        assert!(matches!(Tz::parse_in("Asia/Shanghai", &none), Ok(Tz::Local)));
+        assert!(Tz::parse_in("../etc/passwd", &none).is_err());
+        let empty = std::env::temp_dir();
+        let empty = [empty.to_str().unwrap()];
+        assert!(Tz::parse_in("Nowhere/Uniflo_Test", &empty).is_err());
     }
 
     #[test]
