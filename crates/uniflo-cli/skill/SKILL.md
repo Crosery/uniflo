@@ -10,7 +10,7 @@ schema. Query it with the `uniflo` CLI (add `--json` for machine-readable output
 API at `http://127.0.0.1:7311` (`UNIFLO_URL` overrides; send `Authorization: Bearer $UNIFLO_TOKEN`
 when a token is configured). Everything here is read-only.
 
-If the `uniflo_*` MCP tools are available, prefer them: they return the same JSON as REST.
+If the `uniflo_*` MCP tools are available, prefer them: they answer in compact text (a legend line names the `|` columns, `@ <dir>` lines give the cwd of the rows below, `↳` rows are subagents; counts past 10k keep 3 significant digits), and `structured: true` adds the same JSON as REST.
 
 ## Session keys
 
@@ -21,9 +21,9 @@ prefix. In URLs, percent-encode the key (`claude%3A4f1c`). A reference to one ev
 ## Find sessions
 
 ```sh
-uniflo ls 's:work' --json                      # working now
-uniflo ls 'h:codex in:myrepo since:2d' --json  # harness, cwd substring, recency
-uniflo ls "'deploy script" -n 10 --json        # fuzzy title / first prompt / cwd
+uniflo ls 's:work'                             # working now
+uniflo ls 'h:codex in:myrepo since:2d'         # harness, cwd substring, recency
+uniflo ls "'deploy script" -n 10 --json        # --json only when you parse fields
 curl -s "$UNIFLO_URL/v1/sessions?limit=20&q=$(printf %s 'h:claude since:1d' | jq -sRr @uri)"
 ```
 
@@ -46,7 +46,7 @@ Events are `user_message`, `assistant_message`, `reasoning`, `tool_call`, `tool_
 ## Full-text search
 
 ```sh
-uniflo grep 缓存击穿 --filter 'h:claude since:7d' --json
+uniflo grep 缓存击穿 --filter 'h:claude since:7d'
 uniflo grep '"exact phrase" -excluded' --json
 curl -sG "$UNIFLO_URL/v1/search" --data-urlencode 'q=parse_rel' --data-urlencode 'filter=in:uniflo'
 ```
@@ -56,8 +56,8 @@ Hits are grouped by session; open one with `events?around=<hit.event>`.
 ## Usage and cost
 
 ```sh
-uniflo usage --by model --since 7d --json     # also harness, project, cwd, dir, day, hour, weekday, session
-uniflo usage <key> --json                     # every step of one session
+uniflo usage --by model --since 7d           # also harness, project, cwd, dir, day, hour, weekday, session
+uniflo usage <key> --json                    # every step of one session
 curl -s "$UNIFLO_URL/v1/usage?group_by=project&since=30d"
 ```
 
@@ -78,3 +78,17 @@ curl -s "$UNIFLO_URL/v1/memory/file?path=<listed path>"
 
 CLI commands index in-process (slower, one-shot); `uniflo context` prints nothing. Start it
 with `uniflo daemon`.
+
+## Save tokens
+
+The MCP tools' text already carries what you need to act on (session keys, `#event` ids,
+titles, harness, cwd, cost); reach for more only when it is missing:
+
+- "what happened in this directory recently" → `uniflo_context`, not a broad `uniflo_sessions`
+  scan.
+- Searching → keep `limit` small and add `context: 1` to read the hit's neighbours in the same
+  call, or just note the `#event` id and open it later with `uniflo_session` (`key`, `around`).
+- Pass `structured: true` only when you need exact numbers or timestamps to compute with; the
+  default text already has every key, `#event` id, status, cost and token count (rounded).
+- Without MCP, read the CLI's plain output: it carries the same keys and ids at a third to a
+  sixth of the `--json` size. Add `--json` when a script parses the result.

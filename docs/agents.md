@@ -4,21 +4,21 @@
 
 状态：`current` · 更新：2026-10-10
 
-同一能力有三个入口：REST（`docs/api.md`）、CLI `--json`、MCP `structuredContent`。MCP 工具内部就是对网关 REST 路由的 `GET`，所以三者的数值与 id 一致（`crates/uniflo-cli/tests/agent.rs` 的 `mcp_cli_and_rest_agree` 逐项比对）。浮点也逐位一致：`serde_json` 开启了 `float_roundtrip`，响应解析后再输出不会改动最后一位。唯一会随时间变的是全文检索的 `score`：它带最近活动加权，隔一段时间再查会略有变化，比对时去掉它。
+同一能力有三个入口：REST（`docs/api.md`）、CLI `--json`、MCP `structuredContent`（工具参数传 `structured: true` 才带）。MCP 工具内部就是对网关 REST 路由的 `GET`，所以三者的数值与 id 一致（`crates/uniflo-cli/tests/agent.rs` 的 `mcp_cli_and_rest_agree` 逐项比对）。浮点也逐位一致：`serde_json` 开启了 `float_roundtrip`，响应解析后再输出不会改动最后一位。唯一会随时间变的是全文检索的 `score`：它带最近活动加权，隔一段时间再查会略有变化，比对时去掉它。
 
 ## MCP 服务器 `uniflo mcp`
 
 - **协议**：stdio，每行一条 JSON-RPC 2.0 消息，也接受批量数组。支持 `initialize`、`ping`、`tools/list`、`tools/call`，通知（`notifications/initialized` 等）不回复。协议版本按 `2025-11-25`、`2025-06-18`、`2025-03-26`、`2024-11-05` 协商，客户端给的不在列表里时回最新的。只声明 `tools` 能力。协议层手写在 `crates/uniflo-cli/src/mcp.rs`，没有引入 `rmcp`。
 - **stdout 只有协议消息**：诊断写 stderr；服务器从不提问，也不触发 `uniflo setup` 的首次询问。
 - **数据来源**：先连 `UNIFLO_URL`（默认 `http://127.0.0.1:7311`，带 `UNIFLO_TOKEN`）。连不上时在进程内建一次索引，用网关自己的路由回答（`uniflo_gateway::agent::get_in_process`，与守护进程同一段代码）；用量账本、全文索引在第一次需要时才建（全文索引最多等 20 s，未建完时结果带 `indexing: true`）。此时第一个结果的文本以"守护进程未运行，结果来自一次性索引"开头。`--local` 直接走进程内索引。
-- **错误**：JSON 无效 `-32700`；不是请求对象 `-32600`；未知方法 `-32601`；未知工具、`arguments` 不是对象、参数类型不对（如 `limit: "many"`、`limit: 2.5`、布尔参数给字符串）、缺必填参数 `-32602`。数值越界不报错，夹到边界。会话不存在、守护进程返回错误时是正常结果，`isError: true`，`structuredContent` 为 `{error}`。
-- **结果**：每个工具返回 `content`（一段文本摘要）和 `structuredContent`，工具都标注 `readOnlyHint: true`。`structuredContent` 必须是对象，所以 REST 返回数组的工具包一层。
+- **错误**：JSON 无效 `-32700`；不是请求对象 `-32600`；未知方法 `-32601`；未知工具、`arguments` 不是对象、参数类型不对（如 `limit: "many"`、`limit: 2.5`、布尔参数给字符串）、缺必填参数 `-32602`。数值越界不报错，夹到边界。会话不存在、守护进程返回错误时是正常结果，`isError: true`，`structuredContent`（开启时）为 `{error}`。
+- **结果**：每个工具返回 `content`（紧凑文本，见下）和 `isError`，都标注 `readOnlyHint: true`。每个工具的 `inputSchema` 都多一个可选布尔 `structured`（默认 `false`）：为 `true` 时结果再带上 `structuredContent`（REST 原始 JSON，数组包一层对象，数值精确）；默认省略它以省 token。
 
-| 工具 | 输入 | `structuredContent` | 对应 REST |
+| 工具 | 输入 | `structuredContent`（`structured: true` 时） | 对应 REST |
 |---|---|---|---|
 | `uniflo_sessions` | `q`（会话搜索语法）、`limit` 1–100，默认 20 | `{sessions: Session[]}` | `/v1/sessions?q=&limit=` |
-| `uniflo_session` | `key`（必填，也接受 `uniflo://session/<key>#<event-id>`，以及唯一的 key / id 前缀）、`before`、`limit` 1–200 默认 60、`max_text` 默认 4000、`include_tools`、`include_reasoning`（默认都不含）、`around` | `{session, events, next_before, omitted: {tool_events, reasoning}, around?}` | `/v1/sessions/{key}` + `/v1/sessions/{key}/events` |
-| `uniflo_search` | `q`（必填）、`filter`、`limit` 1–30 默认 10 | `SearchResponse` | `/v1/search` |
+| `uniflo_session` | `key`（必填，也接受 `uniflo://session/<key>#<event-id>`，以及唯一的 key / id 前缀）、`before`、`limit` 1–200 默认 60、`max_text`（默认 4000，`around` 设了而没传 `max_text` 时默认改为 600）、`include_tools`、`include_reasoning`（默认都不含）、`around`（事件 id，可带前导 `#`） | `{session, events, next_before, omitted: {tool_events, reasoning}, around?}` | `/v1/sessions/{key}` + `/v1/sessions/{key}/events` |
+| `uniflo_search` | `q`（必填）、`filter`、`limit` 1–30 默认 10、`offset` 默认 0（翻页）、`context` 0–3 默认 0（内联邻近事件） | `SearchResponse` | `/v1/search` |
 | `uniflo_usage` | `group_by`、`q`、`since`、`until`、`under`、`depth` 1–32、`limit` 1–1000 | `UsageReport` | `/v1/usage` |
 | `uniflo_session_usage` | `key` | `SessionUsageDetail` | `/v1/sessions/{key}/usage` |
 | `uniflo_models` | — | `{models: ModelUsage[]}` | `/v1/models` |
@@ -28,7 +28,53 @@
 | `uniflo_status` | — | `{health, harnesses}` | `/v1/health` + `/v1/harnesses` |
 
 - `uniflo_session` 的 `events` 是 REST 那一页去掉工具与思考事件后的结果，`omitted` 给出去掉的条数；翻更早一页传 `before=next_before`。
-- `uniflo_search` 的文本摘要里每条命中带一个 `uniflo://session/<key>#<event-id>` 引用，原样传给 `uniflo_session` 即打开命中处的上下文。
+- 文本格式（`content`）：只留能直接行动的信息，重复的部分只写一次。服务器 `instructions` 里有同样的约定说明。
+  - 列表是表格：第一行是图例，列出 `|` 分隔的列名，例如 `key|title|model|status|updated|cost|steps`。之后每行一个条目，单元格里的 `|` 和换行替换成空格。
+  - `@ <dir>` 行给出下面各行的 cwd，cwd 变化时才再打印一次。父会话也在列表里时，子代理以 `↳` 行挂在父会话下面；cwd 与父会话不同时，行尾再加 `@ <dir>`。父会话不在列表里时，状态列写 `sub of <key>`。
+  - 数值格式：
+    - 计数在 10k 以下照原样输出，以上保留 3 位有效数字（`12.3k`、`1.23M`、`36.2G`）。
+    - 金额 ≥ $1 保留两位小数，更小的金额保留两位有效数字。
+    - 时间：时长写成相对时间（`3m`、`2d`），日期写成 `MM-DD HH:MM`，不是今年时带年份。
+    - `-` 表示未知或未定价。
+    - 精确值传 `structured: true` 取。
+  - 从不输出图标、得分、`seq` 这类对 agent 没用的字段。`Session.source` 只在 `uniflo_session` 的头部出现（`~` 缩短）。
+- 各工具的文本：
+  - `uniflo_sessions`：上面的表格。工作中的会话，状态列带持续时长、原因和上下文占用（`work 3m tool_call ctx 169k/1M 16%`）；已归档的标 `archived`。条数等于 `limit` 时有一行提示可能还有更多；没有结果时提示放宽条件。
+  - `uniflo_session`：
+    - 头部三到四行：
+      - 第一行 key 和标题。
+      - 第二行模型、状态与起始时间和原因、父会话、cwd、开始与更新时间、pid、source。
+      - `usage:` 一行（费用、步数、各项 token、上下文占用、未定价步数）。
+      - 有标题时再给 `first prompt:`。
+    - 之后每个事件一行 `[时间 类型 …] 正文`，日期只在变化时打印。用户与助手消息带 `#<event id>`，可传给 `around`。工具调用和结果带 `@<call_id 末 4 位>` 用来配对，失败的结果标 `error`，harness 注入的用户消息标 `(injected)`。被 `max_text` 截断的事件标 `#id cut`，末尾一行说明用 `around=<id> max_text=0` 取全文。
+    - 回合结束只在原因像中断、出错或超长时出现。
+    - 末尾是 `hidden:`（隐藏的工具或思考事件条数，以及打开它们的参数）和翻页用的 `older events: before=<n>`。
+  - `uniflo_search`：
+    - 第一行是匹配的会话数和图例。短词子串扫描时总数是下限，写成 `23+`，并注明按时间倒序、不排序；扫描到时间预算、索引仍在构建（带进度）、零结果时各有一句说明。
+    - 会话行 `- <key>|<标题>|<更新时间>`，cwd 用 `@` 行分组。命中挂在下面：`  #<event> [<kind> <多久前>] <snippet>`。匹配的会话数超过本页时有 `more: offset=<n>` 页脚。
+    - `context` 为 1–3 时，对前 3 个会话的最佳命中，把前后各 `context` 个邻近事件缩进内联在那条命中下面（复用 `/v1/sessions/{key}/events?around=&max_text=400`），一次调用就能“找到并读到”。
+  - `uniflo_usage`：
+    - 头部写分组维度、时间窗口、`under`、时区；价格过期时注明上次获取时间。
+    - 之后是图例 `label|cost|sessions|prompts|steps|in|out|cache_r|cache_w|reasoning|unpriced`，每组一行，最后一行 `total|…`。`label` 与机器键不同时写成 `label (key)`。
+    - 用量索引未建完时附进度。
+  - `uniflo_session_usage`：
+    - 总计一行。
+    - 用到的模型及各自步数与费用。
+    - 峰值上下文，以及所在回合和事件。
+    - 最贵的 3 步（`#event`、回合、模型、费用、token）。
+    - 计价来源不只一种时给出分布。
+    - 最后是回合表 `turn|started|cost|prompts|steps|in|out|cache_r|cache_w|reasoning|unpriced`，只列最近 50 个回合，更早的给出条数。
+  - `uniflo_models`：
+    - 图例 `model|sessions|steps|cost|unpriced|USD per 1M in/out/cache_r/cache_w|ctx|out`。
+    - 模型名后跟 `→ <目录 id>`（与原名不同时）、`(<provider>)`；不是精确匹配时注明 `approx` / `none`。
+    - 价格只给当前一段，分档写成 `>272k 20/75/2/25`；有更早的价格段时注明段数。
+  - `uniflo_status`：
+    - 版本、schema、运行时长、会话数；只读模式和有新版本时各有一句注明。
+    - 有会话的 harness，每个一行，带读取根目录。
+    - 没有会话的 harness 合成一行 `no sessions: …`。
+  - `uniflo_resume`：给出本机 shell 的命令（Windows 上给 `command_powershell`）。
+  - `uniflo_memory`：列表每行带大小与更新时间。
+  - 会话 key 前缀有歧义时，错误里列出最多 5 个候选 key。
 
 ## Skill
 
@@ -148,6 +194,7 @@ Pi、Grok 没有可用的 MCP 客户端，只装 Skill（选了 MCP 也会装）
 
 - macOS：`terminal=terminal`（默认）、`iterm`、`ghostty` 选终端；在新窗口切到 cwd 并执行恢复命令，返回 `{opened, terminal, command, cwd}`。Terminal、iTerm 把一个自删除的 `.command` 脚本交给 `open -a`：脚本写在随机命名的私有临时目录（目录与文件权限 0700），内容是 `cd <cwd> && <恢复命令>`（均经 POSIX 转义）后接一个交互 shell，运行时先删除自身与目录；Ghostty 用 `open -na Ghostty --args --working-directory=<cwd> -e /bin/sh -c <命令>`，命令是单个 argv 元素（Ghostty 首次执行外部命令会弹出自带的确认框）。全程不使用 AppleScript / Apple events，**不需要「自动化」权限**，所以 launchd 下的守护进程也能开窗。iTerm、Ghostty 只在 `/Applications` 或 `~/Applications` 里找得到时可用。
 - 不支持恢复 422（附 `resume`）；终端名无效 400；需要 cwd 而目录不存在、或所选终端没装 422；启动失败（`open` 非零退出、临时脚本写不了）500，返回人话 `reason`（同 `error`）并附可复制的 `command`。
+- Windows：`terminal=wt`、`powershell`、`cmd`，默认装了 Windows Terminal 用 `wt`，否则 `powershell`。直接启动 `wt -d <cwd> powershell -NoExit -Command <命令>`、`powershell -NoExit -Command <命令>`（命令取 `command_powershell`）或 `cmd /k cd /d <cwd> && <argv>`（含空格或 cmd 元字符的词加双引号，命令行原样交给 cmd.exe）；`wt` 在 PATH 或 `%LOCALAPPDATA%\Microsoft\WindowsApps` 里找得到才可用。状态码同 macOS。
 - 其他平台 501，附 `command`、`command_powershell`、`cwd`，由调用方自己在终端里执行。
 
 ## 记忆与指令文件

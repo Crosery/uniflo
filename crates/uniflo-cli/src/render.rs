@@ -66,7 +66,7 @@ pub fn session_tsv(s: &Session) -> String {
     )
 }
 
-fn short_path(p: &str) -> String {
+pub(crate) fn short_path(p: &str) -> String {
     match uniflo_core::util::home().to_str() {
         Some(h) if p.starts_with(h) => format!("~{}", &p[h.len()..]),
         _ => p.to_owned(),

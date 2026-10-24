@@ -307,6 +307,13 @@ impl Mcp {
         r["result"].clone()
     }
 
+    /// Like `call`, with `structured: true` merged into `args` so `structuredContent` comes back
+    /// (off by default to save tokens; most assertions in this file inspect it).
+    fn call_structured(&mut self, name: &str, mut args: Value) -> Value {
+        args.as_object_mut().expect("tool arguments must be an object").insert("structured".into(), json!(true));
+        self.call(name, args)
+    }
+
     fn handshake(&mut self) -> Value {
         let r = self.request(
             "initialize",
@@ -370,9 +377,11 @@ fn mcp_cli_and_rest_agree() {
     m.send_raw("{\"jsonrpc\":\"2.0\",\"id\":99,");
     assert_eq!(m.recv()["error"]["code"], -32700);
 
-    // sessions: limit 1000 is clamped to 100, same list as REST.
+    // sessions: limit 1000 is clamped to 100, same list as REST. `structured` defaults to false.
     let r = m.call("uniflo_sessions", json!({"limit": 1000}));
     assert_eq!(r["isError"], false);
+    assert!(r.get("structuredContent").is_none(), "structured defaults to false: {r}");
+    let r = m.call_structured("uniflo_sessions", json!({"limit": 1000}));
     let rest = d.get("/v1/sessions?limit=100&q=").1;
     assert_eq!(r["structuredContent"]["sessions"], rest);
     assert_eq!(rest.as_array().unwrap().len(), 9);
@@ -381,28 +390,30 @@ fn mcp_cli_and_rest_agree() {
     let c1 = rest.as_array().unwrap().iter().find(|s| s["key"] == "claude:c1").unwrap();
     assert!(c1["usage"]["cost_usd"].as_f64().unwrap() > 0.0);
 
-    // search: limit 1000 → 30.
-    let r = m.call("uniflo_search", json!({"q": "缓存击穿", "limit": 1000}));
+    // search: limit 1000 → 30; hits reference the event id, not a repeated uniflo:// URL.
+    let r = m.call_structured("uniflo_search", json!({"q": "缓存击穿", "limit": 1000}));
     let rest = d.get(&format!("/v1/search?q={}&limit=30", enc("缓存击穿"))).1;
     assert_eq!(unscored(r["structuredContent"].clone()), unscored(rest.clone()));
     let mut hit = ids(&rest, "results", "session");
     hit.sort();
     assert_eq!(hit, ["claude:c1", "claude:c5"]);
-    assert!(r["content"][0]["text"].as_str().unwrap().contains("uniflo://session/claude:c1#"));
+    let text = r["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("\n- claude:c1|") && text.contains("\n  #u1 [user_message "), "{text}");
+    assert!(!text.contains("uniflo://session"), "{text}");
     let cli = h.json(&["--url", &d.url, "grep", "缓存击穿", "-n", "30", "--json"]);
     assert_eq!(unscored(cli), unscored(rest));
 
     // usage, per-session usage.
-    let r = m.call("uniflo_usage", json!({"group_by": "model"}));
+    let r = m.call_structured("uniflo_usage", json!({"group_by": "model"}));
     let rest = d.get("/v1/usage?group_by=model").1;
     assert_eq!(r["structuredContent"], rest);
     assert_eq!(h.json(&["--url", &d.url, "usage", "--by", "model", "--json"]), rest);
     assert_eq!(rest["totals"]["steps"], 3);
-    let r = m.call("uniflo_session_usage", json!({"key": "claude:c1"}));
+    let r = m.call_structured("uniflo_session_usage", json!({"key": "claude:c1"}));
     assert_eq!(r["structuredContent"], d.get("/v1/sessions/claude%3Ac1/usage").1);
 
     // One session: events and ids as REST, tools and reasoning only when asked for.
-    let r = m.call(
+    let r = m.call_structured(
         "uniflo_session",
         json!({"key": "claude:c1", "include_tools": true, "include_reasoning": true, "limit": 1000}),
     );
@@ -411,7 +422,7 @@ fn mcp_cli_and_rest_agree() {
     assert_eq!(r["structuredContent"]["session"], d.get("/v1/sessions/claude%3Ac1").1);
     let kinds: Vec<&str> = rest["events"].as_array().unwrap().iter().map(|e| e["kind"].as_str().unwrap()).collect();
     assert!(kinds.contains(&"tool_call") && kinds.contains(&"reasoning"), "{kinds:?}");
-    let r = m.call("uniflo_session", json!({"key": "uniflo://session/claude:c1#u1"}));
+    let r = m.call_structured("uniflo_session", json!({"key": "uniflo://session/claude:c1#u1"}));
     let lean = &r["structuredContent"];
     assert_eq!(lean["around"], "u1");
     assert!(
@@ -432,13 +443,174 @@ fn mcp_cli_and_rest_agree() {
     ] {
         assert_eq!(m.call(tool, args)["isError"], true, "{tool}");
     }
-    let r = m.call("uniflo_resume", json!({"key": "claude:c4"}));
+    let r = m.call_structured("uniflo_resume", json!({"key": "claude:c4"}));
     assert_eq!(r["structuredContent"], d.get("/v1/sessions/claude%3Ac4/resume").1);
-    let r = m.call("uniflo_models", json!({}));
+    let r = m.call_structured("uniflo_models", json!({}));
     assert_eq!(r["structuredContent"]["models"], d.get("/v1/models").1);
-    let r = m.call("uniflo_status", json!({}));
+    let r = m.call_structured("uniflo_status", json!({}));
     assert_eq!(r["structuredContent"]["harnesses"], d.get("/v1/harnesses").1);
     assert_eq!(r["structuredContent"]["health"]["sessions"], 9);
+}
+
+/// Scenario: `structured` 默认关闭，只有显式传 true 才带 structuredContent.
+#[test]
+fn structured_flag_defaults_to_off() {
+    let _lock = lock();
+    let h = home();
+    let mut m = h.mcp(&closed_url());
+    m.handshake();
+    let r = m.call("uniflo_status", json!({}));
+    assert!(r.get("structuredContent").is_none(), "{r}");
+    assert!(r["content"][0]["text"].as_str().unwrap().contains("sessions"), "{r}");
+    let r = m.call_structured("uniflo_status", json!({}));
+    assert!(r["structuredContent"]["health"].is_object(), "{r}");
+}
+
+/// Scenario: `uniflo_sessions` 默认文本的每条会话行足够紧凑（token 预算）.
+#[test]
+fn uniflo_sessions_default_text_is_compact() {
+    let _lock = lock();
+    let h = home();
+    let mut m = h.mcp(&closed_url());
+    m.handshake();
+    let r = m.call("uniflo_sessions", json!({"limit": 100}));
+    assert!(r.get("structuredContent").is_none(), "{r}");
+    let text = r["content"][0]["text"].as_str().unwrap();
+    let lines: Vec<&str> = text.lines().filter(|l| l.starts_with("- ")).collect();
+    assert!(lines.len() >= 6, "{text}");
+    for l in &lines {
+        assert!(l.len() <= 240, "{} bytes over budget: {l}", l.len());
+    }
+}
+
+/// Scenario: `uniflo_search` 的 offset 翻页到互不重叠的会话并带 more: footer；context 把邻近事件内联到命中下.
+#[test]
+fn search_paging_and_context() {
+    let _lock = lock();
+    let h = home();
+    let d = h.daemon();
+    let mut m = h.mcp(&d.url);
+    m.handshake();
+
+    // offset=0: first page, one disjoint session, a footer because one more matches.
+    let r = m.call("uniflo_search", json!({"q": "缓存击穿", "limit": 1}));
+    let page0 = r["content"][0]["text"].as_str().unwrap().to_owned();
+    assert!(page0.contains("claude:c1") && !page0.contains("claude:c5"), "{page0}");
+    assert!(page0.contains("more: offset=1"), "{page0}");
+    assert!(!page0.contains("uniflo://session"), "hits reference an event id, not a repeated URL: {page0}");
+
+    // offset=1: the other session, no more pages left.
+    let r = m.call("uniflo_search", json!({"q": "缓存击穿", "limit": 1, "offset": 1}));
+    let page1 = r["content"][0]["text"].as_str().unwrap();
+    assert!(page1.contains("claude:c5") && !page1.contains("claude:c1"), "{page1}");
+    assert!(!page1.contains("more:"), "last page has no footer: {page1}");
+
+    // context: 1 inlines +/-1 neighbour events under the first hit of each of the first sessions.
+    let r = m.call("uniflo_search", json!({"q": "缓存击穿", "context": 1}));
+    let text = r["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("\n    ["), "indented context lines: {text}");
+    assert!(text.contains("Cargo.toml"), "neighbour tool_result inlined: {text}");
+    assert!(text.contains("assistant #m2-l#0] 缓存击穿已修复"), "neighbour assistant text inlined: {text}");
+
+    // context: 0 (default) does not fetch neighbours.
+    let r = m.call("uniflo_search", json!({"q": "缓存击穿"}));
+    let text = r["content"][0]["text"].as_str().unwrap();
+    assert!(!text.contains("\n    ["), "context defaults to 0: {text}");
+}
+
+/// Scenario: `around` 不显式传 max_text 时裁到 600 字节；显式传参覆盖这个默认值.
+#[test]
+fn session_around_defaults_max_text_to_600() {
+    let _lock = lock();
+    let h = Home { dir: tempfile::tempdir().unwrap() };
+    let t = now_ms();
+    let long = "缓存击穿排查记录".repeat(200);
+    assert!(long.len() > 4000, "fixture must be long enough to tell 600 / 4000 / unlimited apart");
+    h.write(
+        ".claude/projects/-p/c1.jsonl",
+        user("u1", t, "/repo", "short question") + &assistant("m1", t + 1, json!([{"type":"text","text": long}]), 10),
+    );
+    let mut m = h.mcp(&closed_url());
+    m.handshake();
+    let event = |r: &Value| -> Value {
+        r["structuredContent"]["events"].as_array().unwrap().iter().find(|e| e["id"] == "m1-l#0").unwrap().clone()
+    };
+
+    // No max_text: around defaults to 600, not the usual 4000.
+    let r = m.call_structured("uniflo_session", json!({"key": "claude:c1", "around": "m1-l#0"}));
+    let e = event(&r);
+    assert_eq!(e["truncated"], true, "{e}");
+    assert!(e["text"].as_str().unwrap().len() <= 600, "{e}");
+    let text = r["content"][0]["text"].as_str().unwrap();
+    assert!(
+        text.contains("assistant #m1-l#0 cut]") && text.contains("max_text=0"),
+        "cut events say how to get the rest: {text}"
+    );
+
+    // Explicit max_text overrides the around-specific default.
+    let r = m.call_structured("uniflo_session", json!({"key": "claude:c1", "around": "m1-l#0", "max_text": 4800}));
+    let e = event(&r);
+    assert_ne!(e["truncated"], json!(true), "`truncated` is omitted (defaults to false) when not cut: {e}");
+    assert_eq!(e["text"].as_str().unwrap().len(), 4800);
+}
+
+/// Scenario: 默认文本是紧凑表格但不丢有用字段：图例、cwd 分组、子代理嵌套、消息 #id、用量列、价格、短词扫描与零结果提示.
+#[test]
+fn compact_text_keeps_useful_fields() {
+    let _lock = lock();
+    let h = Home { dir: tempfile::tempdir().unwrap() };
+    let t = now_ms() - 60_000;
+    h.write(
+        ".claude/projects/-p/root1.jsonl",
+        user("u1", t, "/repo", "修复缓存击穿") + &assistant("m1", t + 1, json!([{"type":"text","text":"ok"}]), 1200),
+    );
+    h.write(".claude/projects/-p/root1/subagents/agent-s1.jsonl", user("s1", t + 2, "/repo", "子任务"));
+    h.write(".claude/projects/-p/agent-s1/subagents/agent-s2.jsonl", user("s2", t + 4, "/repo", "孙任务"));
+    h.write(".claude/projects/-q/other.jsonl", user("o1", t + 3, "/elsewhere", "another"));
+    let mut m = h.mcp(&closed_url());
+    m.handshake();
+    let text = |r: Value| r["content"][0]["text"].as_str().unwrap().to_owned();
+
+    let s = text(m.call("uniflo_sessions", json!({})));
+    assert!(s.contains("4 sessions, newest first · key|title|model|status|updated|cost|steps"), "{s}");
+    assert!(
+        s.contains("\n- claude:root1|") && s.contains("\n  ↳ claude:agent-s1|"),
+        "subagent nested under its parent: {s}"
+    );
+    assert!(
+        s.contains("\n- claude:agent-s2|") && s.contains("sub of claude:agent-s1"),
+        "a nested row's subagent stays listed: {s}"
+    );
+    assert_eq!(s.matches("claude:agent-s1|子任务").count(), 1, "printed once: {s}");
+    assert!(s.contains("\n@ /elsewhere\n- claude:other|"), "{s}");
+
+    let s = text(m.call("uniflo_session", json!({"key": "claude:root1"})));
+    assert!(s.starts_with("claude:root1 · "), "{s}");
+    assert!(s.contains("started ") && s.contains("\nusage: "), "{s}");
+    assert!(s.contains(" user #u1] 修复缓存击穿") && s.contains(" assistant #m1-l#0] ok"), "{s}");
+
+    let s = text(m.call("uniflo_usage", json!({"group_by": "model"})));
+    assert!(s.contains("label|cost|sessions|prompts|steps|in|out|cache_r|cache_w|reasoning|unpriced"), "{s}");
+    assert!(s.contains("\nclaude-sonnet-4-5|$") && s.contains("\ntotal|$"), "{s}");
+
+    let s = text(m.call("uniflo_models", json!({})));
+    assert!(s.contains("model|sessions|steps|cost|unpriced|USD per 1M in/out/cache_r/cache_w|ctx|out"), "{s}");
+    assert!(s.contains("\n- claude-sonnet-4-5"), "{s}");
+
+    let s = text(m.call("uniflo_session_usage", json!({"key": "claude:root1"})));
+    assert!(
+        s.contains("\nmodels: claude-sonnet-4-5 1 steps") && s.contains("\nturns · turn|started|cost|prompts"),
+        "{s}"
+    );
+
+    let s = text(m.call("uniflo_search", json!({"q": "缓存"})));
+    assert!(s.contains("substring scan, newest first"), "a 2-character term says how it was searched: {s}");
+    let s = text(m.call("uniflo_search", json!({"q": "zzqqxx"})));
+    assert!(s.starts_with("0 sessions match") && s.contains("try fewer terms"), "{s}");
+
+    let s = text(m.call("uniflo_status", json!({})));
+    assert!(s.contains("schema v") && s.contains(" · up ") && s.contains("\n- claude: 4 sessions"), "{s}");
+    assert!(s.contains("\nno sessions: ") && !s.contains("()"), "harnesses without roots print no empty parens: {s}");
 }
 
 /// Scenario: MCP 在守护进程不可用时退回本地.
@@ -448,17 +620,17 @@ fn mcp_answers_in_process_without_a_daemon() {
     let h = home();
     let mut m = h.mcp(&closed_url());
     m.handshake();
-    let r = m.call("uniflo_sessions", json!({"q": "h:claude", "limit": 50}));
+    let r = m.call_structured("uniflo_sessions", json!({"q": "h:claude", "limit": 50}));
     assert!(r["content"][0]["text"].as_str().unwrap().starts_with("守护进程未运行"), "{r}");
     let keys = ids(&r["structuredContent"], "sessions", "key");
     assert_eq!(keys.len(), 6);
     assert!(keys.contains(&"claude:c1".to_owned()));
-    let r = m.call("uniflo_usage", json!({"group_by": "harness"}));
+    let r = m.call_structured("uniflo_usage", json!({"group_by": "harness"}));
     assert!(!r["content"][0]["text"].as_str().unwrap().contains("守护进程未运行"), "noted once");
     assert_eq!(r["structuredContent"]["totals"]["steps"], 3);
-    let r = m.call("uniflo_search", json!({"q": "缓存击穿"}));
+    let r = m.call_structured("uniflo_search", json!({"q": "缓存击穿"}));
     assert!(ids(&r["structuredContent"], "results", "session").contains(&"claude:c1".to_owned()), "{r}");
-    assert_eq!(m.call("uniflo_status", json!({}))["structuredContent"]["health"]["sessions"], 9);
+    assert_eq!(m.call_structured("uniflo_status", json!({}))["structuredContent"]["health"]["sessions"], 9);
 }
 
 /// Scenario: 恢复命令与注入防护.
@@ -558,11 +730,11 @@ fn memory_files_and_context() {
     assert_eq!(report["sessions"].as_array().unwrap().len(), 2);
     let mut m = h.mcp(&d.url);
     m.handshake();
-    let r = m.call("uniflo_context", json!({"cwd": sub.display().to_string(), "limit": 2}));
+    let r = m.call_structured("uniflo_context", json!({"cwd": sub.display().to_string(), "limit": 2}));
     assert_eq!(r["structuredContent"]["sessions"], report["sessions"]);
-    let r = m.call("uniflo_memory", json!({"cwd": sub.display().to_string()}));
+    let r = m.call_structured("uniflo_memory", json!({"cwd": sub.display().to_string()}));
     assert_eq!(r["structuredContent"]["files"], list);
-    let r = m.call("uniflo_memory", json!({"path": agents}));
+    let r = m.call_structured("uniflo_memory", json!({"path": agents}));
     assert_eq!(r["structuredContent"]["content"], "project rules");
     drop(m);
     let url = d.url.clone();

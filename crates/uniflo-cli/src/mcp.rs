@@ -1,8 +1,12 @@
 //! `uniflo mcp`: stdio MCP server (JSON-RPC 2.0, one message per line, protocol written by
 //! hand). Every tool is a `GET` on the gateway's REST routes — the daemon's, or the same routes
-//! answered in-process over a one-shot index when no daemon is reachable — so `structuredContent`
-//! is the REST response (arrays wrapped in an object). stdout carries protocol messages only;
-//! diagnostics go to stderr. The server never prompts.
+//! answered in-process over a one-shot index when no daemon is reachable. `content` is a compact
+//! text summary built for an agent to act on directly (keys, `#event` ids, titles, harness,
+//! model, `~`-shortened cwd, relative time, cost — never the absolute `source` path); the
+//! `structured` tool argument (default `false`) additionally returns `structuredContent`, the
+//! REST response verbatim (arrays wrapped in an object), for callers that need exact JSON
+//! fields. stdout carries protocol messages only; diagnostics go to stderr. The server never
+//! prompts.
 
 use crate::agent::build_context;
 use crate::client::Client;
@@ -13,7 +17,7 @@ use std::fmt::Write as _;
 use std::io::{BufRead, Write};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use uniflo_core::util::preview;
+use uniflo_core::util::{now_ms, preview};
 use uniflo_core::{Engine, EngineOptions};
 use uniflo_gateway::GuardOptions;
 use uniflo_schema::search::{HIGHLIGHT_END, HIGHLIGHT_START};
@@ -141,6 +145,7 @@ impl Server {
             Some(_) => return Err(invalid("arguments must be an object")),
         };
         let a = Args(args);
+        let structured = a.bool("structured", false)?;
         let mut out = match name {
             "uniflo_sessions" => self.sessions(&a)?,
             "uniflo_session" => self.session(&a)?,
@@ -158,11 +163,14 @@ impl Server {
             self.noted = true;
             out.text = format!("{LOCAL_NOTE}\n\n{}", out.text);
         }
-        Ok(json!({
+        let mut result = json!({
             "content": [{ "type": "text", "text": out.text }],
-            "structuredContent": out.structured,
             "isError": out.is_error,
-        }))
+        });
+        if structured {
+            result["structuredContent"] = out.structured;
+        }
+        Ok(result)
     }
 
     // ------------------------------------------------------------------ backend
@@ -251,10 +259,12 @@ impl Server {
         Ok(match self.get(&format!("/v1/sessions?limit={limit}&q={}", enc(q))) {
             Ok(v) => {
                 let list = v.as_array().cloned().unwrap_or_default();
-                let mut text = format!("{} sessions", list.len());
-                for s in &list {
-                    text.push('\n');
-                    text.push_str(&session_line(s));
+                let mut text = session_rows(&list);
+                if list.is_empty() {
+                    text.push_str("\n(no match: q words fuzzy-match title / first prompt / cwd; try fewer words or a wider since:)");
+                }
+                if list.len() as i64 == limit {
+                    let _ = write!(text, "\n(first {limit}: narrow q or raise limit for more)");
                 }
                 Out::ok(text, json!({ "sessions": list }))
             }
@@ -264,10 +274,12 @@ impl Server {
 
     fn session(&mut self, a: &Args) -> Result<Out, RpcError> {
         let (key, frag) = parse_ref(a.req_str("key")?);
-        let around = a.str("around")?.map(str::to_owned).or(frag);
+        let around = a.str("around")?.map(|s| s.trim_start_matches('#').to_owned()).or(frag);
         let limit = a.int("limit", 1, 200, 60)?;
         let before = a.opt_int("before", 0, i64::MAX)?;
-        let max_text = a.int("max_text", 0, 1_000_000, 4000)?;
+        // A caller centring on one event is usually reading that one event, not the whole page:
+        // default smaller unless they asked for a specific size.
+        let max_text = a.opt_int("max_text", 0, 1_000_000)?.unwrap_or(if around.is_some() { 600 } else { 4000 });
         let tools = a.bool("include_tools", false)?;
         let reasoning = a.bool("include_reasoning", false)?;
         let sess = match self.find_session(&key) {
@@ -303,18 +315,26 @@ impl Server {
                 _ => true,
             })
             .collect();
-        let mut text = session_line(&sess);
+        let mut text = session_header(&sess);
+        let mut lines = EventLines::default();
         for e in &events {
-            if let Some(l) = event_text(e) {
+            if let Some(l) = lines.line(e) {
                 text.push('\n');
                 text.push_str(&l);
             }
         }
-        if omitted_tools + omitted_reasoning > 0 {
-            let _ = write!(
-                text,
-                "\n({omitted_tools} tool events and {omitted_reasoning} reasoning events hidden: include_tools / include_reasoning)"
-            );
+        if let Some(n) = lines.note() {
+            text.push('\n');
+            text.push_str(&n);
+        }
+        let hidden: Vec<String> =
+            [(omitted_tools, "tool", "include_tools"), (omitted_reasoning, "reasoning", "include_reasoning")]
+                .iter()
+                .filter(|(k, ..)| *k > 0)
+                .map(|(k, what, flag)| format!("{k} {what} events ({flag}: true)"))
+                .collect();
+        if !hidden.is_empty() {
+            let _ = write!(text, "\nhidden: {}", hidden.join(", "));
         }
         if let Some(b) = page["next_before"].as_u64() {
             let _ = write!(text, "\nolder events: before={b}");
@@ -336,10 +356,14 @@ impl Server {
         match self.get(&format!("/v1/sessions/{}", enc(key))) {
             Ok(s) => Ok(s),
             Err(e) => {
-                let hits = self.get(&format!("/v1/sessions?limit=2&q={}", enc(&format!("id:{key}"))))?;
+                let hits = self.get(&format!("/v1/sessions?limit=6&q={}", enc(&format!("id:{key}"))))?;
                 match hits.as_array().map(Vec::as_slice) {
                     Some([one]) => Ok(one.clone()),
-                    Some([_, _, ..]) => Err(format!("{key} is ambiguous; pass the full session key")),
+                    Some(many @ [_, _, ..]) => {
+                        let keys: Vec<&str> = many.iter().take(5).filter_map(|s| s["key"].as_str()).collect();
+                        let more = if many.len() > 5 { ", …" } else { "" };
+                        Err(format!("{key} is ambiguous; pass a full key: {}{more}", keys.join(", ")))
+                    }
                     _ => Err(e),
                 }
             }
@@ -350,37 +374,85 @@ impl Server {
         let q = a.req_str("q")?.to_owned();
         let filter = a.str("filter")?.map(str::to_owned);
         let limit = a.int("limit", 1, 30, 10)?;
+        let offset = a.int("offset", 0, i64::MAX, 0)?;
+        let context = a.int("context", 0, 3, 0)?;
         self.prepare(false, true);
-        let mut path = format!("/v1/search?q={}&limit={limit}", enc(&q));
+        let mut path = format!("/v1/search?q={}&limit={limit}&offset={offset}", enc(&q));
         if let Some(f) = &filter {
             path.push_str(&format!("&filter={}", enc(f)));
         }
         Ok(match self.get(&path) {
             Ok(v) => {
-                let mut text = format!("{} matching sessions", v["total"]);
-                if v["indexing"] == true {
-                    text.push_str(" (index still building: results may be incomplete)");
+                let results = v["results"].as_array().cloned().unwrap_or_default();
+                let total = v["total"].as_u64().unwrap_or(0);
+                // A short-term scan stops early, so its total is only a lower bound.
+                let plus = if v["scanned_until"].is_null() { "" } else { "+" };
+                let mut text =
+                    format!("{total}{plus} sessions match · key|title|updated, then #event [kind age] snippet");
+                if total == 0 {
+                    text.push_str(
+                        " (none: terms are ANDed case-insensitive substrings; try fewer terms or drop filter)",
+                    );
                 }
-                for s in v["results"].as_array().into_iter().flatten() {
-                    let key = s["session"].as_str().unwrap_or("");
+                if v["order"] == "recent" {
+                    text.push_str(" (a term under 3 characters: substring scan, newest first, unranked)");
+                }
+                if v["partial"] == true {
+                    text.push_str(" (scan hit its time budget: lengthen short terms for complete results)");
+                }
+                if v["indexing"] == true {
                     let _ = write!(
                         text,
-                        "\n- {} · {} · {} · {key}",
-                        s["title"].as_str().unwrap_or("(untitled)"),
-                        s["harness"].as_str().unwrap_or(""),
-                        s["cwd"].as_str().unwrap_or("")
+                        " (index building, {}/{} sessions: results may be incomplete)",
+                        v["progress"]["done"], v["progress"]["total"]
                     );
-                    for h in s["hits"].as_array().into_iter().flatten() {
+                }
+                let mut cwd = None;
+                for (i, s) in results.iter().enumerate() {
+                    let key = s["session"].as_str().unwrap_or("");
+                    if s["cwd"].as_str() != cwd && s["cwd"].is_string() {
+                        cwd = s["cwd"].as_str();
+                        let _ = write!(text, "\n@ {}", crate::render::short_path(cwd.unwrap_or_default()));
+                    }
+                    let _ = write!(
+                        text,
+                        "\n- {key}|{}|{}",
+                        cell(&preview(s["title"].as_str().unwrap_or("(untitled)"), 80)),
+                        age(s["updated_at"].as_i64().unwrap_or(0))
+                    );
+                    for (hi, h) in s["hits"].as_array().into_iter().flatten().enumerate() {
                         let snippet =
                             h["snippet"].as_str().unwrap_or("").replace([HIGHLIGHT_START, HIGHLIGHT_END], "**");
+                        let event = h["event"].as_str().unwrap_or("");
                         let _ = write!(
                             text,
-                            "\n  [{}] {} — uniflo://session/{key}#{}",
+                            "\n  #{event} [{} {}] {snippet}",
                             h["kind"].as_str().unwrap_or(""),
-                            snippet,
-                            h["event"].as_str().unwrap_or("")
+                            age(h["ts"].as_i64().unwrap_or(0))
                         );
+                        // Only the best hit of the first few sessions: enough to answer "find and
+                        // read it" in one call without ballooning the reply for every session.
+                        if hi == 0 && context > 0 && i < 3 {
+                            let evpath = format!(
+                                "/v1/sessions/{}/events?around={}&limit={}&max_text=400",
+                                enc(key),
+                                enc(event),
+                                2 * context + 1
+                            );
+                            if let Ok(page) = self.get(&evpath) {
+                                let mut lines = EventLines::default();
+                                for e in page["events"].as_array().into_iter().flatten() {
+                                    if let Some(l) = lines.line(e) {
+                                        let _ = write!(text, "\n    {l}");
+                                    }
+                                }
+                            }
+                        }
                     }
+                }
+                let next = v["offset"].as_u64().unwrap_or(0) + results.len() as u64;
+                if next < total {
+                    let _ = write!(text, "\nmore: offset={next}");
                 }
                 Out::ok(text, v)
             }
@@ -405,14 +477,38 @@ impl Server {
         Ok(match self.get(&format!("/v1/usage?{}", qs.join("&"))) {
             Ok(v) => {
                 let mut text = format!("usage by {}", v["group_by"].as_str().unwrap_or("?"));
-                for r in v["rows"].as_array().into_iter().flatten() {
-                    text.push('\n');
-                    text.push_str(&usage_line(r["label"].as_str().unwrap_or(""), r));
+                for (k, name) in [("since", "since"), ("until", "until")] {
+                    if let Some(t) = v[k].as_i64() {
+                        let _ = write!(text, " · {name} {}", when(t));
+                    }
                 }
-                text.push('\n');
-                text.push_str(&usage_line("total", &v["totals"]));
+                if let Some(u) = v["under"].as_str() {
+                    let _ = write!(text, " · under {}", crate::render::short_path(u));
+                }
+                if let Some(tz) = v["tz"].as_str() {
+                    let _ = write!(text, " · tz {tz}");
+                }
+                if v["pricing"]["stale"] == true {
+                    let fetched = v["pricing"]["fetched_at"].as_i64().map(when);
+                    let _ = write!(text, " · prices stale (fetched {})", fetched.as_deref().unwrap_or("never"));
+                }
+                let _ = write!(text, " · label|{USAGE_COLS}");
+                for r in v["rows"].as_array().into_iter().flatten() {
+                    let label = r["label"].as_str().unwrap_or("");
+                    // The key is what a follow-up filter takes (a full cwd, a catalog id).
+                    let label = match r["key"].as_str() {
+                        Some(k) if k != label && !k.is_empty() => format!("{label} ({})", crate::render::short_path(k)),
+                        _ => label.to_owned(),
+                    };
+                    let _ = write!(text, "\n{}|{}", cell(&label), usage_cells(r));
+                }
+                let _ = write!(text, "\ntotal|{}", usage_cells(&v["totals"]));
                 if v["indexing"]["ready"] == false {
-                    text.push_str("\n(usage index still building: totals will grow)");
+                    let _ = write!(
+                        text,
+                        "\n(usage index still building, {}/{} sessions: totals will grow)",
+                        v["indexing"]["done"], v["indexing"]["total"]
+                    );
                 }
                 Out::ok(text, v)
             }
@@ -425,10 +521,19 @@ impl Server {
         self.prepare(true, false);
         Ok(match self.get(&format!("/v1/sessions/{}/usage", enc(&key))) {
             Ok(v) => {
-                let mut text = usage_line(&key, &v["totals"]);
-                for t in v["turns"].as_array().into_iter().flatten() {
-                    text.push('\n');
-                    text.push_str(&usage_line(&format!("turn {}", t["turn"]), t));
+                let mut text = format!("{key}: {}", usage_labelled(&v["totals"]));
+                text.push_str(&step_summary(v["steps"].as_array().map(Vec::as_slice).unwrap_or_default()));
+                let turns = v["turns"].as_array().cloned().unwrap_or_default();
+                let skip = turns.len().saturating_sub(TURN_LINES);
+                if skip > 0 {
+                    let _ = write!(text, "\n({skip} earlier turns not listed: structured=true for all)");
+                }
+                if !turns.is_empty() {
+                    let _ = write!(text, "\nturns · turn|started|{TURN_COLS}");
+                }
+                for t in &turns[skip..] {
+                    let start = t["started_at"].as_i64().map(when).unwrap_or_default();
+                    let _ = write!(text, "\n{}|{start}|{}", t["turn"], usage_cells(t));
                 }
                 Out::ok(text, v)
             }
@@ -441,16 +546,10 @@ impl Server {
         Ok(match self.get("/v1/models") {
             Ok(v) => {
                 let list = v.as_array().cloned().unwrap_or_default();
-                let mut text = format!("{} models", list.len());
+                let mut text = format!("{} models · {MODEL_COLS}", list.len());
                 for m in &list {
-                    let _ = write!(
-                        text,
-                        "\n- {} · {} steps · {} · context {}",
-                        m["model"].as_str().unwrap_or("?"),
-                        m["steps"],
-                        money(&m["cost_usd"]),
-                        m["context_limit"]
-                    );
+                    text.push('\n');
+                    text.push_str(&model_row(m));
                 }
                 Out::ok(text, json!({ "models": list }))
             }
@@ -466,8 +565,13 @@ impl Server {
         };
         Ok(match self.get(&format!("/v1/sessions/{}/resume", enc(&key))) {
             Ok(v) => {
+                // The agent runs on this machine: give the command for its shell.
+                let command = if cfg!(windows) { v["command_powershell"].as_str() } else { None };
                 let text = if v["supported"] == true {
-                    format!("Run in a terminal (not executed by uniflo):\n{}", v["command"].as_str().unwrap_or(""))
+                    format!(
+                        "Run in a terminal (not executed by uniflo):\n{}",
+                        command.or(v["command"].as_str()).unwrap_or("")
+                    )
                 } else {
                     format!("{key} cannot be resumed: {}", v["reason"].as_str().unwrap_or(""))
                 };
@@ -502,11 +606,12 @@ impl Server {
                 for f in &list {
                     let _ = write!(
                         text,
-                        "\n- {} · {} · {} · {} bytes",
+                        "\n- {} · {} · {} · {} bytes · updated {}",
                         f["path"].as_str().unwrap_or(""),
                         f["scope"].as_str().unwrap_or(""),
                         f["harness"].as_str().unwrap_or(""),
-                        f["bytes"]
+                        f["bytes"],
+                        age(f["updated_at"].as_i64().unwrap_or(0))
                     );
                 }
                 Out::ok(text, json!({ "files": list }))
@@ -547,19 +652,50 @@ impl Server {
         let harnesses = self.get("/v1/harnesses").unwrap_or_default();
         let source = if self.local.is_some() { "in-process index" } else { "daemon" };
         let mut text = format!(
-            "uniflo {} ({source}) · {} sessions, {} working",
+            "uniflo {} ({source}) · schema v{} · up {} · {} sessions, {} working",
             health["version"].as_str().unwrap_or("?"),
+            health["schema"],
+            age(now_ms() - health["uptime_ms"].as_i64().unwrap_or(0)),
             health["sessions"],
             health["working"]
         );
-        for h in harnesses.as_array().into_iter().flatten().filter(|h| h["sessions"].as_u64() > Some(0)) {
+        if health["read_only"] == true {
+            text.push_str(" · read-only");
+        }
+        if health["update_available"] == true {
+            let _ = write!(text, " · update available: {}", health["latest_version"].as_str().unwrap_or("?"));
+        }
+        let list = harnesses.as_array().map(Vec::as_slice).unwrap_or_default();
+        let roots = |h: &Value| {
+            let r: Vec<String> = h["roots"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(crate::render::short_path)
+                .collect();
+            r.join(", ")
+        };
+        for h in list.iter().filter(|h| h["sessions"].as_u64() > Some(0)) {
             let _ = write!(
                 text,
-                "\n- {}: {} sessions, {} working",
+                "\n- {}: {} sessions, {} working · {}",
                 h["id"].as_str().unwrap_or(""),
                 h["sessions"],
-                h["working"]
+                h["working"],
+                roots(h)
             );
+        }
+        let empty: Vec<String> = list
+            .iter()
+            .filter(|h| h["sessions"].as_u64() == Some(0))
+            .map(|h| match roots(h) {
+                r if r.is_empty() => h["id"].as_str().unwrap_or("").to_owned(),
+                r => format!("{} ({r})", h["id"].as_str().unwrap_or("")),
+            })
+            .collect();
+        if !empty.is_empty() {
+            let _ = write!(text, "\nno sessions: {}", empty.join(", "));
         }
         Ok(Out::ok(text, json!({ "health": health, "harnesses": harnesses })))
     }
@@ -579,7 +715,9 @@ fn initialize(params: &Value) -> Value {
         "instructions": "Read-only access to every local agent-harness session (Claude Code, Codex, omp, OpenCode, Gemini CLI, …). \
             Find sessions with uniflo_sessions (search syntax: h:claude s:work in:<cwd> since:2d 'fuzzy), read one with uniflo_session, \
             search transcript text with uniflo_search, costs with uniflo_usage. Session keys look like claude:<id>; \
-            uniflo://session/<key>#<event-id> references open with uniflo_session.",
+            open a #<event-id> from search with uniflo_session (key, around). Answers are compact text: a legend names \
+            the |-separated columns, an `@ <dir>` line is the cwd of the rows below it, `↳` rows are subagents of the row above, \
+            counts past 10k keep 3 significant digits and `-` means unknown; structured:true adds the exact JSON.",
     })
 }
 
@@ -613,62 +751,391 @@ fn decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-fn session_line(s: &Value) -> String {
+/// Rows of sessions under a one-line legend. Subagents whose parent is listed are nested under
+/// it (`↳`, with `@ <dir>` appended when their cwd differs); the cwd of top-level rows is printed
+/// as an `@ <dir>` line only when it changes.
+fn session_rows(list: &[Value]) -> String {
+    let mut text = format!("{} sessions, newest first · key|title|model|status|updated|cost|steps", list.len());
+    // Only one level is nested: a subagent of a nested row stays top-level with `sub of`, so
+    // every row is printed exactly once.
+    let listed = |k: &str| list.iter().find(|s| s["key"].as_str() == Some(k));
+    let top_level = |s: &Value| s["parent"].as_str().and_then(listed).is_none();
+    let nested = |s: &Value| s["parent"].as_str().and_then(listed).is_some_and(top_level);
+    let mut cwd = None::<&str>;
+    for top in list.iter().filter(|s| !nested(s)) {
+        let here = top["cwd"].as_str();
+        if here.is_some() && here != cwd {
+            let _ = write!(text, "\n@ {}", crate::render::short_path(here.unwrap_or_default()));
+            cwd = here;
+        }
+        text.push_str("\n- ");
+        text.push_str(&session_row(top, true));
+        for sub in list.iter().filter(|s| nested(s) && s["parent"] == top["key"]) {
+            text.push_str("\n  ↳ ");
+            text.push_str(&session_row(sub, false));
+            if let Some(c) = sub["cwd"].as_str().filter(|c| Some(*c) != here) {
+                let _ = write!(text, " @ {}", crate::render::short_path(c));
+            }
+        }
+    }
+    text
+}
+
+/// One `key|title|model|status|updated|cost|steps` row; `parent` adds `sub of <key>` to the
+/// status of a subagent shown on its own.
+fn session_row(s: &Value, parent: bool) -> String {
+    let mut status = status_cell(s);
+    if parent && let Some(p) = s["parent"].as_str() {
+        let _ = write!(status, " sub of {p}");
+    }
     let label = s["title"].as_str().or_else(|| s["preview"].as_str()).unwrap_or("(untitled)");
-    let mut line = format!(
-        "- {} · {} · {} · updated {}",
-        preview(label, 100),
-        s["harness"].as_str().unwrap_or(""),
-        s["status"].as_str().unwrap_or(""),
-        crate::render::date_time(s["updated_at"].as_i64().unwrap_or(0))
-    );
-    if let Some(c) = s["cwd"].as_str() {
-        let _ = write!(line, " · {c}");
-    }
-    if let Some(u) = s.get("usage").filter(|u| u.is_object()) {
-        let _ = write!(line, " · {}", money(&u["cost_usd"]));
-    }
-    let _ = write!(line, " · {}", s["key"].as_str().unwrap_or(""));
-    line
-}
-
-/// One readable line per event (usage and turn markers are skipped).
-fn event_text(e: &Value) -> Option<String> {
-    let time = crate::render::date_time(e["ts"].as_i64().unwrap_or(0));
-    let s = |k: &str| e[k].as_str().unwrap_or("").to_owned();
-    let (tag, body) = match e["kind"].as_str()? {
-        "user_message" => (if e["synthetic"] == true { "user (injected)".into() } else { "user".into() }, s("text")),
-        "assistant_message" => ("assistant".to_owned(), s("text")),
-        "reasoning" => ("reasoning".to_owned(), s("text")),
-        "tool_call" => (format!("tool_call {}", s("name")), preview(&e["input"].to_string(), 600)),
-        "tool_result" => {
-            let err = if e["is_error"] == true { " error" } else { "" };
-            (format!("tool_result {}{err}", s("name")), preview(&s("output"), 600))
-        }
-        "system" => (format!("system {}", s("subtype")), s("text")),
-        _ => return None,
-    };
-    Some(format!("[{time} {tag}] {body}"))
-}
-
-fn usage_line(label: &str, r: &Value) -> String {
+    let u = &s["usage"];
     format!(
-        "- {label}: {} · {} steps · in {} out {} cache r/w {}/{}{}",
-        money(&r["cost_usd"]),
-        r["steps"],
-        r["input"],
-        r["output"],
-        r["cache_read"],
-        r["cache_write"],
-        match r["unpriced_steps"].as_u64() {
-            Some(n) if n > 0 => format!(" · {n} unpriced steps"),
-            _ => String::new(),
-        }
+        "{}|{}|{}|{status}|{}|{}|{}",
+        s["key"].as_str().unwrap_or(""),
+        cell(&preview(label, 80)),
+        s["model"].as_str().unwrap_or("-"),
+        age(s["updated_at"].as_i64().unwrap_or(0)),
+        usd(&u["cost_usd"]),
+        n(&u["steps"]),
     )
 }
 
-fn money(v: &Value) -> String {
-    v.as_f64().map_or_else(|| "cost unknown".to_owned(), |c| format!("${c:.4}"))
+/// `idle`, `idle archived`, `work 3m tool_call ctx 169k/1M 16%`.
+fn status_cell(s: &Value) -> String {
+    let status = s["status"].as_str().unwrap_or("?");
+    let mut c = status.to_owned();
+    if status == "work" {
+        if let Some(t) = s["status_since"].as_i64() {
+            let _ = write!(c, " {}", age(t));
+        }
+        if let Some(r) = s["status_reason"].as_str() {
+            let _ = write!(c, " {r}");
+        }
+        if let Some(x) = context(&s["usage"], "last_context_tokens") {
+            let _ = write!(c, " ctx {x}");
+        }
+    }
+    if s["archived"] == true {
+        c.push_str(" archived");
+    }
+    c
+}
+
+/// Everything about the one session `uniflo_session` opens, in three or four labelled lines.
+fn session_header(s: &Value) -> String {
+    let date = |k: &str| s[k].as_i64().map(when).unwrap_or_else(|| "?".into());
+    let label = s["title"].as_str().or_else(|| s["preview"].as_str()).unwrap_or("(untitled)");
+    let mut text = format!("{} · {}", s["key"].as_str().unwrap_or(""), preview(label, 120));
+    let _ = write!(text, "\n{}", s["model"].as_str().unwrap_or("model unknown"));
+    let _ = write!(text, " · {} since {}", s["status"].as_str().unwrap_or("?"), date("status_since"));
+    if let Some(r) = s["status_reason"].as_str() {
+        let _ = write!(text, " ({r})");
+    }
+    if s["archived"] == true {
+        text.push_str(" · archived");
+    }
+    if let Some(p) = s["parent"].as_str() {
+        let _ = write!(text, " · sub of {p}");
+    }
+    if let Some(c) = s["cwd"].as_str() {
+        let _ = write!(text, " · {}", crate::render::short_path(c));
+    }
+    let _ = write!(text, " · started {} · updated {}", date("started_at"), date("updated_at"));
+    if let Some(p) = s["pid"].as_i64() {
+        let _ = write!(text, " · pid {p}");
+    }
+    if let Some(src) = s["source"].as_str() {
+        let _ = write!(text, " · source {}", crate::render::short_path(src));
+    }
+    if s["usage"].is_object() {
+        let _ = write!(text, "\nusage: {}", usage_labelled(&s["usage"]));
+    } else {
+        text.push_str("\nusage: not loaded here (uniflo_session_usage)");
+    }
+    if s["title"].is_string()
+        && let Some(p) = s["preview"].as_str()
+    {
+        let _ = write!(text, "\nfirst prompt: {}", preview(p, 300));
+    }
+    text
+}
+
+/// Renders a page of events one line each. The date is printed only when it changes, so a page
+/// of one day costs `HH:MM` per event; `#id` is printed where an agent needs it to come back
+/// (messages, and any event whose text was cut).
+#[derive(Default)]
+struct EventLines {
+    day: String,
+    cut: usize,
+}
+
+impl EventLines {
+    fn line(&mut self, e: &Value) -> Option<String> {
+        let s = |k: &str| e[k].as_str().unwrap_or("").to_owned();
+        let call = || e["call_id"].as_str().map(|c| format!(" @{}", tail(c, 4))).unwrap_or_default();
+        let (tag, body, anchor) = match e["kind"].as_str()? {
+            "user_message" => {
+                (if e["synthetic"] == true { "user (injected)".into() } else { "user".into() }, s("text"), true)
+            }
+            "assistant_message" => ("assistant".to_owned(), s("text"), true),
+            "reasoning" => ("reasoning".to_owned(), s("text"), false),
+            "tool_call" => (format!("tool_call {}{}", s("name"), call()), preview(&e["input"].to_string(), 600), false),
+            "tool_result" => {
+                let err = if e["is_error"] == true { " error" } else { "" };
+                (format!("tool_result {}{}{err}", s("name"), call()), preview(&s("output"), 600), false)
+            }
+            "system" => (format!("system {}", s("subtype")), s("text"), false),
+            // Only the turn ends a reader would want flagged; normal ends are implied by the
+            // next user message.
+            "turn_end" => match e["reason"].as_str() {
+                Some(r) if ABNORMAL_END.iter().any(|w| r.to_ascii_lowercase().contains(w)) => {
+                    (format!("turn_end {r}"), String::new(), false)
+                }
+                _ => return None,
+            },
+            _ => return None,
+        };
+        let full = when(e["ts"].as_i64().unwrap_or(0));
+        let time = match full.rsplit_once(' ') {
+            Some((day, hm)) if day == self.day => hm.to_owned(),
+            Some((day, _)) => {
+                self.day = day.to_owned();
+                full.clone()
+            }
+            None => full.clone(),
+        };
+        let cut = e["truncated"] == true;
+        self.cut += usize::from(cut);
+        let tag = tag.split_whitespace().collect::<Vec<_>>().join(" ");
+        let mut head = format!("[{time} {tag}");
+        if anchor || cut {
+            let _ = write!(head, " #{}", s("id"));
+        }
+        if cut {
+            head.push_str(" cut");
+        }
+        head.push(']');
+        Some(if body.is_empty() { head } else { format!("{head} {body}") })
+    }
+
+    /// Footer for a page that had cut events.
+    fn note(&self) -> Option<String> {
+        (self.cut > 0).then(|| {
+            format!("({} events marked cut were shortened; around=<#id> max_text=0 shows all that is stored)", self.cut)
+        })
+    }
+}
+
+/// Lower-cased fragments of harness turn-end reasons worth showing (`turn_end.reason` is the
+/// harness's own string).
+const ABNORMAL_END: &[&str] = &["interrupt", "abort", "cancel", "error", "fail", "max_tokens", "length", "refus"];
+
+fn tail(s: &str, n: usize) -> &str {
+    let start = s.char_indices().rev().nth(n - 1).map_or(0, |(i, _)| i);
+    &s[start..]
+}
+
+/// `3m`, `5h`, `2d`: how long ago.
+fn age(ms: i64) -> String {
+    crate::render::age(ms)
+}
+
+/// Local `MM-DD HH:MM`, with the year only when it is not this one.
+fn when(ms: i64) -> String {
+    use chrono::{Datelike, Local, TimeZone};
+    match Local.timestamp_millis_opt(ms).single() {
+        Some(t) if t.year() == Local::now().year() => t.format("%m-%d %H:%M").to_string(),
+        Some(t) => t.format("%Y-%m-%d %H:%M").to_string(),
+        None => "?".into(),
+    }
+}
+
+/// A table cell: one line, no column separator inside.
+fn cell(s: &str) -> String {
+    s.replace(['|', '\n', '\r'], " ")
+}
+
+/// Counts to three significant digits past 10k (`12.3k`, `456k`, `1.23M`, `4.5G`); exact
+/// values are one `structured: true` away.
+fn num(n: u64) -> String {
+    if n < 10_000 {
+        return n.to_string();
+    }
+    let (v, unit) = match n {
+        n if n >= 1_000_000_000 => (n as f64 / 1e9, "G"),
+        n if n >= 1_000_000 => (n as f64 / 1e6, "M"),
+        n => (n as f64 / 1e3, "k"),
+    };
+    let s = match v {
+        v if v < 10.0 => format!("{v:.2}"),
+        v if v < 100.0 => format!("{v:.1}"),
+        v => format!("{v:.0}"),
+    };
+    let s = if s.contains('.') { s.trim_end_matches('0').trim_end_matches('.') } else { &s };
+    format!("{s}{unit}")
+}
+
+fn n(v: &Value) -> String {
+    v.as_u64().map_or_else(|| "-".to_owned(), num)
+}
+
+/// `used/limit pct%` of a usage object's context fields, or the used count alone.
+fn context(u: &Value, used: &str) -> Option<String> {
+    let c = u[used].as_u64()?;
+    Some(match u["context_limit"].as_u64() {
+        Some(l) if l > 0 => format!("{}/{} {}%", num(c), num(l), c * 100 / l),
+        _ => num(c),
+    })
+}
+
+/// Columns of [`usage_cells`]; a turn has no `sessions` cell.
+const USAGE_COLS: &str = "cost|sessions|prompts|steps|in|out|cache_r|cache_w|reasoning|unpriced";
+const TURN_COLS: &str = "cost|prompts|steps|in|out|cache_r|cache_w|reasoning|unpriced";
+
+/// One aggregate (usage row, totals, turn) as `|`-separated cells in [`USAGE_COLS`] order,
+/// leaving out the `sessions` cell when the aggregate has none.
+fn usage_cells(r: &Value) -> String {
+    let cells: Vec<String> =
+        ["sessions", "prompts", "steps", "input", "output", "cache_read", "cache_write", "reasoning", "unpriced_steps"]
+            .iter()
+            .filter(|k| **k != "sessions" || !r[*k].is_null())
+            .map(|k| n(&r[*k]))
+            .collect();
+    format!("{}|{}", usd(&r["cost_usd"]), cells.join("|"))
+}
+
+/// One aggregate with labels, for a single line (session totals).
+fn usage_labelled(r: &Value) -> String {
+    let mut l = usd(&r["cost_usd"]);
+    let _ = write!(l, " · {} steps · in {} · out {}", n(&r["steps"]), n(&r["input"]), n(&r["output"]));
+    let _ = write!(l, " · cache r/w {}/{}", n(&r["cache_read"]), n(&r["cache_write"]));
+    if r["reasoning"].as_u64() > Some(0) {
+        let _ = write!(l, " · reasoning {}", n(&r["reasoning"]));
+    }
+    if let Some(c) = context(r, "last_context_tokens") {
+        let _ = write!(l, " · ctx {c}");
+    }
+    if r["unpriced_steps"].as_u64() > Some(0) {
+        let _ = write!(l, " · {} unpriced steps", r["unpriced_steps"]);
+    }
+    l
+}
+
+/// `$34.32`, `$0.11`, `$0.0042`; `-` when unknown (unpriced).
+fn usd(v: &Value) -> String {
+    match v.as_f64() {
+        None => "-".into(),
+        Some(0.0) => "$0".into(),
+        Some(c) if c >= 1.0 => format!("${c:.2}"),
+        Some(c) => {
+            let digits = ((-c.log10()).floor().max(0.0) as usize + 2).min(8);
+            format!("${c:.digits$}")
+        }
+    }
+}
+
+/// Turn rows `uniflo_session_usage` prints (the most recent ones).
+const TURN_LINES: usize = 50;
+
+/// What the per-step list says that the totals do not: models used, peak context, the costliest
+/// steps and how costs were priced.
+fn step_summary(steps: &[Value]) -> String {
+    let mut text = String::new();
+    let mut models: Vec<(&str, u64, f64)> = Vec::new();
+    for st in steps {
+        let m = st["model"].as_str().unwrap_or("(no model)");
+        let cost = st["cost_usd"].as_f64().unwrap_or(0.0);
+        match models.iter_mut().find(|x| x.0 == m) {
+            Some(x) => (x.1, x.2) = (x.1 + 1, x.2 + cost),
+            None => models.push((m, 1, cost)),
+        }
+    }
+    if !models.is_empty() {
+        models.sort_by(|a, b| b.1.cmp(&a.1));
+        let list: Vec<String> = models.iter().map(|(m, k, c)| format!("{m} {k} steps {}", usd(&json!(c)))).collect();
+        let _ = write!(text, "\nmodels: {}", list.join(", "));
+    }
+    if let Some(p) = steps.iter().max_by_key(|st| st["context_tokens"].as_u64().unwrap_or(0))
+        && let Some(c) = context(p, "context_tokens")
+    {
+        let _ = write!(text, "\npeak context {c} at turn {} #{}", p["turn"], p["event"].as_str().unwrap_or(""));
+    }
+    let mut costly: Vec<&Value> = steps.iter().filter(|st| st["cost_usd"].as_f64() > Some(0.0)).collect();
+    costly.sort_by(|a, b| {
+        b["cost_usd"].as_f64().partial_cmp(&a["cost_usd"].as_f64()).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    for st in costly.iter().take(3) {
+        let _ = write!(
+            text,
+            "\ncostly step #{} turn {} {} {} in {} out {} cache r/w {}/{}",
+            st["event"].as_str().unwrap_or(""),
+            st["turn"],
+            st["model"].as_str().unwrap_or("-"),
+            usd(&st["cost_usd"]),
+            n(&st["input"]),
+            n(&st["output"]),
+            n(&st["cache_read"]),
+            n(&st["cache_write"])
+        );
+    }
+    let mut sources: Vec<(&str, usize)> = Vec::new();
+    for st in steps {
+        let src = st["cost_source"].as_str().unwrap_or("unpriced");
+        match sources.iter_mut().find(|x| x.0 == src) {
+            Some(x) => x.1 += 1,
+            None => sources.push((src, 1)),
+        }
+    }
+    if sources.len() > 1 || sources.iter().any(|(s, _)| *s != "harness" && *s != "catalog") {
+        let list: Vec<String> = sources.iter().map(|(s, k)| format!("{s} {k}")).collect();
+        let _ = write!(text, "\npriced by: {}", list.join(", "));
+    }
+    text
+}
+
+/// Columns of [`model_row`].
+const MODEL_COLS: &str = "model|sessions|steps|cost|unpriced|USD per 1M in/out/cache_r/cache_w|ctx|out";
+
+/// One model: catalog match, use, current prices (and tiers), limits.
+fn model_row(m: &Value) -> String {
+    let name = m["model"].as_str().unwrap_or("?");
+    let mut l = format!("- {name}");
+    if let Some(c) = m["catalog_id"].as_str().filter(|c| *c != name) {
+        let _ = write!(l, " → {c}");
+    }
+    if let Some(p) = m["provider"].as_str() {
+        let _ = write!(l, " ({p})");
+    }
+    if let Some(x) = m["match"].as_str().filter(|x| *x != "exact") {
+        let _ = write!(l, " {x}");
+    }
+    let _ = write!(l, "|{}|{}|{}|{}|", n(&m["sessions"]), n(&m["steps"]), usd(&m["cost_usd"]), n(&m["unpriced_steps"]));
+    let segs = m["prices"].as_array().map(Vec::as_slice).unwrap_or_default();
+    match segs.last() {
+        Some(p) => {
+            l.push_str(&prices(p));
+            for t in p["tiers"].as_array().into_iter().flatten() {
+                let _ = write!(l, " >{} {}", n(&t["above"]), prices(t));
+            }
+            if segs.len() > 1 {
+                let _ = write!(l, " (+{} earlier)", segs.len() - 1);
+            }
+        }
+        None => l.push('-'),
+    }
+    let _ = write!(l, "|{}|{}", n(&m["context_limit"]), n(&m["output_limit"]));
+    l
+}
+
+/// A price per 1M tokens without trailing zeros: `5`, `0.5`, `6.25`.
+fn price(v: &Value) -> String {
+    v.as_f64().map_or_else(|| "-".to_owned(), |p| format!("{}", (p * 10_000.0).round() / 10_000.0))
+}
+
+/// `in/out/cache read/cache write` of one price (segment or tier).
+fn prices(p: &Value) -> String {
+    format!("{}/{}/{}/{}", price(&p["input"]), price(&p["output"]), price(&p["cache_read"]), price(&p["cache_write"]))
 }
 
 /// Typed access to `arguments`: a present value of the wrong type is `-32602`; out-of-range
@@ -720,13 +1187,19 @@ impl Args<'_> {
     }
 }
 
+/// Every tool gets a `structured` property besides its own: `props` must be a JSON object.
 fn tool(name: &str, title: &str, description: &str, props: Value, required: &[&str]) -> Value {
+    let mut props = props;
+    if let Value::Object(m) = &mut props {
+        // Described once in the server instructions rather than on every tool.
+        m.insert("structured".into(), json!({ "type": "boolean" }));
+    }
     json!({
         "name": name,
         "title": title,
         "description": description,
         "inputSchema": { "type": "object", "properties": props, "required": required },
-        "annotations": { "title": title, "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false },
+        "annotations": { "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false },
     })
 }
 
@@ -751,8 +1224,8 @@ fn tools() -> Vec<Value> {
                 "key": key,
                 "limit": { "type": "integer", "minimum": 1, "maximum": 200, "default": 60, "description": "Events fetched (before hiding tools / reasoning)" },
                 "before": { "type": "integer", "minimum": 0, "description": "next_before of the previous page" },
-                "around": { "type": "string", "description": "Event id to centre the window on" },
-                "max_text": { "type": "integer", "minimum": 0, "default": 4000, "description": "Cut each text field to this many bytes; 0 = no limit" },
+                "around": { "type": "string", "description": "Event id (#id from uniflo_search or a page) to centre the window on" },
+                "max_text": { "type": "integer", "minimum": 0, "default": 4000, "description": "Cut each text field to this many bytes; 0 = no limit. Defaults to 600 (instead of 4000) when around is set" },
                 "include_tools": { "type": "boolean", "default": false },
                 "include_reasoning": { "type": "boolean", "default": false },
             }),
@@ -761,11 +1234,13 @@ fn tools() -> Vec<Value> {
         tool(
             "uniflo_search",
             "Full-text search",
-            "Search message, reasoning and tool text of every session (Chinese words and code substrings); hits grouped by session with uniflo:// references.",
+            "Search message, reasoning and tool text of every session (Chinese words and code substrings); hits grouped by session. Open a hit with uniflo_session (key, around=<event id>).",
             json!({
                 "q": { "type": "string", "description": "Terms are ANDed; \"a phrase\"; -excluded" },
                 "filter": { "type": "string", "description": "Session filter in the uniflo_sessions q syntax" },
-                "limit": { "type": "integer", "minimum": 1, "maximum": 30, "default": 10 },
+                "limit": { "type": "integer", "minimum": 1, "maximum": 30, "default": 10, "description": "Sessions per page" },
+                "offset": { "type": "integer", "minimum": 0, "default": 0, "description": "Skip this many matching sessions; page with the more: offset=<n> footer" },
+                "context": { "type": "integer", "minimum": 0, "maximum": 3, "default": 0, "description": "For up to the first 3 sessions, inline +/-context neighbour events around the best hit (one extra GET per such session)" },
             }),
             &["q"],
         ),
