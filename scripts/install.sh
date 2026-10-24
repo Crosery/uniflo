@@ -27,7 +27,7 @@ no_setup=0
 for arg in "$@"; do
   case $arg in
     --no-setup) no_setup=1 ;;
-    *) die "未知参数 $arg（只支持 --no-setup）" ;;
+    *) die "未知参数 ${arg}（只支持 --no-setup）" ;;
   esac
 done
 case ${UNIFLO_NO_SETUP:-} in '' | 0) ;; *) no_setup=1 ;; esac
@@ -48,7 +48,7 @@ case $os in
     target=$arch-apple-darwin
     ;;
   Linux) target=$arch-unknown-linux-musl ;;
-  *) die "不支持 $os：Windows 请用 install.ps1，其他系统可改用 cargo install uniflo" ;;
+  *) die "不支持 ${os}：Windows 请用 install.ps1，其他系统可改用 cargo install uniflo" ;;
 esac
 
 command -v curl >/dev/null 2>&1 || die "需要 curl"
@@ -75,13 +75,13 @@ if [ -z "$version" ]; then
 fi
 
 pkg=uniflo-$version-$target.tar.gz
-say "下载 uniflo $version（$target）"
+say "下载 uniflo ${version}（${target}）"
 fetch "$base/download/v$version/$pkg" "$tmp/$pkg"
 fetch "$base/download/v$version/SHA256SUMS" "$tmp/SHA256SUMS"
 want=$(awk -v f="$pkg" '$2 == f || $2 == "*" f { print tolower($1); exit }' "$tmp/SHA256SUMS")
 [ -n "$want" ] || die "SHA256SUMS 里没有 $pkg"
 got=$(sha256 "$tmp/$pkg" | tr 'A-F' 'a-f')
-[ "$got" = "$want" ] || die "$pkg 校验失败：SHA-256 为 $got，SHA256SUMS 记录的是 $want。已中止，没有安装任何文件"
+[ "$got" = "$want" ] || die "$pkg 校验失败：SHA-256 为 ${got}，SHA256SUMS 记录的是 ${want}。已中止，没有安装任何文件"
 
 mkdir "$tmp/unpacked"
 tar -xzf "$tmp/$pkg" -C "$tmp/unpacked" || die "解包 $pkg 失败"
@@ -138,7 +138,7 @@ case ":$PATH:" in
   *":$dir:"* | *":$given_dir:"*)
     found=$(command -v uniflo 2>/dev/null || true)
     if [ -n "$found" ] && [ "$found" != "$dest" ] && [ "$found" != "$given_dir/uniflo" ]; then
-      say "注意：PATH 里先找到的是 $found，不是刚装的这一份"
+      say "注意：PATH 里先找到的是 ${found}，不是刚装的这一份"
     fi
     ;;
   *)

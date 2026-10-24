@@ -4,7 +4,10 @@
 //   writes SHA256SUMS, uploads to the tag's release and marks `-` tags as prereleases;
 // - the cargo-binstall templates of the `uniflo` package (read with `cargo metadata`) render the
 //   package and executable names that scripts/package.sh produces (checked on a real package for
-//   the host target) and that `uniflo update` downloads (`uniflo_core::install::asset_name`).
+//   the host target) and that `uniflo update` downloads (`uniflo_core::install::asset_name`);
+// - scripts/install.ps1 is pure ASCII: Windows PowerShell 5.1 reads a BOM-less `-File` script in the
+//   ANSI code page and `irm` decodes the octet-stream release asset as Latin-1, so any other byte
+//   breaks parsing or prints mojibake on a Chinese-locale Windows.
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -32,6 +35,13 @@ expect(/cp scripts\/install\.sh scripts\/install\.ps1 dist\//.test(wf), "install
 expect(/\[\[ "\$TAG" == \*-\* \]\][\s\S]*prerelease_flag=--prerelease/.test(wf), "prerelease detection");
 expect(/\$PRERELEASE_FLAG/.test(wf.slice(wf.indexOf("gh release create"))), "prerelease flag passed");
 expect(/scripts\/publish-crates\.sh/.test(wf), "crates.io publish kept");
+
+const ps1 = readFileSync(join(root, "scripts/install.ps1"));
+const ps1Lines = ps1
+  .toString("utf8")
+  .split("\n")
+  .flatMap((l, i) => (/[^\x00-\x7f]/.test(l) ? [i + 1] : []));
+expect(ps1Lines.length === 0, `scripts/install.ps1 non-ASCII on lines ${ps1Lines.join(",")}`);
 
 const meta = JSON.parse(execFileSync("cargo", ["metadata", "--format-version", "1", "--no-deps"], { cwd: root }));
 const pkg = meta.packages.find((p) => p.name === "uniflo");

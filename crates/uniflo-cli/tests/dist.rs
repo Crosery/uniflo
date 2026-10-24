@@ -150,7 +150,10 @@ impl Machine {
 
     fn cmd(&self, program: impl AsRef<std::ffi::OsStr>, rel: &Release) -> Command {
         let mut c = Command::new(program);
+        // A UTF-8 locale like a real terminal: under it macOS /bin/sh (bash 3.2) reads the
+        // multibyte text right after an unbraced `$var` as part of the variable name.
         c.env_clear()
+            .env("LANG", "en_US.UTF-8")
             .env("PATH", std::env::var_os("PATH").unwrap_or_default())
             .env("HOME", self.path("home"))
             .env("UNIFLO_HOME", self.path("home"))

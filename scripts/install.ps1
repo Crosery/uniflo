@@ -17,12 +17,16 @@
     $ProgressPreference = 'SilentlyContinue'
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
+    # Keep this file ASCII: Windows PowerShell 5.1 reads a BOM-less script run with -File in the
+    # ANSI code page, and `irm` decodes the release asset (application/octet-stream) as Latin-1, so
+    # literal Chinese breaks parsing or prints mojibake. Messages are \uXXXX escapes expanded here.
+    function T([string]$s) { [regex]::Unescape($s) }
     function Say([string]$m) { Write-Host "uniflo-install: $m" }
     # throw, not exit: under `irm | iex` exit would close the user's PowerShell window.
-    function Fail([string]$m) { throw "uniflo-install: 错误：$m" }
+    function Fail([string]$m) { throw ((T 'uniflo-install: \u9519\u8bef\uff1a{0}') -f $m) }
     function Fetch([string]$url, [string]$out) {
         try { Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $out }
-        catch { Fail "下载失败：$url（$($_.Exception.Message)）" }
+        catch { Fail ((T '\u4e0b\u8f7d\u5931\u8d25\uff1a{0}\uff08{1}\uff09') -f $url, $_.Exception.Message) }
     }
 
     $base = 'https://github.com/Crosery/uniflo/releases'
@@ -32,7 +36,7 @@
 
     # ARM64 Windows runs the x64 build under emulation.
     if ($env:PROCESSOR_ARCHITECTURE -notin @('AMD64', 'ARM64')) {
-        Fail "没有 $env:PROCESSOR_ARCHITECTURE 架构的预编译包，可改用 cargo install uniflo"
+        Fail ((T '\u6ca1\u6709 {0} \u67b6\u6784\u7684\u9884\u7f16\u8bd1\u5305\uff0c\u53ef\u6539\u7528 cargo install uniflo') -f $env:PROCESSOR_ARCHITECTURE)
     }
     $target = 'x86_64-pc-windows-msvc'
 
@@ -46,7 +50,7 @@
             Fetch "$base/latest/download/SHA256SUMS" $latest
             $pattern = '^[0-9a-fA-F]{64}\s+\*?uniflo-(.+)-' + [regex]::Escape($target) + '\.zip$'
             $hit = Get-Content -LiteralPath $latest | Where-Object { $_ -match $pattern } | Select-Object -First 1
-            if (-not $hit) { Fail "最新发布里没有 $target 的包" }
+            if (-not $hit) { Fail ((T '\u6700\u65b0\u53d1\u5e03\u91cc\u6ca1\u6709 {0} \u7684\u5305') -f $target) }
             $null = $hit -match $pattern
             $version = $Matches[1]
         }
@@ -54,7 +58,7 @@
         $pkg = "uniflo-$version-$target.zip"
         $pkgPath = Join-Path $tmp $pkg
         $sumsPath = Join-Path $tmp 'SHA256SUMS'
-        Say "下载 uniflo $version（$target）"
+        Say ((T '\u4e0b\u8f7d uniflo {0}\uff08{1}\uff09') -f $version, $target)
         Fetch "$base/download/v$version/$pkg" $pkgPath
         Fetch "$base/download/v$version/SHA256SUMS" $sumsPath
         $want = $null
@@ -64,18 +68,18 @@
                 break
             }
         }
-        if (-not $want) { Fail "SHA256SUMS 里没有 $pkg" }
+        if (-not $want) { Fail ((T 'SHA256SUMS \u91cc\u6ca1\u6709 {0}') -f $pkg) }
         $got = (Get-FileHash -Algorithm SHA256 -LiteralPath $pkgPath).Hash.ToLowerInvariant()
         if ($got -ne $want) {
-            Fail "$pkg 校验失败：SHA-256 为 $got，SHA256SUMS 记录的是 $want。已中止，没有安装任何文件"
+            Fail ((T '{0} \u6821\u9a8c\u5931\u8d25\uff1aSHA-256 \u4e3a {1}\uff0cSHA256SUMS \u8bb0\u5f55\u7684\u662f {2}\u3002\u5df2\u4e2d\u6b62\uff0c\u6ca1\u6709\u5b89\u88c5\u4efb\u4f55\u6587\u4ef6') -f $pkg, $got, $want)
         }
 
         $unpacked = Join-Path $tmp 'unpacked'
         Expand-Archive -LiteralPath $pkgPath -DestinationPath $unpacked -Force
         $new = Join-Path $unpacked "uniflo-$version-$target\uniflo.exe"
-        if (-not (Test-Path -LiteralPath $new -PathType Leaf)) { Fail "$pkg 里没有 uniflo-$version-$target\uniflo.exe" }
+        if (-not (Test-Path -LiteralPath $new -PathType Leaf)) { Fail ((T '{0} \u91cc\u6ca1\u6709 {1}') -f $pkg, "uniflo-$version-$target\uniflo.exe") }
         $reported = ((& $new --version) | Out-String).Trim()
-        if ($reported -ne "uniflo $version") { Fail "解出的 uniflo.exe 无法运行或版本不符（输出：`"$reported`"）" }
+        if ($reported -ne "uniflo $version") { Fail ((T '\u89e3\u51fa\u7684 uniflo.exe \u65e0\u6cd5\u8fd0\u884c\u6216\u7248\u672c\u4e0d\u7b26\uff08\u8f93\u51fa\uff1a"{0}"\uff09') -f $reported) }
 
         $dir = if ($env:UNIFLO_INSTALL_DIR) { $env:UNIFLO_INSTALL_DIR } else { Join-Path $env:LOCALAPPDATA 'Programs\uniflo' }
         New-Item -ItemType Directory -Force -Path $dir | Out-Null
@@ -95,7 +99,7 @@
             if (-not (Test-Path -LiteralPath $dest) -and (Test-Path -LiteralPath "$dest.old")) {
                 Move-Item -LiteralPath "$dest.old" -Destination $dest -Force
             }
-            Fail "无法写入 ${dest}：$($_.Exception.Message)"
+            Fail ((T '\u65e0\u6cd5\u5199\u5165 {0}\uff1a{1}') -f $dest, $_.Exception.Message)
         }
 
         # Same location as uniflo_core::paths::config_dir(): UNIFLO_CONFIG_DIR as is, otherwise the
@@ -121,19 +125,19 @@
         [IO.File]::WriteAllText("$record.tmp", $json + "`n", (New-Object Text.UTF8Encoding $false))
         Move-Item -LiteralPath "$record.tmp" -Destination $record -Force
 
-        Say "已安装 $((& $dest --version | Out-String).Trim()) → $dest"
+        Say ((T '\u5df2\u5b89\u88c5 {0} \u2192 {1}') -f (& $dest --version | Out-String).Trim(), $dest)
         $onPath = ($env:Path -split ';') | Where-Object { $_.TrimEnd('\') -ieq $dir.TrimEnd('\') }
         if (-not $onPath) {
-            Say "$dir 不在 PATH 中。在 PowerShell 里运行下面这行后重开终端："
+            Say ((T '{0} \u4e0d\u5728 PATH \u4e2d\u3002\u5728 PowerShell \u91cc\u8fd0\u884c\u4e0b\u9762\u8fd9\u884c\u540e\u91cd\u5f00\u7ec8\u7aef\uff1a') -f $dir)
             Write-Host "    [Environment]::SetEnvironmentVariable('Path', '$dir;' + [Environment]::GetEnvironmentVariable('Path', 'User'), 'User')"
         }
 
         if (-not $noSetup -and [Environment]::UserInteractive -and -not [Console]::IsInputRedirected -and -not [Console]::IsOutputRedirected) {
-            Say '运行 uniflo setup：把 MCP / Skill 接入本机 agent（之后可用 uniflo setup --uninstall 撤销）'
+            Say (T '\u8fd0\u884c uniflo setup\uff1a\u628a MCP / Skill \u63a5\u5165\u672c\u673a agent\uff08\u4e4b\u540e\u53ef\u7528 uniflo setup --uninstall \u64a4\u9500\uff09')
             & $dest setup
-            if ($LASTEXITCODE -ne 0) { Say 'uniflo setup 没有完成，之后可以随时运行 uniflo setup' }
+            if ($LASTEXITCODE -ne 0) { Say (T 'uniflo setup \u6ca1\u6709\u5b8c\u6210\uff0c\u4e4b\u540e\u53ef\u4ee5\u968f\u65f6\u8fd0\u884c uniflo setup') }
         } else {
-            Say '跳过 uniflo setup；之后可运行 uniflo setup 把 MCP / Skill 接入本机 agent'
+            Say (T '\u8df3\u8fc7 uniflo setup\uff1b\u4e4b\u540e\u53ef\u8fd0\u884c uniflo setup \u628a MCP / Skill \u63a5\u5165\u672c\u673a agent')
         }
     } finally {
         Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
