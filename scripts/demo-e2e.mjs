@@ -441,33 +441,26 @@ async function runUsage() {
   report("[usage] no page errors", cdp.errors.length === 0, cdp.errors.slice(0, 3).join(" | "));
 }
 
-// Sub-agents nest under their parent in the session list; the chip folds them; headers link back.
+// Sub-agents nest under their parent: a family lists only its working sub-agents and folds while
+// none works; the rest load on demand; the open sub-agent stays visible; headers link back.
 async function runTree() {
+  const sub2 = join(home, ".claude/projects/-w-demo/sess-1/subagents/agent-sub2.jsonl");
   await load(`${api}/demo?token=${TOKEN}`);
-  await waitFor(`!!document.querySelector('.row[data-key="claude:sess-1"]')?.closest('.node.fam')?.querySelector('.kid-tog')`, 8_000, "tree");
   const famOf = `document.querySelector('.row[data-key="claude:sess-1"]').closest('.node.fam')`;
-  const t = await cdp.eval(`(() => { const fam = ${famOf}, p = fam.querySelector(':scope > .row'), tog = fam.querySelector(':scope > .kids > .kh .kid-tog');
-    const kids = [...fam.querySelectorAll(':scope > .kids > .node > .row')].map((r) => r.dataset.key);
-    const rows = [...document.querySelectorAll('#list .row')].map((r) => r.dataset.key);
-    const pr = p.querySelector('.ricon').getBoundingClientRect(), kr = fam.querySelector('.kids .ricon').getBoundingClientRect();
-    const line = getComputedStyle(fam.querySelector('.kids > .node > .row'), '::after');
-    return { kids, chip: tog.textContent.trim(), open: tog.getAttribute('aria-expanded'), indent: Math.round(kr.left - pr.left),
-      elbow: line.borderLeftWidth !== '0px' && line.borderBottomWidth !== '0px', below: kids.every((k) => rows.indexOf(k) > rows.indexOf('claude:sess-1')) }; })()`);
-  const want = (await apiJson(api, "/v1/sessions?limit=500")).filter((s) => s.parent === "claude:sess-1").map((s) => s.key).sort();
-  report("[tree] sub-agents nest under their parent, indented with tree lines", want.length === 2 && JSON.stringify(want) === JSON.stringify([...t.kids].sort()) && t.indent >= 20 && t.elbow && t.below, JSON.stringify({ ...t, want }));
-  report('[tree] parent row shows "2 个子代理", expanded', t.chip === "2 个子代理" && t.open === "true", t.chip);
-  const before = await cdp.eval(`document.querySelector('.row.sel')?.dataset.key || ''`);
-  await cdp.eval(`${famOf}.querySelector('.kid-tog').click()`);
-  const folded = await waitFor(`!${famOf}.querySelector('.kids > .node > .row') && ${famOf}.querySelector('.kid-tog').getAttribute('aria-expanded') === 'false'`, 3_000, "fold").catch(() => false);
-  const after = await cdp.eval(`document.querySelector('.row.sel')?.dataset.key || ''`);
-  report("[tree] the chip folds the children without opening the parent", !!folded && after === before, `${before} → ${after}`);
-  await shot("tree-folded.png");
-  await cdp.eval(`${famOf}.querySelector('.kid-tog').click()`);
-  const unfolded = await waitFor(`${famOf}.querySelectorAll(':scope > .kids > .node > .row').length === 2`, 3_000, "unfold").catch(() => false);
-  report("[tree] clicking again unfolds them", !!unfolded);
-  await click(`.row[data-key="${t.kids[0]}"]`);
-  const link = await waitFor(`document.querySelector('#sh-meta .parent-link')?.textContent`, 5_000, "parent link").catch(() => "");
-  report("[tree] a sub-agent's header names its parent", String(link).includes("网关新增 /demo 演示页"), String(link).trim());
+  const state = `(() => { const fam = ${famOf}; if (!fam) return null; const tog = fam.querySelector(':scope > .kids > .kh .kid-tog');
+    return { kids: [...fam.querySelectorAll(':scope > .kids > .node > .row')].map((r) => r.dataset.key), chip: tog.textContent.trim(), open: tog.getAttribute('aria-expanded'),
+      more: [...fam.querySelectorAll(':scope > .kids > .node.more .kids-more')].map((b) => b.textContent.trim()),
+      group: (() => { let g = ''; for (const n of document.querySelector('#list').children) { if (n.classList.contains('group-h')) g = n.querySelector('span:not(.n):not(.dot)').textContent; else if (n === fam) return g; } return ''; })()}; })()`;
+  const st0 = await waitFor(`(() => { const s = ${state}; return s && s.chip ? s : null; })()`, 8_000, "tree");
+  report("[tree] an idle family is folded to one line", st0.chip === "2 个子代理" && st0.open === "false" && st0.kids.length === 0 && st0.more.length === 0, JSON.stringify(st0));
+
+  appendFileSync(sub2, cu("t3", Date.now(), "Also cover the 404 path", "/w/demo"));
+  const st1 = await waitFor(`(() => { const s = ${state}; return s && s.open === 'true' ? s : null; })()`, 8_000, "working kid").catch(() => null);
+  report("[tree] a working sub-agent unfolds its family and only it is listed",
+    !!st1 && st1.chip === "2 个子代理 · 1 工作中" && JSON.stringify(st1.kids) === '["claude:agent-sub2"]' && st1.more[0] === "显示 1 个空闲子代理" && st1.group === "工作中", JSON.stringify(st1));
+  const geo = await cdp.eval(`(() => { const fam = ${famOf}, pr = fam.querySelector(':scope > .row .ricon').getBoundingClientRect(), kr = fam.querySelector('.kids .ricon').getBoundingClientRect();
+    const line = getComputedStyle(fam.querySelector('.kids > .node > .row'), '::after'); return { indent: Math.round(kr.left - pr.left), elbow: line.borderLeftWidth !== '0px' && line.borderBottomWidth !== '0px' }; })()`);
+  report("[tree] children are indented under the parent with tree lines", geo.indent >= 20 && geo.elbow, JSON.stringify(geo));
   await scheme("dark");
   await sleep(300);
   await shot("tree-dark.png");
@@ -475,6 +468,32 @@ async function runTree() {
   await sleep(300);
   await shot("tree-light.png");
   await scheme(null);
+
+  await cdp.eval(`${famOf}.querySelector('.kids-more[data-act="more"]').click()`);
+  const st2 = await waitFor(`(() => { const s = ${state}; return s && s.kids.length === 2 ? s : null; })()`, 3_000, "load idle").catch(() => null);
+  const want = (await apiJson(api, "/v1/sessions?limit=500")).filter((x) => x.parent === "claude:sess-1").map((x) => x.key).sort();
+  report("[tree] loading the idle ones lists every child of /v1/sessions, working first",
+    !!st2 && JSON.stringify([...st2.kids].sort()) === JSON.stringify(want) && st2.kids[0] === "claude:agent-sub2" && st2.more.includes("只看工作中"), JSON.stringify({ st2, want }));
+  await cdp.eval(`${famOf}.querySelector('.kids-more[data-act="auto"]').click()`);
+  const st3 = await waitFor(`(() => { const s = ${state}; return s && s.kids.length === 1 ? s : null; })()`, 3_000, "working only").catch(() => null);
+  report('[tree] "只看工作中" goes back to the working ones', !!st3 && st3.kids[0] === "claude:agent-sub2", JSON.stringify(st3));
+
+  const before = await cdp.eval(`document.querySelector('.row.sel')?.dataset.key || ''`);
+  appendFileSync(sub2, ca("t4", Date.now(), [{ type: "text", text: "404 covered." }], "end_turn"));
+  const st4 = await waitFor(`(() => { const s = ${state}; return s && s.open === 'false' && s.kids.length === 0 ? s : null; })()`, 8_000, "refold").catch(() => null);
+  report("[tree] when the last sub-agent stops, the family folds again", !!st4 && st4.chip === "2 个子代理", JSON.stringify(st4));
+  await shot("tree-folded.png");
+  await cdp.eval(`${famOf}.querySelector('.kid-tog').click()`);
+  const st5 = await waitFor(`(() => { const s = ${state}; return s && s.kids.length === 2 ? s : null; })()`, 3_000, "unfold").catch(() => null);
+  const after = await cdp.eval(`document.querySelector('.row.sel')?.dataset.key || ''`);
+  report("[tree] the header unfolds an idle family without opening the parent", !!st5 && st5.open === "true" && st5.more.includes("收起") && after === before, JSON.stringify({ st5, before, after }));
+
+  await click('.row[data-key="claude:agent-sub1"]');
+  const link = await waitFor(`document.querySelector('#sh-meta .parent-link')?.textContent`, 5_000, "parent link").catch(() => "");
+  report("[tree] a sub-agent's header names its parent", String(link).includes("网关新增 /demo 演示页"), String(link).trim());
+  await cdp.eval(`${famOf}.querySelector('.kid-tog').click()`);
+  const st6 = await waitFor(`(() => { const s = ${state}; return s && s.open === 'false' ? s : null; })()`, 3_000, "fold with selection").catch(() => null);
+  report("[tree] the open sub-agent stays listed when its family folds", !!st6 && JSON.stringify(st6.kids) === '["claude:agent-sub1"]' && st6.more[0] === "显示其余 1 个子代理", JSON.stringify(st6));
   await click("#sh-meta .parent-link");
   const opened = await waitFor(`document.querySelector('.row.sel')?.dataset.key === 'claude:sess-1'`, 5_000, "open parent").catch(() => false);
   report("[tree] the parent link opens the parent", !!opened);
