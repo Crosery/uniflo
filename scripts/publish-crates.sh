@@ -12,13 +12,15 @@ if [[ "${1:-}" == "--dry-run" ]]; then
   printf "==> Running publish in dry-run mode\n"
 fi
 
+# uniflo-client goes after uniflo-gateway: its dev-dependencies (core, adapters, gateway) keep their
+# versions in the published manifest, so cargo must find them on crates.io first.
 CRATES=(
   "uniflo-schema"
-  "uniflo-client"
   "uniflo-core"
   "uniflo-adapters"
   "uniflo-search"
   "uniflo-gateway"
+  "uniflo-client"
   "uniflo"
 )
 
