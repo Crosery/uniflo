@@ -886,6 +886,164 @@ async function runReadOnly() {
   report("[read-only] no page errors", cdp.errors.length === 0, cdp.errors.slice(0, 3).join(" | "));
 }
 
+// ?redact is for screen recording: no session title or working directory is readable on any view.
+async function runRedact() {
+  const list = await apiJson(api, "/v1/sessions?limit=500");
+  const titles = [...new Set(list.map((s) => s.title).filter((t) => t && t.length >= 4))];
+  const dirs = [...new Set(list.map((s) => s.cwd).filter(Boolean))];
+  // a directory named like a harness (/w/claude) would flag the harness tag, which is not private
+  const harnesses = new Set(list.map((s) => s.harness));
+  const bases = [...new Set(dirs.map((d) => d.split("/").filter(Boolean).pop()))].filter((b) => !harnesses.has(b));
+  const leaksOnPage = `((titles, dirs, bases) => {
+    bases = new Set(bases);
+    const out = new Set();
+    const walk = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+    for (let n; (n = walk.nextNode()); ) {
+      const t = n.textContent.trim(), el = n.parentElement;
+      if (!t || !el.getClientRects().length) continue;
+      if (!titles.some((x) => t.includes(x)) && !dirs.some((d) => t.includes(d)) && !bases.has(t)) continue;
+      let blurred = false;
+      for (let e = el; e && !blurred; e = e.parentElement) blurred = getComputedStyle(e).filter.includes('blur');
+      if (!blurred) out.add(el.tagName.toLowerCase() + (el.className ? '.' + String(el.className).trim().split(/\\s+/).join('.') : '') + ' in #' + (el.closest('[id]')?.id || 'body'));
+    }
+    return [...out];
+  })(${JSON.stringify(titles)}, ${JSON.stringify(dirs)}, ${JSON.stringify(bases)})`;
+  const views = [
+    ["sessions", `select=${enc(list[0].key)}`, "#timeline [data-id]"],
+    ["search home", "view=search", "#h-sessions .hrow"],
+    ["search hits", `view=search&sq=${enc(SEARCH_WORD)}`, ".hit[data-event]"],
+    ["manage", "view=manage", "#m-table tr[data-key]"],
+    ["usage by project", "view=usage&group=project", "#u-table tbody tr"],
+    ["usage by directory", "view=usage&group=dir", "#u-table tbody tr"],
+    ["insights", "view=insights", "#i-ranks li"],
+  ];
+  const leaks = [];
+  for (const [name, q, ready] of views) {
+    await load(`${api}/demo?token=${TOKEN}&redact&${q}`);
+    await waitFor(`!!document.querySelector(${JSON.stringify(ready)})`, 10_000, name);
+    await sleep(300);
+    const bad = await cdp.eval(leaksOnPage);
+    if (bad.length) leaks.push(`${name}: ${bad.join(", ")}`);
+    await shot(`redact-${name.replace(/ /g, "-")}.png`);
+  }
+  report("[redact] session titles and directories are blurred on every view", titles.length > 0 && leaks.length === 0, leaks.join(" | ") || `${views.length} views, ${titles.length} titles, ${dirs.length} dirs`);
+  report("[redact] no page errors", cdp.errors.length === 0, cdp.errors.slice(0, 3).join(" | "));
+}
+
+// Console chrome added with the redesign: inspector glide, command palette, diagnostics drawer, theme
+// switch, insights scope filters and detail card, whole-row selection in manage.
+async function runDesign() {
+  const key = "claude:proj-0", dir = join(SHOTS, "visual");
+  mkdirSync(dir, { recursive: true });
+  await viewport(1480, 920);
+  await scheme("dark");
+  await load(`${api}/demo?token=${TOKEN}&select=${enc(key)}`);
+  await waitFor(`document.querySelectorAll('#timeline [data-id]').length > 3 && !!document.querySelector('#insp-toggle')`, 8_000, "detail");
+  const docked = await cdp.eval(`getComputedStyle(document.querySelector('#insp')).display !== 'none' && !document.querySelector('#app').classList.contains('no-insp')`);
+  await click("#insp-toggle");
+  await sleep(120);
+  const mid = await cdp.eval(`({ moving: document.querySelector('#app').classList.contains('insp-moving'), anims: document.getAnimations().filter((a) => a.playState === 'running' && a.effect?.getKeyframes().some((k) => k.transform)).length })`);
+  await sleep(500);
+  const closed = await cdp.eval(`({ hidden: getComputedStyle(document.querySelector('#insp')).display === 'none', settled: !document.querySelector('#app').classList.contains('insp-moving'), pressed: document.querySelector('#insp-toggle').getAttribute('aria-expanded') })`);
+  await click("#insp-toggle");
+  await sleep(650);
+  const reopened = await cdp.eval(`({ shown: getComputedStyle(document.querySelector('#insp')).display !== 'none', w: Math.round(document.querySelector('#insp').getBoundingClientRect().width), thread: document.querySelector('#thread').style.width })`);
+  report("[design] inspector glides closed and open with transform animations, then settles",
+    docked && mid.moving && mid.anims >= 2 && closed.hidden && closed.settled && closed.pressed === "false" && reopened.shown && reopened.w === 312 && reopened.thread === "",
+    JSON.stringify({ docked, mid, closed, reopened }));
+  // ⌘K opens the palette; typing filters; Enter runs the first match.
+  await cdp.eval(`(document.activeElement || document.body).dispatchEvent(new KeyboardEvent('keydown', { key: 'k', metaKey: true, bubbles: true })); true`);
+  const pal = await waitFor(`!document.querySelector('#palette').hidden && document.activeElement?.id === 'pal-q' && document.querySelectorAll('#pal-list .pal-item').length`, 3_000, "palette").catch(() => 0);
+  await cdp.eval(`const q = document.querySelector('#pal-q'); q.value = '用量'; q.dispatchEvent(new Event('input')); true`);
+  await sleep(100);
+  await shot(join("visual", "design-palette-1480-dark.png"));
+  await cdp.eval(`document.querySelector('#pal-q').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); true`);
+  const went = await waitFor(`document.querySelector('#palette').hidden && location.search.includes('view=usage') && !document.querySelector('#v-usage').hidden`, 3_000, "palette run").catch(() => false);
+  report("[design] ⌘K palette lists views, actions and sessions; Enter runs the match", pal > 5 && !!went, `${pal} items`);
+  // Connection pill opens the diagnostics drawer with the self-check; Esc closes it.
+  await click("#conn");
+  const drawer = await waitFor(`document.querySelector('#diag').classList.contains('in') && !document.querySelector('#scrim').hidden && document.querySelectorAll('#diag [data-check]').length`, 3_000, "drawer").catch(() => 0);
+  await sleep(300);
+  await shot(join("visual", "design-diag-1480-dark.png"));
+  await cdp.eval(`(document.activeElement || document.body).dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); true`);
+  const shut = await waitFor(`!document.querySelector('#diag').classList.contains('in') && document.querySelector('#scrim').hidden && document.querySelector('#diag').inert`, 3_000, "drawer closed").catch(() => false);
+  report("[design] connection pill opens the diagnostics drawer; Esc closes it", drawer >= 10 && !!shut, `${drawer} checks`);
+  // Theme: system → light → dark → system, stored across reloads.
+  const seq = [];
+  for (let i = 0; i < 3; i++) { await click("#theme"); seq.push(await cdp.eval(`(document.documentElement.dataset.scheme || 'auto') + ':' + getComputedStyle(document.body).backgroundColor`)); }
+  await click("#theme");
+  await cdp.send("Page.reload");
+  await waitFor(`document.readyState === 'complete'`, 5_000, "reload");
+  const kept = await cdp.eval(`document.documentElement.dataset.scheme || 'auto'`);
+  await click("#theme"); await click("#theme");
+  report("[design] theme button cycles system → light → dark and survives a reload",
+    seq[0].startsWith("light:rgb(255, 255, 255)") && seq[1].startsWith("dark:rgb(15, 15, 17)") && seq[2].startsWith("auto:") && kept === "light", `${seq.join(" | ")} · after reload ${kept}`);
+  // Insights: a ranked harness scopes every card; the busiest day opens the detail card.
+  await load(`${api}/demo?token=${TOKEN}&view=insights`);
+  await waitFor(`document.querySelectorAll('#i-heat rect[data-day]').length > 300 && document.querySelectorAll('#i-ranks li').length > 2`, 10_000, "insights");
+  const since = await cdp.eval(`document.querySelector('#v-insights').dataset.since`), tz = await cdp.eval(`Intl.DateTimeFormat().resolvedOptions().timeZone`);
+  await click('#i-ranks [data-dim="harness"] li[data-key="claude"]');
+  await waitFor(`location.search.includes('ih=claude') && !!document.querySelector('#i-ranks [data-dim="harness"] li.on[data-key="claude"]')`, 5_000, "rank filter");
+  await sleep(300);
+  const want = await apiJson(api, `/v1/usage?group_by=day&since=${since}&tz=${enc(tz)}&q=${enc("h:claude")}`);
+  const heat = await cdp.eval(`[...document.querySelectorAll('#i-heat rect[data-day]')].map((n) => [n.dataset.day, Number(n.dataset.v)])`);
+  const m = new Map(want.rows.map((r) => [r.key, r.sessions]));
+  const bad = heat.filter(([k, v]) => (m.get(k) || 0) !== v).map(([k]) => k);
+  const scoped = await cdp.eval(`({ combo: document.querySelector('#i-h').value, reset: !document.querySelector('#i-reset').hidden, dim: document.querySelectorAll('#i-ranks [data-dim="harness"] li.dim').length })`);
+  report("[design] clicking a ranked harness scopes the heatmap to it (equals q=h:claude)", !bad.length && scoped.combo === "claude" && scoped.reset && scoped.dim > 0, bad.slice(0, 4).join(" ") || JSON.stringify(scoped));
+  await click("#i-reset");
+  await waitFor(`!location.search.includes('ih=') && document.querySelector('#i-reset').hidden`, 5_000, "reset");
+  await click("[data-pop-day]");
+  const day = await cdp.eval(`document.querySelector('[data-pop-day]').dataset.popDay`);
+  const card = await waitFor(`!document.querySelector('#i-pop').hidden && document.querySelector('#i-pop .pop-row') && document.querySelector('#i-pop h3').textContent`, 5_000, "day card").catch(() => "");
+  const dayRow = (await apiJson(api, `/v1/usage?group_by=day&since=${since}&tz=${enc(tz)}`)).rows.find((r) => r.key === day);
+  const kpiSessions = await cdp.eval(`document.querySelector('#i-pop .pop-kpis > div b')?.textContent`);
+  await sleep(200);
+  await shot(join("visual", "design-daycard-1480-dark.png"));
+  await cdp.eval(`(document.activeElement || document.body).dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true })); true`);
+  const prev = await waitFor(`document.querySelector('#i-pop h3')?.textContent !== ${JSON.stringify(card)} && document.querySelector('#i-pop h3')?.textContent`, 3_000, "arrow").catch(() => "");
+  report("[design] busiest day opens a detail card matching group_by=day; arrows move to the next cell",
+    card.startsWith(day) && kpiSessions === String(dayRow?.sessions) && prev.startsWith(new Date(new Date(day + "T00:00:00").getTime() - 86400_000).toLocaleDateString("sv")), `${card} · ${kpiSessions} · → ${prev}`);
+  await cdp.eval(`(document.activeElement || document.body).dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); true`);
+  const slotKey = await cdp.eval(`[...document.querySelectorAll('#i-punch rect[data-cell]')].find((n) => Number(n.dataset.v) > 0)?.dataset.cell`);
+  await cdp.eval(`document.querySelector('#i-punch rect[data-cell="${slotKey}"]').dispatchEvent(new MouseEvent("click", { bubbles: true })); true`);
+  const slot = await waitFor(`!document.querySelector('#i-pop').hidden && document.querySelector('#i-pop .pop-kpis .on b')?.textContent`, 3_000, "slot card").catch(() => "");
+  const slotV = await cdp.eval(`Number(document.querySelector('#i-punch rect[data-cell="${slotKey}"]').dataset.v)`);
+  await click("#i-pop [data-pop-close]");
+  const gone = await cdp.eval(`document.querySelector('#i-pop').hidden && !document.querySelector('#i-punch rect.sel')`);
+  report("[design] weekday × hour cell opens its slot card; close button dismisses it", slot === String(slotV) && gone, `${slotKey} ${slot}`);
+  // Manage: clicking anywhere on a row toggles it; the bulk bar follows the selection.
+  await load(`${api}/demo?token=${TOKEN}&view=manage&mq=${enc("in:/w")}`);
+  await waitFor(`document.querySelectorAll('#m-table tbody tr[data-eligible="true"]').length > 1`, 10_000, "manage rows");
+  const before = await cdp.eval(`document.querySelector('#m-selbar').hidden`);
+  await cdp.eval(`document.querySelector('#m-table tbody tr[data-eligible="true"] td[data-k=bytes]').click(); true`);
+  const after = await cdp.eval(`({ picked: document.querySelector('#m-table tbody tr[data-eligible="true"] .cb').checked, bar: !document.querySelector('#m-selbar').hidden, info: document.querySelector('#m-selinfo').textContent })`);
+  await sleep(250);
+  await shot(join("visual", "design-bulkbar-1480-dark.png"));
+  await click("#m-clear2");
+  const cleared = await cdp.eval(`document.querySelector('#m-selbar').hidden && !document.querySelector('#m-table .cb:checked')`);
+  report("[design] manage rows toggle on click and the bulk bar appears only with a selection", before && after.picked && after.bar && cleared, after.info);
+  // Mid width: the inspector is a sheet under the header, closed by default, dismissed by the scrim.
+  await viewport(1000, 800);
+  await load(`${api}/demo?token=${TOKEN}&select=${enc(key)}`);
+  await waitFor(`document.querySelectorAll('#timeline [data-id]').length > 3`, 8_000, "mid detail");
+  const start = await cdp.eval(`getComputedStyle(document.querySelector('#insp')).display`);
+  await click("#insp-toggle");
+  await sleep(450);
+  const sheet = await cdp.eval(`({ pos: getComputedStyle(document.querySelector('#insp')).position, top: Math.round(document.querySelector('#insp').getBoundingClientRect().top), head: Math.round(document.querySelector('#detail-head').getBoundingClientRect().bottom), scrim: getComputedStyle(document.querySelector('#insp-scrim')).display })`);
+  await shot(join("visual", "design-sheet-1000-dark.png"));
+  const audit = await cdp.eval(`__e2e.audit('#app')`);
+  await click("#insp-scrim");
+  await sleep(400);
+  const back = await cdp.eval(`getComputedStyle(document.querySelector('#insp')).display`);
+  report("[design] at 1000 px the inspector is a sheet below the header, closed by default, dismissed by the scrim",
+    start === "none" && sheet.pos === "fixed" && sheet.top === sheet.head + 8 && sheet.scrim === "block" && back === "none" && !audit.overflow.length && !audit.overlap.length && !audit.contrast.length,
+    JSON.stringify({ start, sheet, back, issues: [...audit.overflow, ...audit.overlap, ...audit.contrast].slice(0, 3) }));
+  await viewport(1480, 920);
+  await scheme(null);
+  report("[design] no page errors", cdp.errors.length === 0, cdp.errors.slice(0, 3).join(" | "));
+}
+
 // Every view, wide and narrow, dark and light: screenshots plus overflow / overlap / contrast audits.
 async function runVisual() {
   const dir = join(SHOTS, "visual");
@@ -954,7 +1112,7 @@ const AUDIT = `window.__e2e = (() => {
       const need = fs >= 24 || (fs >= 18.66 && bold) ? 3 : 4.5;
       if (c < need - 0.005) out.contrast.push(desc(el) + ' ' + c.toFixed(2) + ' "' + el.textContent.trim().slice(0, 16) + '"');
     }
-    for (const box of document.querySelectorAll('.top, ' + ['.toolbar', '.page-h', '.kpis', '.sh-actions', '.sh-top', '.selbar', '.r1', '.r2', '.legend', '.sform'].map((s) => rootSel + ' ' + s).join(', '))) {
+    for (const box of document.querySelectorAll('.top, ' + ['.toolbar', '.page-h', '.kpi-grid', '.ch-title', '.ch-meta', '.ch-actions', '.bulkbar', '.row-main', '.row-meta', '.row-side', '.legend', '.big-search', '.hint-row', '.stat-strip', '.card-h', '.h-actions'].map((s) => rootSel + ' ' + s).join(', '))) {
       const kids = [...box.children].map((k) => [k, k.getBoundingClientRect()]).filter(([k, r]) => r.width && r.height && getComputedStyle(k).position !== 'absolute');
       for (let i = 0; i < kids.length; i++) for (let j = i + 1; j < kids.length; j++) {
         const [a, ra] = kids[i], [b, rb] = kids[j];
@@ -1046,7 +1204,7 @@ try {
     for (const transport of ["sse", "ws", "ndjson"]) await runTransport(transport);
     await runCrossOrigin();
   }
-  for (const step of [runIdentity, runIcons, runUsage, runUsageControls, runDetail, runFts, runSearchHelp, runInsights, runNotify, runVisual, runManage, runReadOnly]) {
+  for (const step of [runIdentity, runIcons, runUsage, runUsageControls, runDetail, runFts, runSearchHelp, runInsights, runNotify, runVisual, runDesign, runManage, runReadOnly, runRedact]) {
     if (only.length && !only.includes(step.name)) continue;
     try { await step(); } catch (e) { report(`${step.name}`, false, String(e.message || e)); }
   }
