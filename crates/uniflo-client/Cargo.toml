@@ -1,0 +1,24 @@
+[package]
+name = "uniflo-client"
+description = "Typed blocking HTTP client for the Uniflo daemon's local gateway"
+version.workspace = true
+edition = "2024"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+keywords = ["uniflo", "agent", "llm", "http-client", "sdk"]
+categories = ["api-bindings", "web-programming::http-client"]
+
+[dependencies]
+uniflo-schema.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+uniflo-core.workspace = true
+uniflo-adapters = { workspace = true, features = ["claude"] }
+uniflo-gateway.workspace = true
+tempfile.workspace = true
+tokio.workspace = true

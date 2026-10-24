@@ -1509,6 +1509,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "uniflo-client"
+version = "0.2.0-beta.3"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "uniflo-adapters",
+ "uniflo-core",
+ "uniflo-gateway",
+ "uniflo-schema",
+]
+
+[[package]]
 name = "uniflo-core"
 version = "0.2.0-beta.3"
 dependencies = [

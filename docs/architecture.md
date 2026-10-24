@@ -183,3 +183,4 @@ agent（Claude Code、Codex…）──stdio JSON-RPC──► uniflo mcp（unif
 - harness 图标：`uniflo-gateway::icons` 从内嵌的演示页里切出 `#harness-icons` 精灵图的 `<symbol>`，提供 `/v1/harnesses/{id}/icon.svg` 并填 `Harness.icon`；图标只有演示页这一份，换图标改页面即可。
 - 网页客户端：`examples/web/index.html` 是参考实现（快照 + `since` 续流、按 id upsert、工具结果并入调用卡片）；`crates/uniflo-gateway/src/index.html` 是内容相同的 cargo 包内副本，由网关编译进 `/demo`，修改时必须同步。
 - 嵌入式使用：直接依赖 `uniflo-core` + `uniflo-adapters`，`Engine::new(all(), opts)` → `index()` → `run()`，无需网关；不跑 `run()` 时用 `index_usage()` 一次性建好用量账本，再调 `usage_report()` / `session_usage()` / `models()`。`/v1/usage` 的参数解析与会话过滤在 `uniflo_gateway::usage::UsageParams`，CLI 本地模式复用它。要全文检索再加 `uniflo-search`，`Fts::start(engine, FtsOptions::default())` → `search()`。
+- 第三方消费网关：守护进程已经在跑时，不嵌入引擎，直接用 crates.io 上的 `uniflo-client`（只依赖 `uniflo-schema`，`std` 实现的阻塞 HTTP 客户端）对接 REST 与 `/v1/stream.ndjson`；只要类型定义、自己发 HTTP 请求时依赖 `uniflo-schema` 即可。见 `docs/sdk.md`。

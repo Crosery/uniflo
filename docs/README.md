@@ -9,6 +9,7 @@
 | `architecture.md` | 数据流、读取模型、状态机、存活探测、并发模型 |
 | `schema.md` | wire schema v1：`Session` / `Event` / `Envelope`（对外契约） |
 | `api.md` | 网关 REST / SSE / NDJSON / WebSocket 与安全规则 |
+| `sdk.md` | Rust SDK 选型：`uniflo-client`（连接守护进程）、`uniflo-schema`（只要类型）、嵌入式使用（`uniflo-core`/`uniflo-adapters`/`uniflo-search`/`uniflo-gateway`） |
 | `search.md` | 会话搜索语法（fd 式过滤 + fzf 式模糊）与全文检索语法 |
 | `adapters.md` | 已支持的 harness 与新增适配步骤 |
 | `agents.md` | agent 接入：MCP 服务器、Skill、`uniflo setup`、恢复会话、记忆与指令文件、接力上下文 |

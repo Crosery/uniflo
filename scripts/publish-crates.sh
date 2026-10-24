@@ -14,6 +14,7 @@ fi
 
 CRATES=(
   "uniflo-schema"
+  "uniflo-client"
   "uniflo-core"
   "uniflo-adapters"
   "uniflo-search"

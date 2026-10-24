@@ -9,6 +9,7 @@
 | crate | 职责 | 允许依赖 |
 |---|---|---|
 | `uniflo-schema` | wire 类型（`Session`/`Event`/`Envelope`），唯一对外契约 | serde、serde_json |
+| `uniflo-client`（crates.io） | 面向第三方的阻塞 HTTP 客户端，对接运行中守护进程的网关 REST / NDJSON 流；不在依赖链上，独立发布 | schema |
 | `uniflo-core` | 适配器 trait、JSONL 驱动、状态机、引擎、缓存、文件监听、进程探测、用量账本与价格目录（`usage/`、`pricing/`）、自有目录（`paths`）、会话清理与归档（`cleanup/`、`archive/`）、恢复命令 / 记忆文件 / 接力上下文（`resume`、`memory`、`context`）、安装方式识别与预编译包自升级（`install`） | schema |
 | `uniflo-search` | 查询语法解析 + 模糊排序；全文索引 `fts`（SQLite FTS5，读 `Engine`） | schema、core |
 | `uniflo-adapters` | 每个 harness 一个模块，每个模块一个 cargo feature | core、schema |
