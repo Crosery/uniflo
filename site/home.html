@@ -1,0 +1,159 @@
+<body class="home">
+{{icons}}
+{{topbar}}
+<main>
+  <section class="hero">
+    <div class="hero-bg" aria-hidden="true"></div>
+    <div class="hero-copy">
+      <p class="eyebrow"><span class="dot"></span>v{{version}} · 本机守护进程 · MIT</p>
+      <h1>所有 agent 的会话，<br><span class="grad">汇成一条实时流</span></h1>
+      <p class="lede">Uniflo 常驻本机，读取 Claude Code、Codex、Gemini CLI 等 33 个 agent harness 的会话，归一成一套 schema，经 <code>127.0.0.1:7311</code> 推给你的应用、网页和 agent。默认只读，只监听本机。</p>
+      <div class="cta">
+        <a class="btn primary" href="quickstart.html">快速开始<svg viewBox="0 0 24 24" width="16" height="16"><path d="M5 12h14m-6-6 6 6-6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></a>
+        <a class="btn" href="sdk.html">Rust SDK</a>
+        <a class="btn ghost" href="llms.txt">给 agent：llms.txt</a>
+      </div>
+      <div class="install" role="group" aria-label="安装命令">
+        <div class="seg" role="tablist">
+          <button role="tab" aria-selected="true" data-cmd="cargo install uniflo">cargo</button>
+          <button role="tab" aria-selected="false" data-cmd="curl -fsSL https://github.com/Crosery/uniflo/releases/latest/download/install.sh | sh">macOS / Linux</button>
+          <button role="tab" aria-selected="false" data-cmd="irm https://github.com/Crosery/uniflo/releases/latest/download/install.ps1 | iex">Windows</button>
+        </div>
+        <div class="cmd"><span class="prompt">$</span><code id="cmd">cargo install uniflo</code><button class="copy" type="button" data-copy="#cmd" aria-label="复制安装命令">复制</button></div>
+      </div>
+    </div>
+
+    <div class="flow" id="flow" aria-label="数据流：各 agent harness 的会话经 Uniflo 归一后流向网页、桌面端、agent 与你的应用">
+      <canvas id="flow-canvas" aria-hidden="true"></canvas>
+      <ul class="src">
+        <li data-h="claude"><svg><use href="#hi-claude"/></svg>Claude Code</li>
+        <li data-h="codex"><svg><use href="#hi-codex"/></svg>Codex</li>
+        <li data-h="gemini"><svg><use href="#hi-gemini"/></svg>Gemini CLI</li>
+        <li data-h="opencode"><svg><use href="#hi-opencode"/></svg>OpenCode</li>
+        <li data-h="omp"><svg><use href="#hi-omp"/></svg>oh-my-pi</li>
+        <li data-h="cursor"><svg><use href="#hi-cursor"/></svg>Cursor Agent</li>
+        <li data-h="copilot"><svg><use href="#hi-copilot"/></svg>Copilot CLI</li>
+        <li data-h="kimi"><svg><use href="#hi-kimi"/></svg>Kimi Code</li>
+        <li data-h="qwen"><svg><use href="#hi-qwen"/></svg>Qwen Work</li>
+        <li data-h="factory"><svg><use href="#hi-factory"/></svg>Factory Droid</li>
+        <li data-h="grok"><svg><use href="#hi-grok"/></svg>Grok CLI</li>
+        <li data-h="cline"><svg><use href="#hi-cline"/></svg>Cline</li>
+        <li data-h="kiro"><svg><use href="#hi-kiro"/></svg>Kiro CLI</li>
+        <li class="more">+ 另外 20 个</li>
+      </ul>
+      <div class="core" id="core">
+        <div class="core-ring"><img src="assets/logo.svg" alt="" width="34" height="34"></div>
+        <b>uniflo</b>
+        <span>归一 · 两态 · 索引</span>
+      </div>
+      <ul class="dst">
+        <li><b>网页控制台</b><span>/demo · 实时</span></li>
+        <li><b>你的应用</b><span>REST · SSE · WS</span></li>
+        <li><b>Agent</b><span>MCP · Skill</span></li>
+        <li><b>Rust</b><span>uniflo-client</span></li>
+      </ul>
+    </div>
+  </section>
+
+  <section class="band">
+    <div class="band-in stats">
+      <div><b>33</b><span>个 agent harness</span></div>
+      <div><b>10–50<small>ms</small></b><span>文件追加到客户端收到</span></div>
+      <div><b>0.2<small>s</small></b><span>有缓存时冷启动</span></div>
+      <div><b>1</b><span>套 wire schema，只增不改</span></div>
+    </div>
+  </section>
+
+  <section class="sec">
+    <div class="sec-h">
+      <p class="kicker">一套 schema</p>
+      <h2>JSONL、SQLite、整份 JSON，进来的格式各不相同，出去的只有一种</h2>
+      <p>每个会话是一个 <code>Session</code>，每条记录是一个 <code>Event</code>，变化以带全局 <code>seq</code> 的 <code>Envelope</code> 推送，断线可续传。工作与空闲两态由同一套规则推导。</p>
+    </div>
+    <div class="split">
+      <div class="term" aria-label="NDJSON 事件流示例">
+        <div class="term-h"><i></i><i></i><i></i><span>curl -N 127.0.0.1:7311/v1/stream.ndjson</span></div>
+        <pre id="stream" aria-live="off"></pre>
+      </div>
+      <ul class="kinds">
+        <li><i class="k user"></i><div><p><code>user_message</code></p><span>用户输入，harness 注入的标为 synthetic</span></div></li>
+        <li><i class="k asst"></i><div><p><code>assistant_message</code></p><span>模型可见回复</span></div></li>
+        <li><i class="k reas"></i><div><p><code>reasoning</code></p><span>思考内容，加密时为 [redacted]</span></div></li>
+        <li><i class="k tool"></i><div><p><code>tool_call</code> · <code>tool_result</code></p><span>按 call_id 配对，带 is_error</span></div></li>
+        <li><i class="k turn"></i><div><p><code>turn_start</code> · <code>turn_end</code></p><span>回合边界</span></div></li>
+        <li><i class="k use"></i><div><p><code>usage</code></p><span>每次模型调用的 token 与 API 等价费用</span></div></li>
+      </ul>
+    </div>
+  </section>
+
+  <section class="sec">
+    <div class="sec-h">
+      <p class="kicker">能力</p>
+      <h2>做面板、做 agent、做分析，底层这一层不用再写</h2>
+    </div>
+    <div class="cards">
+      <a class="card" href="api.html"><span class="ic">⇄</span><b>实时网关</b><p>REST、SSE、NDJSON、WebSocket 四种接法，同一份数据；默认只听回环，可选 token。</p></a>
+      <a class="card" href="search.html"><span class="ic">⌕</span><b>搜索与全文检索</b><p>fd 式过滤加 fzf 式模糊：<code>s:work h:claude since:2h</code>；中文词和代码子串直达事件。</p></a>
+      <a class="card" href="api.html#v1usage-参数"><span class="ic">$</span><b>用量与费用</b><p>统一 token 口径，按 harness、模型、项目、日期聚合，未定价的单独计数，不按 0 算。</p></a>
+      <a class="card" href="agents.html"><span class="ic">✦</span><b>agent 直接可用</b><p><code>uniflo mcp</code> 与随二进制分发的 Skill，<code>uniflo setup</code> 一条命令接入本机 harness。</p></a>
+      <a class="card" href="sdk.html"><span class="ic">⧉</span><b>Rust crate</b><p>wire 类型、嵌入式引擎、网关客户端都在 crates.io，可以不跑守护进程直接嵌入。</p></a>
+      <a class="card" href="architecture.html"><span class="ic">⛨</span><b>只读与隐私</b><p>默认不写任何 harness 数据；清理与 setup 两处例外都要确认、可撤销。</p></a>
+    </div>
+  </section>
+
+  <section class="sec">
+    <div class="sec-h">
+      <p class="kicker">接入</p>
+      <h2>四种接法，挑最顺手的</h2>
+    </div>
+    <div class="tabs" data-tabs>
+      <div class="seg" role="tablist">
+        <button role="tab" aria-selected="true" data-tab="t-rest">curl</button>
+        <button role="tab" aria-selected="false" data-tab="t-js">浏览器 / Node</button>
+        <button role="tab" aria-selected="false" data-tab="t-rust">Rust</button>
+        <button role="tab" aria-selected="false" data-tab="t-mcp">Agent（MCP）</button>
+      </div>
+      <div class="code" id="t-rest"><div class="code-h"><span>sh</span><button class="copy" type="button">复制</button></div><pre><code># 正在工作的 Claude 会话
+curl -s '127.0.0.1:7311/v1/sessions?q=s:work%20h:claude' | jq '.[].title'
+# 全文检索，命中直达事件
+curl -s '127.0.0.1:7311/v1/search?q=缓存击穿&amp;limit=5'</code></pre></div>
+      <div class="code" id="t-js" hidden><div class="code-h"><span>js</span><button class="copy" type="button">复制</button></div><pre><code>const es = new EventSource("http://127.0.0.1:7311/v1/stream");
+es.addEventListener("event", (m) =&gt; {
+  const { event } = JSON.parse(m.data);
+  if (event.kind === "tool_call") console.log(event.session, event.name);
+});</code></pre></div>
+      <div class="code" id="t-rust" hidden><div class="code-h"><span>rust</span><button class="copy" type="button">复制</button></div><pre><code>// cargo add uniflo-client
+let client = uniflo_client::Client::local()?;
+for s in client.sessions("s:work", 20)? {
+    println!("{} · {}", s.key, s.title.unwrap_or_default());
+}</code></pre></div>
+      <div class="code" id="t-mcp" hidden><div class="code-h"><span>sh</span><button class="copy" type="button">复制</button></div><pre><code># 检测本机 harness，写入 MCP 条目与 Skill（可撤销）
+uniflo setup
+# agent 里随后可用：uniflo_search、uniflo_session、uniflo_context、uniflo_usage …</code></pre></div>
+    </div>
+  </section>
+
+  <section class="sec agents">
+    <div class="sec-h">
+      <p class="kicker">给 agent 读</p>
+      <h2>每一页都有 Markdown，整站一份 llms-full.txt</h2>
+      <p>agent 不必解析 HTML：<a href="llms.txt">llms.txt</a> 列出全部文档的 Markdown 地址，<a href="llms-full.txt">llms-full.txt</a> 一次给全。文档只有一个来源，就是仓库里的 <code>docs/</code>。</p>
+    </div>
+    <div class="term small"><div class="term-h"><i></i><i></i><i></i><span>llms.txt</span></div><pre><code><span class="c-h"># Uniflo</span>
+<span class="c-q">&gt; Local daemon that normalizes every AI coding agent's sessions …</span>
+
+<span class="c-h">## Docs</span>
+- [快速开始](…/quickstart.md): 安装、启动守护进程、接入 agent
+- [Rust SDK](…/sdk.md): 客户端、嵌入引擎、wire 类型
+- [网关 API](…/api.md): REST、SSE、NDJSON、WebSocket
+- …</code></pre></div>
+  </section>
+</main>
+<footer class="foot">
+  <span>Uniflo v{{version}} · MIT</span>
+  <span class="grow"></span>
+  <a href="quickstart.html">文档</a><a href="https://github.com/Crosery/uniflo">GitHub</a><a href="https://crates.io/crates/uniflo">crates.io</a><a href="llms.txt">llms.txt</a>
+</footer>
+<script src="assets/site.js" defer></script>
+</body>
+</html>
