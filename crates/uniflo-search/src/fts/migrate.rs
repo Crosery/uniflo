@@ -79,13 +79,16 @@ pub fn migrate(
         Ok(tag.as_deref().is_some_and(|t| t.starts_with("uniflo-fts/format1/")))
     })()
     .unwrap_or(false);
+    // Windows cannot delete a file SQLite still has open: close `old` before every `remove_old`.
     if !recognized {
+        drop(old);
         remove_old(&old_path);
         return Ok(None);
     }
     let sessions = match list_newest_first(&old) {
         Ok(s) => s,
         Err(_) => {
+            drop(old);
             remove_old(&old_path);
             return Ok(None);
         }
@@ -114,6 +117,7 @@ pub fn migrate(
             Ok(row) => row,
             Err(e) => {
                 if disk_full(&e) {
+                    drop(old);
                     remove_old(&old_path);
                 }
                 return Err(e);
@@ -124,8 +128,9 @@ pub fn migrate(
             return Ok(Some(MigrationResult { sessions: migrated, reclaimed_bytes: 0, complete: false }));
         }
     }
-    remove_old(&old_path);
-    Ok(Some(MigrationResult { sessions: migrated, reclaimed_bytes: before, complete: true }))
+    drop(old);
+    let reclaimed_bytes = if remove_old(&old_path) { before } else { 0 };
+    Ok(Some(MigrationResult { sessions: migrated, reclaimed_bytes, complete: true }))
 }
 
 fn disk_full(e: &anyhow::Error) -> bool {
@@ -175,11 +180,13 @@ fn write_session(
     })
 }
 
-fn remove_old(path: &Path) {
-    let _ = std::fs::remove_file(path);
+/// Deletes the v1 file and its `-wal` / `-shm`; true when the main file is gone.
+fn remove_old(path: &Path) -> bool {
+    let gone = std::fs::remove_file(path).is_ok() || !path.exists();
     for p in store::wal_paths(path) {
         let _ = std::fs::remove_file(p);
     }
+    gone
 }
 
 /// Every v1 session, newest first by the best timestamp available without re-reading sources:
