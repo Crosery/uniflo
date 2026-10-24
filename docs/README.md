@@ -20,7 +20,7 @@
 | `conventions/GIT.md` | 分支、合并、推送与授权边界 |
 | `conventions/DOCUMENTATION.md` | 文档放哪、怎么写、状态词表、同步规则 |
 | `conventions/TESTING.md` | 验收标准、证据分级、完成条件 |
-| `decisions/` | 已接受决策（`ADR-NNNN-中文标题.md`，模板 `decisions/ADR-0000-模板.md`） |
+| `decisions/` | 决策记录（`ADR-NNNN-中文标题.md`，模板 `decisions/ADR-0000-模板.md`）；`accepted` 已接受，`proposed` 待定（如 ADR-0011 全文索引紧凑格式） |
 | `comet/` | comet Native 流程产物（需求、规格、归档），由 `/comet` 维护，不手改 |
 
 过程记录与证据不放这里：`notes/YYYY-MM-DD-worklog.md` 记每天做了什么，`notes/evidence/` 放日志、截图等证据。
