@@ -659,6 +659,13 @@ fn decode(v: &Value, pos: usize, idx: usize, ev: &mut EventD, st: &mut State) {
         | "tool-call-chunks"
         | "tool/code-dispatch"
         | "tool/code-dispatch-start"
+        | "tool/ptc-dispatch"
+        | "tool/ptc-dispatch-start"
+        | "tool-workflow/run-start"
+        | "tool-workflow/run-end"
+        | "job/registered"
+        | "job/settled"
+        | "session-log-deepseek/delivery-accepted"
         | "llm/retry"
         | "llm/retry-started"
         | "compaction/start"
@@ -1048,6 +1055,44 @@ mod tests {
         let earlier = a.history(&p, "s1", &HistoryQuery { before: page[0].pos, limit: 4 }).unwrap();
         assert!(earlier.iter().all(|e| e.pos < page[0].pos));
         assert!(earlier.iter().any(|e| e.id == "u9"), "{:?}", earlier.iter().map(|e| &e.id).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn job_dispatch_and_delivery_records_are_ignored() {
+        let fx = Fixture::new();
+        let a = dsh(&fx);
+        let call = json!({"callId":"c1","rootCallId":"c1"});
+        let sub = json!({"name":"Bash","arguments":{"command":"ls"},"content":[],"isError":false,"parentCallId":"c1","rootCallId":"c1","subCallId":"s1"});
+        let p = session(
+            &fx,
+            "session.jsonl.zstd",
+            &frames(&[
+                header("s1"),
+                rec(
+                    "job/registered",
+                    2,
+                    json!({"jobId":"j1","kind":"bash","label":"x","owner":"o","startedAt":1,"toolCall":call}),
+                ),
+                rec("tool/ptc-dispatch-start", 3, sub.clone()),
+                rec("tool/ptc-dispatch", 4, sub),
+                rec(
+                    "job/settled",
+                    5,
+                    json!({"jobId":"j1","status":"done","cause":"exit","detail":"","finishedAt":2,"toolCall":call}),
+                ),
+                rec("tool-workflow/run-start", 6, json!({"name":"w","runId":"r1"})),
+                rec("tool-workflow/run-end", 7, json!({"runId":"r1","stopReason":"done"})),
+                rec(
+                    "session-log-deepseek/delivery-accepted",
+                    8,
+                    json!({"sessionId":"s1","sessionFormatVersion":4,"throughSeq":7}),
+                ),
+            ]),
+        );
+        let r = fx.index(&a, &p);
+        assert!(r.unknown.is_empty(), "{:?}", r.unknown);
+        assert_eq!(r.bad_lines, 0);
+        assert!(r.events.is_empty(), "{:?}", kinds(&r.events));
     }
 
     #[test]

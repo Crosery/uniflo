@@ -238,6 +238,8 @@ fn response_item(p: &Value, t: i64, cx: &mut Cx<'_, State>) {
             Body::System { subtype: "agent_message".into(), text: text_of(p.get("content").unwrap_or(&Value::Null)) }
         }
         "compaction" => Body::System { subtype: "compact".into(), text: String::new() },
+        // a git snapshot of the worktree that `/undo` restores; no transcript content
+        "ghost_snapshot" => return,
         other => {
             cx.unknown(format!("response_item={other}"));
             return;
@@ -473,6 +475,23 @@ mod tests {
         assert!(matches!(&usage[0].body, Body::Usage(u)
             if (u.input, u.cache_read, u.output, u.reasoning) == (60, 40, 10, 4) && u.model.as_deref() == Some("gpt-y")));
         assert!(r.unknown.is_empty(), "{:?}", r.unknown);
+    }
+
+    #[test]
+    fn ghost_snapshot_is_ignored() {
+        let fx = Fixture::new();
+        let a = adapter(&fx);
+        let mut s = l("session_meta", json!({"id":ID,"cwd":"/r"}));
+        s += &l(
+            "response_item",
+            json!({"type":"ghost_snapshot","ghost_commit":{"id":"g1","parent":null,
+                "preexisting_untracked_files":["a.txt"],"preexisting_untracked_dirs":[]}}),
+        );
+        let p = fx.write(&format!("rollout-2026-10-02T18-11-56-{ID}.jsonl"), &s);
+        let r = fx.index(&a, &p);
+        assert!(r.unknown.is_empty(), "{:?}", r.unknown);
+        assert_eq!(r.bad_lines, 0);
+        assert!(r.events.is_empty(), "{:?}", r.events);
     }
 
     #[test]

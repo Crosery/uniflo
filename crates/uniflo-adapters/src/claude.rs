@@ -70,6 +70,9 @@ const IGNORED: &[&str] = &[
     "resend-fork-notice",
     "fork-context-ref",
     "agent-setting",
+    "api-request",
+    "api-request-blob",
+    "api-request-shape",
 ];
 
 /// Leading markers of user-role text that the harness injected rather than a human typed.
@@ -503,6 +506,14 @@ mod tests {
             json!({"type":"assistant","uuid":"a","isApiErrorMessage":true,"message":{"model":"<synthetic>","content":[{"type":"text","text":"API Error: 529"}],"stop_reason":"stop_sequence"}}),
         );
         s += &line(json!({"type":"brand-new-thing"}));
+        // Request snapshots (newer builds) duplicate what the transcript already carries.
+        s += &line(json!({"type":"api-request","id":"r1","sessionId":"s3","params":{"model":"m"},"tail":["h1"]}));
+        s += &line(
+            json!({"type":"api-request-blob","hash":"h1","sessionId":"s3","message":{"role":"user","content":"x"}}),
+        );
+        s += &line(
+            json!({"type":"api-request-shape","sessionId":"s3","shapeHash":"sh","shape":{"system":[],"tools":[]}}),
+        );
         let p = fx.write("-w/s3.jsonl", &s);
         let r = fx.index(&a, &p);
         assert!(matches!(&r.events[0].body, Body::System { subtype, .. } if subtype == "api_error"));
