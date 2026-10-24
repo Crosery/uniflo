@@ -930,6 +930,82 @@ async function runRedact() {
   report("[redact] no page errors", cdp.errors.length === 0, cdp.errors.slice(0, 3).join(" | "));
 }
 
+// API explorer: every route in docs/api.md is listed; read routes answer from the daemon and render as
+// a tree whose raw JSON equals a direct request; write routes are never sent; the live stream shows
+// envelopes; the rail's bottom buttons carry text labels.
+async function runApi() {
+  await viewport(1480, 920);
+  await scheme("dark");
+  await load(`${api}/demo?token=${TOKEN}&view=api`);
+  await waitFor(`document.querySelectorAll('#a-list [data-ep]').length > 20`, 8_000, "api list");
+  const paths = await cdp.eval(`[...document.querySelectorAll('#a-list [data-ep] .pth')].map((n) => n.textContent)`);
+  const doc = readFileSync(join(ROOT, "docs/api.md"), "utf8");
+  const routes = [...new Set([...doc.matchAll(/^\| `(?:GET|POST|DELETE) (\/[^`?\s]*)/gm)].map((m) => m[1]))].filter((r) => r !== "/demo");
+  const missing = routes.filter((r) => !paths.includes(r));
+  report("[api] every route in docs/api.md is listed", routes.length > 20 && missing.length === 0, missing.join(", ") || `${routes.length} documented, ${paths.length} listed`);
+  const labels = await cdp.eval(`["#open-palette", "#notify", "#theme"].map((s) => document.querySelector(s + " > span")?.textContent || "")`);
+  report("[api] rail buttons carry text labels", labels.join() === "命令,通知,主题", labels.join());
+  const send = async (ep, set = {}) => {
+    await click(`#a-list [data-ep="${ep}"]`);
+    await waitFor(`!!document.querySelector('#a-req [data-p], #a-req .a-noparam') && document.querySelector('#a-req h2')?.textContent.length > 0`, 4_000, `${ep} form`);
+    for (const [k, v] of Object.entries(set)) {
+      await cdp.eval(`(() => { const i = document.querySelector('#a-req input[data-p="${k}"]'); i.value = ${JSON.stringify(v)}; i.dispatchEvent(new Event("input", { bubbles: true })); return true; })()`);
+    }
+    await click("#a-send");
+    await waitFor(`!!document.querySelector('#a-res .a-st')`, 8_000, `${ep} response`);
+    return cdp.eval(`document.querySelector('#a-res .a-st').textContent`);
+  };
+  const raw = async () => {
+    await click('#a-tab [data-atab="raw"]');
+    const text = await cdp.eval(`document.querySelector('#a-res pre.a-raw')?.textContent || ""`);
+    await click('#a-tab [data-atab="tree"]');
+    return JSON.parse(text);
+  };
+  let st = await send("health");
+  const tree = await cdp.eval(`document.querySelector('#a-res .jt')?.textContent || ""`);
+  report("[api] health answers 200 and renders as a tree", st.startsWith("200") && tree.includes("version"), st);
+  st = await send("search", { q: SEARCH_WORD });
+  const mine = await raw(), direct = await apiJson(api, `/v1/search?q=${enc(SEARCH_WORD)}`);
+  report("[api] search output equals a direct request", st.startsWith("200") && mine.total === direct.total && JSON.stringify(mine.results?.map((x) => x.session)) === JSON.stringify(direct.results?.map((x) => x.session)), `${st} · total ${mine.total}/${direct.total}`);
+  await sleep(700);
+  await shot("api-search-dark.png");
+  st = await send("events");
+  const url = await cdp.eval(`document.querySelector('#a-url').textContent`);
+  report("[api] path parameters default to a real session and are encoded", st.startsWith("200") && /\/v1\/sessions\/[^/{}]+%3A[^/]+\/events/.test(url), `${st} · ${url.replace(/\?.*/, "")}`);
+  const snips = [];
+  for (const k of ["curl", "js", "rust"]) {
+    await click(`#a-snip [data-snip="${k}"]`);
+    snips.push(await cdp.eval(`document.querySelector('#a-code').textContent`));
+  }
+  report("[api] curl, JavaScript and Rust snippets follow the form", snips[0].startsWith("curl") && snips[1].includes("fetch(") && snips[2].includes("client.events("), snips.map((x) => x.split("\n")[0].slice(0, 40)).join(" | "));
+  const before = await apiJson(api, "/v1/archive");
+  await click('#a-list [data-ep="archive-delete"]');
+  const blocked = await cdp.eval(`!document.querySelector('#a-send') && !!document.querySelector('#a-req .btn[disabled]') && !!document.querySelector('#a-req .notice.warn')`);
+  st = await send("cleanup-plan");
+  const plan = await raw();
+  const after = await apiJson(api, "/v1/archive");
+  report("[api] write routes are shown but not sent; the cleanup plan only plans", blocked && st.startsWith("200") && !!plan.plan_id && after.archives.length === before.archives.length, `${st} · plan ${plan.plan_id ? "ok" : "missing"}`);
+  await click('#a-list [data-ep="sse"]');
+  await click("#a-send");
+  await waitFor(`[...document.querySelectorAll('#a-log summary .mth')].some((n) => n.textContent === "hello")`, 8_000, "sse hello");
+  await click('#a-log details summary');
+  const envTree = await cdp.eval(`document.querySelector('#a-log details[open] .jt')?.textContent || ""`);
+  report("[api] the live stream lists envelopes and expands them", envTree.includes("seq"), envTree.slice(0, 60));
+  await sleep(700);
+  await shot("api-stream-dark.png");
+  await click("#a-send");
+  await scheme("light");
+  await click('#a-list [data-ep="usage"]');
+  await send("usage");
+  await sleep(700);
+  await shot("api-usage-light.png");
+  await cdp.eval(`document.querySelector("#v-api").scrollTop = 0; true`);
+  await sleep(150);
+  await shot("api-form-light.png");
+  await scheme("dark");
+  report("[api] no page errors", cdp.errors.length === 0, cdp.errors.slice(0, 3).join(" | "));
+}
+
 // Console chrome added with the redesign: inspector glide, command palette, diagnostics drawer, theme
 // switch, insights scope filters and detail card, whole-row selection in manage.
 async function runDesign() {
@@ -1054,8 +1130,9 @@ async function runVisual() {
     search: `document.querySelectorAll('.hit').length > 2`,
     manage: `document.querySelectorAll('#m-table tbody tr[data-eligible="true"], #m-table tbody tr[data-eligible="false"]').length > 3`,
     insights: `document.querySelectorAll('#i-heat rect').length > 300 && document.querySelectorAll('#i-ranks li').length > 2`,
+    api: `document.querySelectorAll('#a-list [data-ep]').length > 20 && !!document.querySelector('#a-req .a-params')`,
   };
-  const extra = { sessions: `&select=${enc("claude:proj-0")}`, search: `&sq=${enc("分页逻辑")}`, manage: `&mq=${enc("in:/w")}` };
+  const extra = { api: "&ep=usage", sessions: `&select=${enc("claude:proj-0")}`, search: `&sq=${enc("分页逻辑")}`, manage: `&mq=${enc("in:/w")}` };
   const issues = { overflow: [], overlap: [], contrast: [] };
   let n = 0;
   for (const [w, h, mobile] of [[1480, 920, false], [390, 844, true]]) {
@@ -1075,7 +1152,7 @@ async function runVisual() {
   }
   await viewport(1480, 920);
   await scheme(null);
-  report("[visual] screenshots: 5 views × 1480/390 px × dark/light", n === 20, dir);
+  report("[visual] screenshots: 6 views × 1480/390 px × dark/light", n === 24, dir);
   report("[visual] no horizontal overflow", issues.overflow.length === 0, issues.overflow.slice(0, 5).join(" | "));
   report("[visual] no overlapping elements in bars, toolbars and tiles", issues.overlap.length === 0, issues.overlap.slice(0, 5).join(" | "));
   report("[visual] text contrast meets WCAG AA", issues.contrast.length === 0, issues.contrast.slice(0, 6).join(" | "));
@@ -1204,7 +1281,7 @@ try {
     for (const transport of ["sse", "ws", "ndjson"]) await runTransport(transport);
     await runCrossOrigin();
   }
-  for (const step of [runIdentity, runIcons, runUsage, runUsageControls, runDetail, runFts, runSearchHelp, runInsights, runNotify, runVisual, runDesign, runManage, runReadOnly, runRedact]) {
+  for (const step of [runIdentity, runIcons, runUsage, runUsageControls, runDetail, runFts, runSearchHelp, runInsights, runNotify, runVisual, runDesign, runApi, runManage, runReadOnly, runRedact]) {
     if (only.length && !only.includes(step.name)) continue;
     try { await step(); } catch (e) { report(`${step.name}`, false, String(e.message || e)); }
   }

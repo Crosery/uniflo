@@ -8,10 +8,10 @@
 <!--
   Uniflo gateway demo: one static file, no build step, no external runtime dependencies, works offline.
   Served by the daemon at /demo, or from any loopback origin with ?api=http://127.0.0.1:7311.
-  Views: sessions, usage, search (full text), manage (cleanup + archives), insights.
+  Views: sessions, usage, search (full text), manage (cleanup + archives), insights, api (every route, sent live).
   URL params: api, token, transport=sse|ws|ndjson, select=<session key>, redact (blur transcript text);
   view state: view, q, at, steps · range, from, to, uh, um, up, group, under, sort, asc, stack, unpriced ·
-  sq, sf · mtab, mq · metric, rank. Writes (cleanup, archive delete, open-terminal) send X-Uniflo-Write: 1.
+  sq, sf · mtab, mq · metric, rank · ep. Writes (cleanup, archive delete, open-terminal) send X-Uniflo-Write: 1.
   Design tokens follow OpenCode's theme (alpha text scale, translucent surfaces) and Claude's
   design guidelines (three type sizes, desaturated status colors, skeletons over spinners); every text
   step clears WCAG AA. Chart colors: a fixed CVD-checked categorical order, a one-hue heat ramp.
@@ -259,9 +259,10 @@ input[type=checkbox].cb:disabled { opacity: .35; cursor: not-allowed; }
 .rail-item[aria-selected=true] svg.i { color: var(--accent); }
 .rail-badge { position: absolute; top: 3px; right: 8px; min-width: 16px; height: 16px; padding: 0 4px; border-radius: 999px; background: var(--work); color: light-dark(#fff, #04170d); font-size: 10px; font-weight: 700; line-height: 16px; box-shadow: 0 0 0 2px var(--bg-rail); }
 .rail-gap { flex: 1; }
-.rail-btn { width: 36px; height: 36px; display: grid; place-items: center; border: 0; border-radius: 9px; background: none; color: var(--text-3); transition: background var(--dur), color var(--dur); flex: none; }
+.rail-btn { display: flex; flex-direction: column; align-items: center; gap: 3px; width: 56px; padding: 6px 0 5px; border: 0; border-radius: 10px; background: none; color: var(--text-3); font-size: var(--fs-2xs); font-weight: 500; transition: background var(--dur), color var(--dur); flex: none; }
 .rail-btn:hover { background: var(--hover); color: var(--text); }
 .rail-btn svg.i { width: 18px; height: 18px; }
+@media (max-height: 760px) { .rail-btn > span { display: none; } .rail-btn { width: 40px; padding: 9px 0; } }
 #notify[aria-pressed=true] { color: var(--accent); background: var(--accent-bg); }
 .rail-conn { margin-top: 6px; display: flex; flex-direction: column; align-items: center; gap: 4px; width: 56px; padding: 7px 0; border: 0; border-radius: 10px; background: none; font-size: 10.5px; color: var(--text-3); white-space: nowrap; flex: none; }
 .rail-conn:hover { background: var(--hover); color: var(--text); }
@@ -812,7 +813,97 @@ rect.cell.sel { stroke: var(--accent); stroke-width: 2px; }
 .toast.sticky { pointer-events: auto; display: grid; gap: 8px; }
 .toast.sticky .acts { display: flex; gap: 8px; justify-content: flex-end; }
 
-body.redact .txt, body.redact pre, body.redact .md, body.redact .snip { filter: blur(5px); }
+/* api explorer */
+.a-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.a-head .mono { font-size: var(--fs-xs); color: var(--text-2); padding: 5px 10px; border-radius: var(--r-md); border: 1px solid var(--border-2); background: var(--bg-raised); }
+.a-grid { display: grid; grid-template-columns: 284px minmax(0, 1fr); gap: 18px; align-items: start; }
+.a-nav { position: sticky; top: 12px; max-height: calc(100vh - 96px); display: flex; flex-direction: column; }
+.a-find { padding: 10px; border-bottom: 1px solid var(--border); }
+.a-find .input { width: 100%; }
+.a-list { overflow-y: auto; padding: 2px 6px 10px; }
+.a-gh { margin: 12px 8px 4px; font-size: var(--fs-2xs); font-weight: 600; color: var(--text-3); }
+.a-ep { display: grid; grid-template-columns: 52px minmax(0, 1fr); align-items: center; gap: 1px 8px; width: 100%; padding: 6px 8px; border: 0; border-radius: var(--r-md); background: none; text-align: left; color: var(--text-2); }
+.a-ep:hover { background: var(--hover); color: var(--text); }
+.a-ep[aria-current=true] { background: var(--active); color: var(--text); }
+.a-ep .mth { justify-self: start; }
+.a-ep .pth { font: 11.5px/1.5 var(--font-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.a-ep .nm { grid-column: 2; font-size: var(--fs-2xs); color: var(--text-3); }
+.a-none { margin: 16px 8px; font-size: var(--fs-xs); color: var(--text-3); }
+.mth.m-get { color: var(--work); background: var(--work-bg); }
+.mth.m-post { color: var(--warn); background: var(--warn-bg); }
+.mth.m-delete { color: var(--danger); background: var(--danger-bg); }
+.a-main { display: flex; flex-direction: column; gap: 18px; min-width: 0; }
+.a-main .card-h code { font-size: .92em; padding: .1em .4em; border-radius: 4px; background: var(--hover); border: 1px solid var(--border); }
+.btn kbd { margin-left: 4px; padding: 0 4px; border-radius: 4px; font-size: 10.5px; line-height: 16px; background: rgba(0, 0, 0, .22); color: inherit; }
+.a-line { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.a-line .mth { font-size: 11px; padding: 4px 7px; }
+.a-path { font: 600 var(--fs-md) var(--font-mono); letter-spacing: -.01em; overflow-wrap: anywhere; }
+.a-path i { font-style: normal; color: var(--accent); }
+.a-desc { margin: 8px 0 0; color: var(--text-3); font-size: var(--fs-sm); line-height: 1.6; }
+#a-req .notice { margin-top: 12px; }
+.a-noparam { margin: 14px 0 0; font-size: var(--fs-sm); color: var(--text-3); }
+.a-params { display: grid; grid-template-columns: 148px minmax(0, 1fr); gap: 12px 16px; margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--border); align-items: start; }
+.a-pn { padding-top: 6px; font: 12.5px var(--font-mono); color: var(--text); overflow-wrap: anywhere; }
+.a-pn .req { margin-left: 6px; font: 600 10px var(--font-sans); color: var(--danger); }
+.a-pn .loc { display: block; margin-top: 3px; font: 11px var(--font-sans); color: var(--text-3); }
+.a-pc { min-width: 0; }
+.a-pc > .input { width: 100%; font-size: 12.5px; }
+.a-pc .hint { margin-top: 4px; font-size: var(--fs-2xs); color: var(--text-3); }
+.a-body { height: auto; min-height: 92px; padding: 8px 10px; line-height: 1.55; resize: vertical; }
+.a-url { display: flex; align-items: center; gap: 8px; margin-top: 16px; padding: 6px 6px 6px 12px; border: 1px solid var(--border-2); border-radius: var(--r-md); background: var(--code-bg); min-width: 0; }
+.a-url .mono { flex: 1; min-width: 0; font-size: 12px; color: var(--text-2); overflow-wrap: anywhere; }
+.a-tok { flex: none; font-size: var(--fs-2xs); color: var(--text-3); }
+.a-snip { margin: 12px 0 0; }
+.a-snip .seg button { font-family: var(--font-sans); }
+.a-snip pre { max-height: 300px; }
+.a-meta { display: flex; align-items: center; gap: 4px 12px; flex-wrap: wrap; font-size: var(--fs-xs); color: var(--text-3); font-variant-numeric: tabular-nums; }
+.a-st { display: inline-flex; align-items: center; gap: 6px; font: 600 11.5px var(--font-mono); padding: 2px 8px; border-radius: 999px; background: var(--work-bg); color: var(--work); }
+.a-st.bad { background: var(--danger-bg); color: var(--danger); }
+.a-st.idle { background: var(--hover); color: var(--text-3); }
+.a-st .dot { width: 6px; height: 6px; background: currentColor; }
+.a-out { border: 1px solid var(--border-2); border-radius: var(--r-lg); background: var(--code-bg); max-height: 72vh; overflow: auto; }
+.a-out pre.a-raw { max-height: none; padding: 12px 14px; font-size: 12px; }
+.a-cut { margin: 0; padding: 8px 14px; font-size: var(--fs-xs); color: var(--warn); border-bottom: 1px solid var(--border); }
+.a-hdr { padding: 12px 14px; grid-template-columns: 180px minmax(0, 1fr); }
+.a-hdr dt { color: var(--text-3); }
+.a-svg { display: grid; place-items: center; padding: 28px; color: var(--text); }
+.a-svg svg { width: 64px; height: 64px; }
+.a-empty { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 40px 20px; text-align: center; color: var(--text-3); }
+.a-empty > svg.i { width: 28px; height: 28px; opacity: .7; }
+.a-empty h3 { margin: 4px 0 0; font-size: var(--fs-base); font-weight: 500; color: var(--text-2); }
+.a-empty p { margin: 0; max-width: 460px; font-size: var(--fs-sm); line-height: 1.6; }
+.jt { padding: 10px 12px 12px; font: 12px/1.75 var(--font-mono); }
+.jt-r { padding-left: 16px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.jt summary { display: flex; align-items: baseline; gap: 6px; min-width: 0; padding: 0 4px; margin-left: -4px; border-radius: 4px; list-style: none; cursor: pointer; }
+.jt summary::-webkit-details-marker { display: none; }
+.jt summary::before { content: ""; flex: none; width: 10px; height: 10px; align-self: center; background: var(--text-3); clip-path: polygon(30% 15%, 80% 50%, 30% 85%); transition: transform var(--dur); }
+.jt details[open] > summary::before { transform: rotate(90deg); }
+.jt summary:hover { background: var(--hover); }
+.jt-kids { margin-left: 8px; padding-left: 10px; border-left: 1px solid var(--border-2); }
+.jt-p { color: var(--text-3); margin-right: 6px; }
+.jt summary .jt-p { margin-right: 0; }
+.jt-kc { flex: none; }
+.jt-i { color: var(--text-3); }
+.jt-c { color: var(--text-3); flex: none; }
+.jt-pv { min-width: 0; color: var(--text-3); opacity: .8; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.jt details[open] > summary > .jt-pv { display: none; }
+.jt-h { margin-left: 8px; font: 11px var(--font-sans); color: var(--text-3); }
+.jt-more { margin: 2px 0 2px 16px; padding: 0 6px; border: 0; border-radius: 4px; background: var(--accent-bg); color: var(--accent); font: 500 11px var(--font-sans); line-height: 20px; }
+.jt-r .jt-more { margin-left: 8px; }
+.a-log > details { border-bottom: 1px solid var(--border); }
+.a-log > details:last-child { border-bottom: 0; }
+.a-log > details > summary { display: grid; grid-template-columns: 70px 64px minmax(0, 1fr) auto; align-items: center; gap: 10px; padding: 6px 12px; list-style: none; cursor: pointer; font-size: 12px; }
+.a-log > details > summary::-webkit-details-marker { display: none; }
+.a-log > details > summary:hover { background: var(--hover); }
+.a-log > details > summary .mth { justify-self: start; }
+.a-lt, .a-lq { color: var(--text-3); font-variant-numeric: tabular-nums; }
+.a-ls { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-2); }
+.a-log .jt { border-top: 1px solid var(--border); background: var(--bg-raised); }
+.a-wait { margin: 0; padding: 28px; text-align: center; font-size: var(--fs-sm); color: var(--text-3); }
+.ts-dropdown .create { padding: 6px 10px; font-size: var(--fs-xs); color: var(--text-2); }
+@media (max-width: 1100px) { .a-grid { grid-template-columns: minmax(0, 1fr); } .a-nav { position: static; max-height: 300px; } }
+@media (max-width: 640px) { .a-params { grid-template-columns: minmax(0, 1fr); gap: 4px; } .a-pn { padding-top: 10px; } }
+body.redact .txt, body.redact pre, body.redact .md, body.redact .snip, body.redact .jt, body.redact .a-ls, body.redact .a-svg { filter: blur(5px); }
 
 @keyframes pulse { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--work) 55%, transparent); } 70%, 100% { box-shadow: 0 0 0 6px transparent; } }
 @keyframes breathe { 50% { opacity: .45; } }
@@ -848,7 +939,7 @@ body.redact .txt, body.redact pre, body.redact .md, body.redact .snip { filter: 
   body > .app, body > .view { grid-column: 1; grid-row: 1; }
   .rail { flex-direction: row; justify-content: space-around; gap: 0; padding: 4px 6px calc(4px + env(safe-area-inset-bottom)); border-right: 0; border-top: 1px solid var(--border); }
   .rail .logo, .rail-gap, #open-palette, #theme, #notify { display: none; }
-  .rail-tabs { flex: 5; flex-direction: row; gap: 0; }
+  .rail-tabs { flex: 6; flex-direction: row; gap: 0; }
   .rail-item, .rail-conn { width: auto; flex: 1; margin: 0; }
   .app, .app.no-insp { grid-template-columns: minmax(0, 1fr); }
   .app .conv { display: none; }
@@ -966,10 +1057,11 @@ SOFTWARE.
     <button class="rail-item" role="tab" data-view="search" aria-controls="v-search" title="检索 (3)"><svg class="i" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>检索</button>
     <button class="rail-item" role="tab" data-view="manage" aria-controls="v-manage" title="管理 (4)"><svg class="i" viewBox="0 0 24 24"><path d="M3 7h18M5 7l1 13h12l1-13M9 7V4h6v3"/></svg>管理</button>
     <button class="rail-item" role="tab" data-view="insights" aria-controls="v-insights" title="洞察 (5)"><svg class="i" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>洞察</button>
+    <button class="rail-item" role="tab" data-view="api" aria-controls="v-api" title="接口 (6)"><svg class="i" viewBox="0 0 24 24"><path d="m8 7-5 5 5 5M16 7l5 5-5 5M13.5 4l-3 16"/></svg>接口</button>
   </div>
   <div class="rail-gap"></div>
-  <button class="rail-btn" id="open-palette" title="命令面板 (⌘K)" aria-label="命令面板"><svg class="i" viewBox="0 0 24 24"><path d="M9 6a3 3 0 1 0-3 3h12a3 3 0 1 0-3-3v12a3 3 0 1 0 3-3H6a3 3 0 1 0 3 3V6Z"/></svg></button>
-  <button class="rail-btn" id="notify" aria-pressed="false" title="回合结束通知：关" aria-label="回合结束通知"><svg class="i" viewBox="0 0 24 24"><path d="M6 8a6 6 0 1 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg></button>
+  <button class="rail-btn" id="open-palette" title="命令面板：跳转视图、打开会话或执行操作 (⌘K)" aria-label="命令面板"><svg class="i" viewBox="0 0 24 24"><path d="M9 6a3 3 0 1 0-3 3h12a3 3 0 1 0-3-3v12a3 3 0 1 0 3-3H6a3 3 0 1 0 3 3V6Z"/></svg><span>命令</span></button>
+  <button class="rail-btn" id="notify" aria-pressed="false" title="回合结束通知：关" aria-label="回合结束通知"><svg class="i" viewBox="0 0 24 24"><path d="M6 8a6 6 0 1 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg><span>通知</span></button>
   <button class="rail-btn" id="theme" title="主题：跟随系统" aria-label="切换主题"></button>
   <button class="rail-conn" id="conn" data-state="idle" title="连接与诊断" aria-controls="diag" aria-expanded="false"><span class="dot"></span><span id="conn-text">未连接</span></button>
 </nav>
@@ -1175,6 +1267,25 @@ SOFTWARE.
       </div>
       <div class="ranks" id="i-ranks"></div>
     </section>
+  </div>
+</section>
+
+<section class="view" id="v-api" role="tabpanel" data-view="api" hidden>
+  <div class="page">
+    <div class="page-h">
+      <div><h1>接口</h1><p>守护进程的全部 REST 与实时流接口。选一个接口、填好参数后发送，直接看本机的真实返回；每个请求都附 curl、JavaScript 与 Rust SDK 写法。字段含义见 <code>docs/api.md</code> 与 <code>docs/schema.md</code>。</p></div>
+      <div class="a-head"><span class="mono" id="a-base" title="请求发往的地址"></span><span class="chip" id="a-auth" hidden>已带 token</span></div>
+    </div>
+    <div class="a-grid">
+      <nav class="card flush a-nav" aria-label="接口列表">
+        <div class="a-find"><input class="input" id="a-q" placeholder="筛选路径或名称…" autocomplete="off" spellcheck="false" aria-label="筛选接口"></div>
+        <div class="a-list" id="a-list"></div>
+      </nav>
+      <div class="a-main">
+        <section class="card" id="a-req" aria-label="请求"></section>
+        <section class="card" id="a-res" aria-label="响应" aria-live="polite"></section>
+      </div>
+    </div>
   </div>
 </section>
 
@@ -1883,6 +1994,8 @@ const I = {
   monitor: '<rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/>',
   pulse: '<path d="M3 12h4l3-8 4 16 3-8h4"/>',
   bell: '<path d="M6 8a6 6 0 1 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/>',
+  bellOff: '<path d="M6 8a6 6 0 1 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/><path d="M3 3l18 18"/>',
+  code: '<path d="m8 7-5 5 5 5M16 7l5 5-5 5M13.5 4l-3 16"/>',
   chat: '<path d="M21 12a8 8 0 0 1-11.6 7.1L4 20.5l1.4-5A8 8 0 1 1 21 12Z"/>',
   chart: '<path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/>',
   grid: '<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>',
@@ -2143,7 +2256,7 @@ function setp(patch, push = false) {
 }
 
 // ---------------------------------------------------------------- views
-const VIEWS = ["sessions", "usage", "search", "manage", "insights"];
+const VIEWS = ["sessions", "usage", "search", "manage", "insights", "api"];
 let view = null, ready = false;
 const viewEnter = {};
 function showView(v, push = false) {
@@ -3047,6 +3160,7 @@ let notifyOn = localStorage.getItem("uniflo.notify") === "1" && "Notification" i
 function renderNotify() {
   const b = $("#notify");
   b.setAttribute("aria-pressed", String(notifyOn));
+  b.innerHTML = icon(notifyOn ? "bell" : "bellOff") + "<span>通知</span>";
   b.title = notifyOn ? "回合结束通知：开（页面在后台时提醒）" : "回合结束通知：关";
 }
 async function toggleNotify() {
@@ -4081,6 +4195,423 @@ function popToUsage(day) {
 }
 viewEnter.insights = loadInsights;
 
+// ---------------------------------------------------------------- api explorer
+// Every route in docs/api.md, sent from this page with its token, so the output is this daemon's real
+// data. Routes that change data or open windows show their request and code only; the cleanup plan
+// is sent, since it only computes a plan.
+const A_GROUPS = [["base", "基础"], ["sessions", "会话"], ["search", "检索"], ["usage", "用量与价格"], ["agent", "Agent 接入"], ["cleanup", "会话清理"], ["stream", "实时流"]];
+const A_KEY = { n: "key", in: "path", t: "session", req: true, h: "会话 key，发送时自动 URL 编码" };
+const A_STREAM = [
+  { n: "since", t: "num", h: "先重放这个 seq 之后仍在重放环里的 Envelope" },
+  { n: "session", t: "session", h: "只要这个会话" },
+  { n: "harness", t: "harness", h: "只要这个 harness" },
+  { n: "types", ph: "session,event,removed", h: "Envelope 类型，逗号分隔；hello、lagged 总会发送" },
+  { n: "kinds", ph: "tool_call,assistant_message", h: "事件 kind，逗号分隔" },
+  { n: "max_text", t: "num", ph: "32768", h: "事件文本截断长度，0 不截断" },
+];
+const rstr = (s) => JSON.stringify(String(s ?? ""));
+function rfields(v, spec) {
+  let out = "";
+  for (const [k, t] of Object.entries(spec)) {
+    const x = v[k];
+    if (x === undefined || x === "") continue;
+    out += `${k}: ${t === "n" ? `Some(${Number(x) || 0})` : t === "list" ? `vec![${x.split(",").map((s) => s.trim()).filter(Boolean).map((s) => `${rstr(s)}.into()`).join(", ")}]` : `Some(${rstr(x)}.into())`}, `;
+  }
+  return out;
+}
+const rstream = (v) => `for env in client.stream(&StreamOptions { ${rfields(v, { since: "n", session: "s", harness: "s", types: "s", kinds: "s", max_text: "n" })}..Default::default() })? {\n    println!("{:?}", env?);\n}`;
+const ENDPOINTS = [
+  { id: "root", g: "base", m: "GET", p: "/", t: "服务信息", d: "名称、版本、schema 版本与端点列表。" },
+  { id: "health", g: "base", m: "GET", p: "/v1/health", t: "健康检查", d: "版本、当前事件序号、会话数、运行中会话数、运行时长、是否有新版本、是否只读。", ret: "Health", rs: () => "client.health()?" },
+  { id: "stats", g: "base", m: "GET", p: "/v1/stats", t: "索引与读取计数", d: "会话与源文件数、坏行、未知事件、读取错误，以及用量索引、更新检查和全文索引的状态。", ret: "Stats" },
+  { id: "harnesses", g: "base", m: "GET", p: "/v1/harnesses", t: "Harness 列表", d: "每个已接入 harness 的会话根目录、会话数、运行中数和图标路径。", ret: "Harness[]", rs: () => "client.harnesses()?" },
+  { id: "icon", g: "base", m: "GET", p: "/v1/harnesses/{id}/icon.svg", t: "Harness 图标", d: "单色 SVG，路径用 currentColor，内联进页面即随主题着色；没有品牌图标的 harness 返回 404。", ret: "image/svg+xml", params: [{ n: "id", in: "path", t: "harness", req: true }] },
+  { id: "sessions", g: "sessions", m: "GET", p: "/v1/sessions", t: "会话列表", d: "给了 q 时按相关度排序，否则按更新时间倒序。", ret: "Session[]",
+    params: [{ n: "q", ph: "h:claude since:7d", h: "会话搜索语法，见 docs/search.md" }, { n: "limit", t: "num", ph: "100" }, { n: "format", t: "enum", o: ["", "ndjson"], h: "ndjson 时每行一个会话" }],
+    rs: (v) => `client.sessions(${rstr(v.q)}, ${Number(v.limit) || 100})?` },
+  { id: "session", g: "sessions", m: "GET", p: "/v1/sessions/{key}", t: "单个会话", d: "一个会话的元数据；未知 key 返回 404。", ret: "Session", params: [A_KEY], rs: (v) => `client.session(${rstr(v.key)})?` },
+  { id: "events", g: "sessions", m: "GET", p: "/v1/sessions/{key}/events", t: "会话事件", d: "按时间正序的一页事件。翻更早一页传 before=next_before；给 around 时取以该事件为中心的窗口。", ret: "EventsPage",
+    params: [A_KEY, { n: "limit", t: "num", ph: "200", h: "最大 10000" }, { n: "before", t: "num", h: "上一页返回的 next_before" }, { n: "around", ph: "事件 id", h: "以这个事件为中心，前后各约 limit/2 条" }, { n: "max_text", t: "num", ph: "32768", h: "文本截断长度，0 不截断" }, { n: "format", t: "enum", o: ["", "ndjson"] }],
+    rs: (v) => `client.events(${rstr(v.key)}, &EventsQuery { ${rfields(v, { before: "n", around: "s", limit: "n", max_text: "n" })}..Default::default() })?` },
+  { id: "resume", g: "sessions", m: "GET", p: "/v1/sessions/{key}/resume", t: "恢复命令", d: "在会话自己的 harness 里继续它的命令，只给命令、不执行。", ret: "ResumeInfo", params: [A_KEY], rs: (v) => `client.resume(${rstr(v.key)})?` },
+  { id: "open-terminal", g: "sessions", m: "POST", p: "/v1/sessions/{key}/open-terminal", t: "在终端里恢复", d: "在新终端窗口切到会话目录并执行恢复命令。", ret: "{opened, terminal, command, cwd}", write: "这个接口会在本机打开终端窗口，这里只给写法、不发送；在会话详情里点「在终端打开」。",
+    params: [A_KEY, { n: "terminal", t: "enum", o: IS_WIN ? ["", "wt", "powershell", "cmd"] : ["", "terminal", "iterm", "ghostty"] }] },
+  { id: "search", g: "search", m: "GET", p: "/v1/search", t: "全文检索", d: "按会话分组的命中，每个会话最多 3 条；索引还在构建时只含已建部分。", ret: "SearchResponse",
+    params: [{ n: "q", req: true, ph: "cargo test -flaky", h: "全文检索语法，见 docs/search.md#全文检索" }, { n: "filter", ph: "h:codex since:30d", h: "会话搜索语法" }, { n: "kinds", ph: "tool_call,assistant_message", h: "事件 kind，逗号分隔" }, { n: "limit", t: "num", ph: "20", h: "会话数，最大 200" }, { n: "offset", t: "num", ph: "0" }],
+    rs: (v) => `client.search(${rstr(v.q)}, &SearchOptions { ${rfields(v, { filter: "s", kinds: "list", limit: "n", offset: "n" })}..Default::default() })?` },
+  { id: "usage", g: "usage", m: "GET", p: "/v1/usage", t: "用量聚合", d: "按一个维度聚合 token 与费用；参数不合法返回 400。", ret: "UsageReport",
+    params: [{ n: "group_by", t: "enum", o: ["", "harness", "model", "project", "cwd", "dir", "day", "hour", "weekday", "session", "weekday_hour"], ph: "harness" }, { n: "q", ph: "h:claude in:~/work", h: "会话搜索语法；其中的 since/before 作用于事件时间" }, { n: "since", ph: "7d", h: "30m、2h、7d、YYYY-MM-DD 或 epoch 毫秒" }, { n: "until", ph: "2026-10-01" }, { n: "tz", ph: "local", h: "local、UTC、+08:00 或 IANA 名" }, { n: "under", ph: "~/work", h: "只统计 cwd 在这个目录下的会话" }, { n: "depth", t: "num", ph: "1", h: "group_by=dir 的下钻层数" }, { n: "limit", t: "num", h: "只保留前 N 行，其余折叠成 (other)" }, { n: "sort", t: "enum", o: ["", "cost", "tokens", "steps", "sessions", "prompts", "key"] }, { n: "model", h: "只统计这个模型，值取 group_by=model 的 key" }],
+    rs: (v) => v.sort || v.model ? null : `client.usage(&UsageQuery { ${rfields(v, { group_by: "s", q: "s", since: "s", until: "s", under: "s", depth: "n", limit: "n", tz: "s" })}..Default::default() })?` },
+  { id: "session-usage", g: "usage", m: "GET", p: "/v1/sessions/{key}/usage", t: "单会话用量明细", d: "每一步的 token 与费用，以及按回合汇总。", ret: "SessionUsageDetail", params: [A_KEY], rs: (v) => `client.session_usage(${rstr(v.key)})?` },
+  { id: "models", g: "usage", m: "GET", p: "/v1/models", t: "模型与定价", d: "会话里出现过的模型、价格目录匹配结果（exact / approx / none）、价格段、步数与费用。", ret: "ModelUsage[]", params: [{ n: "q", ph: "h:claude", h: "会话搜索语法" }], rs: (v) => (v.q ? null : "client.models()?") },
+  { id: "pricing", g: "usage", m: "GET", p: "/v1/pricing", t: "价格目录状态", d: "价格来源、最近一次同步、是否过期、模型数、覆盖项与待确认的价格变化。", ret: "PricingStatus" },
+  { id: "memory", g: "agent", m: "GET", p: "/v1/memory", t: "记忆与指令文件", d: "agent 的记忆与指令文件（AGENTS.md、CLAUDE.md…）列表。", ret: "MemoryFile[]", params: [{ n: "cwd", ph: "~/work/project", h: "绝对路径，可用 ~；省略时只列全局文件" }], rs: (v) => `client.memory(${v.cwd ? `Some(${rstr(v.cwd)})` : "None"})?` },
+  { id: "memory-file", g: "agent", m: "GET", p: "/v1/memory/file", t: "读取记忆文件", d: "上面能列出的文件之一及其内容，最多 256 KB；其他路径 403。", ret: "MemoryContent", params: [{ n: "path", req: true, ph: "~/.claude/CLAUDE.md", h: "取自记忆与指令文件列表的 path" }], rs: (v) => `client.memory_file(${rstr(v.path)})?` },
+  { id: "archive", g: "cleanup", m: "GET", p: "/v1/archive", t: "归档列表", d: "已清理会话的归档及其大小，按归档时间倒序。", ret: "ArchiveList" },
+  { id: "cleanup-plan", g: "cleanup", m: "POST", p: "/v1/cleanup/plan", t: "生成清理计划", d: "只算计划、不动文件：每个会话能否清理、要移走的目标、能释放的空间；计划 10 分钟内有效。", ret: "CleanupPlan", body: true },
+  { id: "cleanup-execute", g: "cleanup", m: "POST", p: "/v1/cleanup/plans/{id}/execute", t: "执行清理计划", d: "按计划写归档，再把源文件移入系统回收站。", ret: "CleanupReport", write: "这个接口会把会话源文件移入回收站，这里只给写法、不发送；在「管理」视图里按确认流程清理。",
+    params: [{ n: "id", in: "path", req: true, ph: "plan_id", h: "生成清理计划返回的 plan_id" }] },
+  { id: "archive-delete", g: "cleanup", m: "DELETE", p: "/v1/archive/{key}", t: "删除归档", d: "永久删除归档文件，连同子会话的归档与墓碑。", ret: "ArchiveRemoved", write: "这个接口会永久删除归档文件，这里只给写法、不发送；在「管理」视图的归档页操作。", params: [A_KEY] },
+  { id: "sse", g: "stream", m: "SSE", p: "/v1/stream", t: "Server-Sent Events", d: "id 为 seq、event 为 Envelope 类型、data 为 Envelope JSON；断线重连带 Last-Event-ID。", ret: "Envelope", stream: "sse", params: A_STREAM, rs: rstream },
+  { id: "ndjson", g: "stream", m: "NDJSON", p: "/v1/stream.ndjson", t: "NDJSON 流", d: "分块响应，每行一个 Envelope。", ret: "Envelope", stream: "ndjson", params: A_STREAM, rs: rstream },
+  { id: "ws", g: "stream", m: "WS", p: "/v1/ws", t: "WebSocket", d: "每帧一个 Envelope 文本。", ret: "Envelope", stream: "ws", params: A_STREAM, rs: rstream },
+];
+const A = { ep: null, vals: {}, tab: "tree", snip: "curl", res: null, live: null, log: [], combos: [] };
+const A_LOG_MAX = 300;
+const aEp = (id) => ENDPOINTS.find((e) => e.id === id) || ENDPOINTS[1];
+const mthTag = (m) => `<span class="mth m-${m.toLowerCase()}">${m === "DELETE" ? "DEL" : m}</span>`;
+function aRecent() {
+  return [...sessions.values()].sort((a, b) => b.updated_at - a.updated_at).slice(0, 300);
+}
+function aDefaults(ep) {
+  const v = {};
+  const key = selected || aRecent()[0]?.key || "";
+  for (const p of ep.params || []) {
+    if (p.t === "session" && p.req) v[p.n] = key;
+    if (p.t === "harness" && p.req) v[p.n] = [...harnesses.values()].find((h) => h.icon)?.id || "";
+  }
+  if (ep.body) v.$body = JSON.stringify({ sessions: key ? [key] : [] }, null, 2);
+  return v;
+}
+function aUrl(ep, v, token = true) {
+  const path = ep.p.replace(/\{(\w+)\}/g, (_, k) => (v[k] ? encodeURIComponent(v[k]) : `{${k}}`));
+  const u = new URL(API + path);
+  for (const p of ep.params || []) if (p.in !== "path" && v[p.n] !== undefined && v[p.n] !== "") u.searchParams.set(p.n, v[p.n]);
+  if (token && TOKEN) u.searchParams.set("token", TOKEN);
+  const s = u.toString();
+  return ep.stream === "ws" ? s.replace(/^http/, "ws") : s;
+}
+const shq = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
+function aCurl(ep, v) {
+  const u = aUrl(ep, v, false);
+  if (ep.stream === "ws") return `# curl 不支持 WebSocket，用 websocat：\nwebsocat ${shq(TOKEN ? u + (u.includes("?") ? "&" : "?") + "token=$UNIFLO_TOKEN" : u)}`;
+  const a = [`curl ${ep.stream ? "-N" : "-s"}`];
+  if (ep.m === "POST" || ep.m === "DELETE") a.push(`-X ${ep.m}`, "-H 'X-Uniflo-Write: 1'");
+  if (TOKEN) a.push('-H "Authorization: Bearer $UNIFLO_TOKEN"');
+  if (ep.body) a.push("-H 'Content-Type: application/json'", `-d ${shq((v.$body || "").replace(/\s*\n\s*/g, " "))}`);
+  a.push(shq(u));
+  const json = !ep.stream && ep.id !== "icon" && v.format !== "ndjson";
+  return a.join(" \\\n  ") + (json ? " | jq" : "");
+}
+function aJs(ep, v) {
+  const u = aUrl(ep, v, false);
+  const withTok = TOKEN ? `${JSON.stringify(u + (u.includes("?") ? "&" : "?") + "token=")} + token` : JSON.stringify(u);
+  if (ep.stream === "sse") return `const es = new EventSource(${withTok});\nfor (const type of ["hello", "session", "event", "removed", "lagged"]) {\n  es.addEventListener(type, (m) => console.log(type, JSON.parse(m.data)));\n}`;
+  if (ep.stream === "ws") return `const ws = new WebSocket(${withTok});\nws.onmessage = (m) => console.log(JSON.parse(m.data));`;
+  const headers = [];
+  if (TOKEN) headers.push("Authorization: `Bearer ${token}`");
+  if (ep.m !== "GET" && ep.m !== "SSE" && ep.m !== "NDJSON") headers.push('"X-Uniflo-Write": "1"');
+  if (ep.body) headers.push('"Content-Type": "application/json"');
+  const init = [];
+  if (ep.m === "POST" || ep.m === "DELETE") init.push(`method: "${ep.m}"`);
+  if (headers.length) init.push(`headers: { ${headers.join(", ")} }`);
+  if (ep.body) init.push(`body: JSON.stringify(${(v.$body || "{}").trim()})`);
+  const call = `const res = await fetch(${JSON.stringify(u)}${init.length ? `, {\n  ${init.join(",\n  ")},\n}` : ""});`;
+  if (ep.stream === "ndjson") return `${call}\nconst reader = res.body.pipeThrough(new TextDecoderStream()).getReader();\nlet buf = "";\nfor (;;) {\n  const { value, done } = await reader.read();\n  if (done) break;\n  buf += value;\n  const lines = buf.split("\\n");\n  buf = lines.pop();\n  for (const line of lines) if (line) console.log(JSON.parse(line));\n}`;
+  if (ep.id === "icon") return `${call}\nconst svg = await res.text();`;
+  if (v.format === "ndjson") return `${call}\nconst rows = (await res.text()).split("\\n").filter(Boolean).map((l) => JSON.parse(l));`;
+  return `${call}\nconst data = await res.json();`;
+}
+function aRust(ep, v) {
+  if (ep.write || ep.body) return "// uniflo-client 这一版只覆盖只读接口；写接口请用 curl 或 fetch，规则见 docs/api.md#写接口。";
+  if (ep.id === "icon") return "// 图标是 SVG 而不是 JSON，用 curl 或 fetch 读取。";
+  const call = ep.rs?.(v);
+  const uses = ["Client", ...["EventsQuery", "SearchOptions", "StreamOptions", "UsageQuery"].filter((t) => call?.includes(t))];
+  const head = `use uniflo_client::${uses.length > 1 ? `{${uses.join(", ")}}` : "Client"};\n\n// 读 UNIFLO_URL（默认 http://127.0.0.1:7311）与 UNIFLO_TOKEN，和 uniflo CLI 一致\nlet client = Client::local()?;\n`;
+  if (ep.stream) return head + call;
+  if (!call) return `${head}let res: serde_json::Value = client.get_json(${rstr(aUrl(ep, v, false).slice(API.length))})?;\nprintln!("{res:#}");`;
+  return `${head}let res = ${call};\nprintln!("{res:#?}");`;
+}
+function renderApiNav() {
+  const q = $("#a-q").value.trim().toLowerCase();
+  const html = A_GROUPS.map(([g, name]) => {
+    const eps = ENDPOINTS.filter((e) => e.g === g && (!q || `${e.m} ${e.p} ${e.t}`.toLowerCase().includes(q)));
+    return eps.length ? `<div class="a-gh">${name}</div>` + eps.map((e) => `<button class="a-ep" data-ep="${e.id}" aria-current="${e.id === A.ep?.id}" title="${esc(`${e.m} ${e.p} · ${e.t}`)}">${mthTag(e.m)}<span class="pth">${esc(e.p)}</span><span class="nm">${esc(e.t)}</span></button>`).join("") : "";
+  }).join("");
+  $("#a-list").innerHTML = html || '<p class="a-none">没有匹配的接口</p>';
+}
+function aControl(ep, p, val) {
+  if (p.t === "enum" || p.t === "session" || p.t === "harness") return `<select class="combo" id="ap-${ep.id}-${p.n}" data-p="${p.n}" aria-label="${esc(p.n)}"></select>`;
+  return `<input class="input mono" data-p="${p.n}" value="${esc(val ?? "")}" placeholder="${esc(p.ph || "")}"${p.t === "num" ? ' inputmode="numeric"' : ""} autocomplete="off" spellcheck="false" aria-label="${esc(p.n)}">`;
+}
+function aOptions(p, val) {
+  if (p.t === "enum") return p.o.map((o) => ({ value: o, text: o || `默认${p.ph ? `（${p.ph}）` : ""}` }));
+  const any = p.req ? [] : [{ value: "", text: "不限" }];
+  if (p.t === "harness") return [...any, ...[...harnesses.values()].map((h) => ({ value: h.id, text: h.name || h.id, ico: "h", sessions: h.sessions }))];
+  const out = [...any, ...aRecent().map((s) => ({ value: s.key, text: label(s), path: `${hname(s.harness)} · ${base(s.cwd) || s.key}` }))];
+  if (val && !out.some((o) => o.value === val)) out.push({ value: val, text: val });
+  return out;
+}
+function renderApiReq() {
+  const ep = A.ep, v = (A.vals[ep.id] ??= aDefaults(ep));
+  for (const ts of A.combos) { combos.delete(ts); ts.destroy(); }
+  A.combos = [];
+  const rows = (ep.params || []).map((p) => `<div class="a-pn">${esc(p.n)}${p.req ? '<span class="req">必填</span>' : ""}<span class="loc">${p.in === "path" ? "路径参数" : "查询参数"}${p.t === "num" ? " · 数字" : ""}</span></div>
+    <div class="a-pc">${aControl(ep, p, v[p.n])}${p.h ? `<div class="hint">${esc(p.h)}</div>` : ""}</div>`).join("");
+  const body = ep.body ? `<div class="a-pn">body<span class="req">必填</span><span class="loc">JSON</span></div>
+    <div class="a-pc"><textarea class="input mono a-body" data-p="$body" spellcheck="false" aria-label="请求体">${esc(v.$body || "")}</textarea><div class="hint">{"sessions": ["&lt;key&gt;", …]} 或 {"q": "&lt;会话搜索语法&gt;"}，两者可同时给、取并集</div></div>` : "";
+  const live = ep.stream && A.live?.ep === ep.id;
+  const send = ep.write ? `<button class="btn sm" disabled title="${esc(ep.write)}">不在这里发送</button>`
+    : `<button class="btn primary sm" id="a-send">${icon(live ? "x" : "play")}${ep.stream ? (live ? "断开" : "连接") : "发送"}<kbd>⌘↵</kbd></button>`;
+  $("#a-req").innerHTML = `
+    <div class="card-h"><div><h2>${esc(ep.t)}</h2>${ep.ret ? `<span class="sub">返回 <code>${esc(ep.ret)}</code></span>` : ""}</div>${send}</div>
+    <div class="a-line">${mthTag(ep.m)}<span class="a-path">${esc(ep.p).replace(/\{(\w+)\}/g, "<i>{$1}</i>")}</span></div>
+    <p class="a-desc">${esc(ep.d)}</p>
+    ${ep.write ? `<div class="notice warn">${icon("warn")}<span>${esc(ep.write)}</span></div>` : ""}
+    ${rows || body ? `<div class="a-params">${rows}${body}</div>` : '<p class="a-noparam">这个接口没有参数。</p>'}
+    <div class="a-url"><span class="mono" id="a-url"></span>${TOKEN ? '<span class="a-tok" title="发送时附带页面的 token，这里不显示">+ token</span>' : ""}<button class="copy" id="a-url-copy">复制</button></div>
+    <div class="code a-snip"><div class="code-h"><div class="seg sm" id="a-snip" role="group" aria-label="示例代码">${[["curl", "curl"], ["js", "JavaScript"], ["rust", "Rust SDK"]].map(([k, n]) => `<button data-snip="${k}" aria-pressed="${A.snip === k}">${n}</button>`).join("")}</div><button class="copy" data-copy>复制</button></div><pre><code id="a-code"></code></pre></div>`;
+  for (const el of $$("#a-req select[data-p]")) {
+    const p = ep.params.find((x) => x.n === el.dataset.p);
+    const ts = makeCombo("#" + el.id, {
+      empty: p.t === "session" ? "没有匹配的会话，可直接粘贴 key" : "没有匹配项",
+      config: {
+        options: aOptions(p, v[p.n]), items: [v[p.n] ?? ""], create: p.t === "session", persist: false, placeholder: p.t === "session" ? "搜索会话或粘贴 key…" : "搜索…",
+        render: { option_create: (d) => `<div class="create">使用 <span class="mono">${esc(d.input)}</span></div>` },
+        onChange: (x) => { v[p.n] = x; aRefresh(); },
+      },
+    });
+    A.combos.push(ts);
+  }
+  aRefresh();
+}
+function aRefresh() {
+  const ep = A.ep, v = A.vals[ep.id];
+  const u = aUrl(ep, v, false);
+  // Non-ASCII query text is shown decoded so it stays readable; copy and the request use the encoded form.
+  const shown = u.replace(/(%[89A-F][0-9A-F])+/gi, (m) => { try { return decodeURIComponent(m); } catch { return m; } });
+  $("#a-url").textContent = (ep.m === "SSE" || ep.m === "NDJSON" || ep.m === "WS" ? "GET" : ep.m) + " " + shown;
+  $("#a-code").textContent = A.snip === "js" ? aJs(ep, v) : A.snip === "rust" ? aRust(ep, v) : aCurl(ep, v);
+}
+// ---- response
+const A_TIME_KEY = /(^|_)(at|ts|time|since|until|from|started|ended|updated|created|checked)$|_ms$/;
+let jtSeq = 0;
+const jtVals = new Map();
+function jtHint(k, v) {
+  if (typeof v !== "number" || !Number.isFinite(v)) return "";
+  const key = typeof k === "string" ? k : "";
+  if (v > 1e12 && v < 4e12 && A_TIME_KEY.test(key) && !/_ms$/.test(key)) return `<span class="jt-h">${esc(new Date(v).toLocaleString("zh-CN", { hour12: false }))}</span>`;
+  if (/bytes$/.test(key) && v >= 1024) return `<span class="jt-h">${esc(bytes(v))}</span>`;
+  if (/(^|_)ms$/.test(key) && v >= 1000) return `<span class="jt-h">${(v / 1000).toFixed(v >= 1e4 ? 0 : 1)} s</span>`;
+  return "";
+}
+function jtLeaf(k, v) {
+  if (typeof v === "string") {
+    if (v.length <= 400) return `<span class="j-s">${esc(JSON.stringify(v))}</span>`;
+    const id = ++jtSeq;
+    jtVals.set(id, v);
+    return `<span class="j-s">${esc(JSON.stringify(v.slice(0, 400)).slice(0, -1))}…"</span><button class="jt-more" data-jt-str="${id}">展开全部 ${v.length.toLocaleString()} 字符</button>`;
+  }
+  const cls = v === null || typeof v === "boolean" ? "j-l" : "j-n";
+  return `<span class="${cls}">${esc(String(v))}</span>${jtHint(k, v)}`;
+}
+function jtPreview(v) {
+  if (Array.isArray(v)) return v[0] && typeof v[0] === "object" ? esc(`{${Object.keys(v[0]).slice(0, 6).join(", ")}}`.slice(0, 120)) : esc(v.slice(0, 6).map((x) => JSON.stringify(x)).join(", ").slice(0, 120));
+  return esc(Object.keys(v).slice(0, 6).join(", ").slice(0, 120));
+}
+function jtNode(k, v, depth) {
+  const key = k === null ? "" : `<span class="jt-kc"><span class="${typeof k === "number" ? "jt-i" : "j-k"}">${typeof k === "number" ? k : esc(k)}</span><span class="jt-p">:</span></span>`;
+  if (v === null || typeof v !== "object") return `<div class="jt-r">${key}${jtLeaf(k, v)}</div>`;
+  const arr = Array.isArray(v), n = arr ? v.length : Object.keys(v).length;
+  if (!n) return `<div class="jt-r">${key}<span class="jt-c">${arr ? "[]" : "{}"}</span></div>`;
+  const id = ++jtSeq;
+  jtVals.set(id, v);
+  const open = depth < 2 && !(arr && depth > 0 && n > 20);
+  return `<details class="jt-n" data-jt="${id}" data-depth="${depth}"${open ? " open" : ""}><summary>${key}<span class="jt-c">${arr ? `[${n}]` : `{${n}}`}</span><span class="jt-pv">${jtPreview(v)}</span></summary>${open ? jtKids(id, depth + 1, 0) : ""}</details>`;
+}
+const JT_PAGE = 200;
+function jtKids(id, depth, from) {
+  const v = jtVals.get(id);
+  const ents = Array.isArray(v) ? v.map((x, i) => [i, x]) : Object.entries(v);
+  const to = Math.min(ents.length, from + JT_PAGE);
+  let h = ents.slice(from, to).map(([k, x]) => jtNode(k, x, depth)).join("");
+  if (to < ents.length) h += `<button class="jt-more" data-jt-more="${id}" data-from="${to}" data-depth="${depth}">再显示 ${Math.min(JT_PAGE, ents.length - to)} 项（共 ${ents.length.toLocaleString()}）</button>`;
+  return from ? h : `<div class="jt-kids">${h}</div>`;
+}
+const jtTree = (v) => { jtVals.clear(); return `<div class="jt">${jtNode(null, v, 0)}</div>`; };
+const A_RAW_MAX = 400_000;
+function renderApiRes() {
+  const box = $("#a-res"), ep = A.ep;
+  if (ep.stream) return renderApiLog();
+  const r = A.res?.ep === ep.id ? A.res : null;
+  if (!r) {
+    box.innerHTML = `<div class="a-empty">${icon("play")}<h3>还没有发送</h3><p>${ep.write ? "这个接口只展示写法，不在这里发送。" : "填好参数后点「发送」或按 ⌘↵，这里显示本机守护进程的真实返回。"}</p></div>`;
+    return;
+  }
+  if (r.pending) { box.innerHTML = `<div class="a-empty"><span class="spin"></span><p>请求中…</p></div>`; return; }
+  const ok = r.status >= 200 && r.status < 300;
+  const tabs = r.kind === "svg" ? [["tree", "预览"], ["raw", "源码"], ["headers", "响应头"]] : r.kind === "error" ? [["raw", "错误"]] : [["tree", "结构"], ["raw", "原始"], ["headers", "响应头"]];
+  if (!tabs.some(([k]) => k === A.tab)) A.tab = tabs[0][0];
+  const meta = r.kind === "error" ? `<span class="a-st bad">请求失败</span><span>${r.ms.toFixed(0)} ms</span>`
+    : `<span class="a-st${ok ? "" : " bad"}">${r.status} ${esc(r.statusText || (ok ? "OK" : ""))}</span><span>${r.ms < 10 ? r.ms.toFixed(1) : r.ms.toFixed(0)} ms</span><span>${bytes(r.bytes)}</span>${r.count != null ? `<span>${r.count.toLocaleString()} 项</span>` : ""}<span class="mono">${esc((r.ct || "").split(";")[0])}</span>${r.seq ? `<span class="mono" title="x-uniflo-seq">seq ${r.seq}</span>` : ""}`;
+  let out;
+  if (A.tab === "headers") out = `<dl class="kv a-hdr">${r.headers.map(([k, x]) => `<dt class="mono">${esc(k)}</dt><dd class="mono">${esc(x)}</dd>`).join("")}</dl>`;
+  else if (A.tab === "tree" && r.kind === "svg") out = `<div class="a-svg">${r.text}</div>`;
+  else if (A.tab === "tree" && r.body !== undefined) out = jtTree(r.body);
+  else {
+    const s = r.body !== undefined ? JSON.stringify(r.body, null, 2) : r.text;
+    out = `${s.length > A_RAW_MAX ? `<p class="a-cut">只显示前 ${(A_RAW_MAX / 1000).toFixed(0)}k 字符（共 ${s.length.toLocaleString()}），完整内容用「复制」。</p>` : ""}<pre class="a-raw">${r.body !== undefined ? json(s.slice(0, A_RAW_MAX)) : esc(s.slice(0, A_RAW_MAX))}</pre>`;
+  }
+  box.innerHTML = `<div class="card-h"><div><h2>响应</h2><div class="a-meta">${meta}</div></div>
+    <div class="h-actions"><div class="seg sm" id="a-tab" role="group" aria-label="响应视图">${tabs.map(([k, n]) => `<button data-atab="${k}" aria-pressed="${A.tab === k}">${n}</button>`).join("")}</div><button class="btn ghost sm" id="a-copy-res">${icon("copy")}复制</button></div></div>
+    <div class="a-out">${out}</div>`;
+}
+async function aSend() {
+  const ep = A.ep, v = A.vals[ep.id];
+  if (ep.write) return;
+  const miss = (ep.params || []).find((p) => p.req && !v[p.n]);
+  if (miss) { toast(`缺少必填参数 ${miss.n}`, true); $(`#a-req [data-p="${miss.n}"]`)?.focus(); return; }
+  if (ep.stream) return A.live?.ep === ep.id ? aStop() : aStart(ep, v);
+  let body;
+  if (ep.body) {
+    try { body = JSON.stringify(JSON.parse(v.$body || "")); } catch (e) { toast("请求体不是合法的 JSON：" + e.message, true); return; }
+  }
+  A.ac?.abort();
+  const ac = (A.ac = new AbortController());
+  A.res = { ep: ep.id, pending: true };
+  renderApiRes();
+  const t0 = performance.now();
+  try {
+    const init = { signal: ac.signal };
+    if (ep.m === "POST" || ep.m === "DELETE") Object.assign(init, { method: ep.m, headers: { "X-Uniflo-Write": "1", "Content-Type": "application/json" }, body });
+    const r = await fetch(aUrl(ep, v), init);
+    const buf = await r.arrayBuffer();
+    const ms = performance.now() - t0, text = new TextDecoder().decode(buf), ct = r.headers.get("content-type") || "";
+    const res = { ep: ep.id, status: r.status, statusText: r.statusText, ms, bytes: buf.byteLength, ct, text, headers: [...r.headers], seq: Number(r.headers.get("x-uniflo-seq") || 0) };
+    if (/svg/.test(ct) && r.ok) res.kind = "svg";
+    else if (v.format === "ndjson" && r.ok) { try { res.body = text.split("\n").filter(Boolean).map((l) => JSON.parse(l)); } catch {} }
+    else { try { res.body = JSON.parse(text); } catch {} }
+    if (Array.isArray(res.body)) res.count = res.body.length;
+    if (ac === A.ac) { A.res = res; renderApiRes(); revealApiRes(); }
+  } catch (e) {
+    if (ac.signal.aborted) return;
+    A.res = { ep: ep.id, kind: "error", ms: performance.now() - t0, text: String(e.message || e) + "\n\n守护进程没有响应，或页面的 api 地址不对；连接状态见左下角「实时」。", headers: [] };
+    renderApiRes();
+  }
+}
+function aStart(ep, v) {
+  aStop(true);
+  A.log = [];
+  A.count = 0;
+  const q = {};
+  for (const p of ep.params || []) if (v[p.n] !== undefined && v[p.n] !== "") q[p.n] = v[p.n];
+  const t0 = performance.now();
+  A.live = { ep: ep.id, t0, h: openStream(ep.stream, q, (env) => {
+    A.count++;
+    A.log.unshift({ at: Date.now(), env, n: A.count });
+    if (A.log.length > A_LOG_MAX) A.log.length = A_LOG_MAX;
+    queueApiLog();
+  }, (e) => { if (A.live?.ep === ep.id) { A.live.err = String(e.message || e); aStop(true); renderApiReq(); queueApiLog(); } }) };
+  renderApiReq();
+  renderApiLog();
+  revealApiRes();
+}
+function aStop(quiet) {
+  if (!A.live) return;
+  A.live.h.close();
+  const err = A.live.err;
+  A.last = { ep: A.live.ep, err };
+  A.live = null;
+  if (!quiet) { renderApiReq(); renderApiLog(); }
+}
+// Bring the response into view after a send when the form pushed it below the fold.
+function revealApiRes() {
+  const top = $("#a-res").getBoundingClientRect().top;
+  if (top > innerHeight * 0.55) $("#a-res").scrollIntoView({ block: "start", behavior: "smooth" });
+}
+let apiLogQueued = false;
+function queueApiLog() {
+  if (apiLogQueued) return;
+  apiLogQueued = true;
+  requestAnimationFrame(() => { apiLogQueued = false; if (view === "api" && A.ep?.stream) renderApiLog(); });
+}
+function envLine(env) {
+  if (env.type === "event") return `${env.event?.kind || ""} · ${env.event?.session || ""}`;
+  if (env.type === "session") return `${env.session?.status || ""} · ${env.session?.key || ""}`;
+  if (env.type === "removed") return env.key || "";
+  if (env.type === "lagged") return `丢失 ${env.missed}`;
+  if (env.type === "hello") return `${env.server || ""} · seq ${env.seq}`;
+  return "";
+}
+function renderApiLog() {
+  const box = $("#a-res"), ep = A.ep;
+  const live = A.live?.ep === ep.id, stopped = !live && A.last?.ep === ep.id;
+  const open = new Set($$("#a-log details[open]").map((d) => d.dataset.n));
+  if (!live && !A.log.length || (!live && !stopped && A.logEp !== ep.id)) {
+    box.innerHTML = `<div class="a-empty">${icon("pulse")}<h3>${stopped && A.last.err ? "连接已断开" : "还没有连接"}</h3><p>${stopped && A.last.err ? esc(A.last.err) : "点「连接」订阅实时流：先收到 hello，之后每当有会话写入新内容就会出现一行 Envelope。"}</p></div>`;
+    return;
+  }
+  A.logEp = ep.id;
+  jtVals.clear();
+  const st = live ? `<span class="a-st live"><span class="dot"></span>已连接</span>` : `<span class="a-st idle">已断开</span>`;
+  box.innerHTML = `<div class="card-h"><div><h2>实时 Envelope</h2><div class="a-meta">${st}<span>收到 ${A.count.toLocaleString()} 条</span>${A.count > A.log.length ? `<span>显示最近 ${A.log.length}</span>` : ""}</div></div>
+    <div class="h-actions"><button class="btn ghost sm" id="a-clear">清空</button></div></div>
+    <div class="a-out a-log" id="a-log">${A.log.length ? A.log.map((x) => `<details data-n="${x.n}"${open.has(String(x.n)) ? " open" : ""}><summary><span class="mono a-lt">${new Date(x.at).toLocaleTimeString("zh-CN", { hour12: false })}</span><span class="mth m-${x.env.type === "event" ? "sse" : "get"}">${esc(x.env.type)}</span><span class="mono a-ls">${esc(envLine(x.env))}</span><span class="mono a-lq">#${x.env.seq ?? ""}</span></summary>${open.has(String(x.n)) ? jtTreeKeep(x.env) : ""}</details>`).join("") : '<p class="a-wait">已连接，等待新的 Envelope…</p>'}</div>`;
+}
+// The stream log re-renders on every envelope; expanded rows rebuild their trees without clearing others.
+const jtTreeKeep = (v) => `<div class="jt">${jtNode(null, v, 0)}</div>`;
+function openApi() {
+  A.ep = aEp(getp("ep"));
+  $("#a-base").textContent = API;
+  $("#a-auth").hidden = !TOKEN;
+  renderApiNav();
+  renderApiReq();
+  renderApiRes();
+}
+function pickApi(id) {
+  if (A.ep?.id === id) return;
+  A.ep = aEp(id);
+  A.tab = "tree";
+  setp({ ep: A.ep.id });
+  renderApiNav();
+  renderApiReq();
+  renderApiRes();
+  $("#a-req").scrollIntoView({ block: "nearest" });
+}
+viewEnter.api = openApi;
+$("#a-q").addEventListener("input", renderApiNav);
+$("#a-list").addEventListener("click", (e) => { const b = e.target.closest("[data-ep]"); if (b) pickApi(b.dataset.ep); });
+$("#a-req").addEventListener("input", (e) => {
+  const el = e.target.closest("input[data-p], textarea[data-p]");
+  if (!el) return;
+  A.vals[A.ep.id][el.dataset.p] = el.value.trim() === "" && el.tagName === "INPUT" ? "" : el.value;
+  aRefresh();
+});
+$("#a-req").addEventListener("click", (e) => {
+  if (e.target.closest("#a-send")) return aSend();
+  if (e.target.closest("#a-url-copy")) { navigator.clipboard?.writeText(aUrl(A.ep, A.vals[A.ep.id], false)); return toast("已复制 URL（不含 token）"); }
+  const s = e.target.closest("[data-snip]");
+  if (s) { A.snip = s.dataset.snip; for (const b of $$("#a-snip button")) b.setAttribute("aria-pressed", String(b === s)); aRefresh(); }
+});
+$("#a-res").addEventListener("click", (e) => {
+  const t = e.target;
+  const tab = t.closest("[data-atab]");
+  if (tab) { A.tab = tab.dataset.atab; return renderApiRes(); }
+  if (t.closest("#a-clear")) { A.log = []; A.count = 0; return renderApiLog(); }
+  if (t.closest("#a-copy-res")) {
+    const r = A.res;
+    navigator.clipboard?.writeText(r.body !== undefined ? JSON.stringify(r.body, null, 2) : r.text || "");
+    return toast("已复制响应");
+  }
+  const more = t.closest("[data-jt-more]");
+  if (more) { more.outerHTML = jtKids(Number(more.dataset.jtMore), Number(more.dataset.depth), Number(more.dataset.from)); return; }
+  const str = t.closest("[data-jt-str]");
+  if (str) { str.previousElementSibling.textContent = JSON.stringify(jtVals.get(Number(str.dataset.jtStr))); str.remove(); }
+});
+// Collapsed nodes render their children on first open, so large responses stay cheap to show.
+$("#a-res").addEventListener("toggle", (e) => {
+  const d = e.target;
+  if (!d.open) return;
+  if (d.matches?.(".jt-n") && !d.querySelector(":scope > .jt-kids")) d.insertAdjacentHTML("beforeend", jtKids(Number(d.dataset.jt), Number(d.dataset.depth) + 1, 0));
+  if (d.matches?.("#a-log > details") && !d.querySelector(":scope > .jt")) {
+    const x = A.log.find((l) => String(l.n) === d.dataset.n);
+    if (x) d.insertAdjacentHTML("beforeend", jtTreeKeep(x.env));
+  }
+}, true);
+document.addEventListener("keydown", (e) => {
+  if (view === "api" && e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); aSend(); }
+});
+
 // ---------------------------------------------------------------- theme, diagnostics, palette
 // Theme: follow the system, or pin light / dark (data-scheme on <html>, applied before first paint).
 const THEMES = [["auto", "跟随系统", "monitor"], ["light", "浅色", "sun"], ["dark", "深色", "moon"]];
@@ -4088,7 +4619,7 @@ let theme = document.documentElement.dataset.scheme || "auto";
 function renderTheme() {
   const [, name, ic] = THEMES.find(([k]) => k === theme);
   const b = $("#theme");
-  b.innerHTML = icon(ic);
+  b.innerHTML = icon(ic) + "<span>主题</span>";
   b.title = `主题：${name}（点击切换）`;
   if (theme === "auto") delete document.documentElement.dataset.scheme;
   else document.documentElement.dataset.scheme = theme;
@@ -4121,7 +4652,7 @@ function closeDiag() {
 }
 // Command palette (⌘K / Ctrl+K): views, actions, and the sessions currently loaded.
 const PAL = { items: [], on: 0, back: null };
-const VIEW_NAMES = [["sessions", "会话", "chat"], ["usage", "用量", "chart"], ["search", "检索", "search"], ["manage", "管理", "trash"], ["insights", "洞察", "grid"]];
+const VIEW_NAMES = [["sessions", "会话", "chat"], ["usage", "用量", "chart"], ["search", "检索", "search"], ["manage", "管理", "trash"], ["insights", "洞察", "grid"], ["api", "接口", "code"]];
 function paletteItems(q) {
   q = q.trim().toLowerCase();
   const hit = (...xs) => !q || xs.some((x) => String(x || "").toLowerCase().includes(q));
@@ -4418,7 +4949,7 @@ document.addEventListener("keydown", (e) => {
   if (e.key.toLowerCase() === "k" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); return $("#palette").hidden ? openPalette() : closePalette(); }
   if (e.target.closest(".ts-wrapper, .ts-dropdown, #menu, #palette")) return;
   const typing = e.target.matches?.("input, textarea, select");
-  if (!typing && !e.metaKey && !e.ctrlKey && !e.altKey && /^[1-5]$/.test(e.key)) {
+  if (!typing && !e.metaKey && !e.ctrlKey && !e.altKey && /^[1-6]$/.test(e.key)) {
     showView(VIEWS[Number(e.key) - 1], true);
     return;
   }

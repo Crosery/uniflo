@@ -2,9 +2,11 @@
 
 > `uniflo daemon` 暴露的 HTTP 接口：REST 拿快照，SSE / NDJSON / WebSocket 拿实时流。数据格式见 `docs/schema.md`。
 
-状态：`current` · 更新：2026-10-10
+状态：`current` · 更新：2026-10-25
 
 默认地址 `http://127.0.0.1:7311`。读接口只用 `GET`（和 CORS 预检 `OPTIONS`）；写接口用 `POST` / `DELETE`，必须满足 [写接口](#写接口) 的全部条件。所有成功响应带 `x-uniflo-seq` 头：响应生成时的最新 `seq`，可作为随后订阅的 `since`。
+
+想直接看某个接口返回什么：打开 `http://127.0.0.1:7311/demo?view=api`（网页控制台的「接口」视图），下面每一行都能填参数后发送，返回按结构树展示，并附 curl、JavaScript 与 Rust SDK 写法；会改动数据或打开窗口的写接口在那里只给写法、不发送。
 
 ## REST
 
