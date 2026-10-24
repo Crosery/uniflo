@@ -81,6 +81,11 @@ writeFileSync(
   line({ type: "user", uuid: "s1", isSidechain: true, timestamp: iso(tr + 9_000), cwd: "/w/demo", message: { role: "user", content: "Review the gateway diff" } }) +
     line({ type: "assistant", uuid: "s2", isSidechain: true, timestamp: iso(tr + 15_000), message: { id: "m-s2", model: "demo-model", content: [{ type: "text", text: "Diff looks good." }], stop_reason: "end_turn" } }),
 );
+writeFileSync(
+  join(home, ".claude/projects/-w-demo/sess-1/subagents/agent-sub2.jsonl"),
+  line({ type: "user", uuid: "t1", isSidechain: true, timestamp: iso(tr + 10_000), cwd: "/w/demo", message: { role: "user", content: "Write a test for the /demo route" } }) +
+    line({ type: "assistant", uuid: "t2", isSidechain: true, timestamp: iso(tr + 13_000), message: { id: "m-t2", model: "demo-model", content: [{ type: "text", text: "Added demo_page_is_served." }], stop_reason: "end_turn" } }),
+);
 
 // A Codex session that is still working (turn started, not completed).
 const codexDir = join(home, ".codex/sessions/2026/10/02");
@@ -436,6 +441,45 @@ async function runUsage() {
   report("[usage] no page errors", cdp.errors.length === 0, cdp.errors.slice(0, 3).join(" | "));
 }
 
+// Sub-agents nest under their parent in the session list; the chip folds them; headers link back.
+async function runTree() {
+  await load(`${api}/demo?token=${TOKEN}`);
+  await waitFor(`!!document.querySelector('.row[data-key="claude:sess-1"]')?.closest('.node.fam')?.querySelector('.kid-tog')`, 8_000, "tree");
+  const famOf = `document.querySelector('.row[data-key="claude:sess-1"]').closest('.node.fam')`;
+  const t = await cdp.eval(`(() => { const fam = ${famOf}, p = fam.querySelector(':scope > .row'), tog = fam.querySelector(':scope > .kids > .kh .kid-tog');
+    const kids = [...fam.querySelectorAll(':scope > .kids > .node > .row')].map((r) => r.dataset.key);
+    const rows = [...document.querySelectorAll('#list .row')].map((r) => r.dataset.key);
+    const pr = p.querySelector('.ricon').getBoundingClientRect(), kr = fam.querySelector('.kids .ricon').getBoundingClientRect();
+    const line = getComputedStyle(fam.querySelector('.kids > .node > .row'), '::after');
+    return { kids, chip: tog.textContent.trim(), open: tog.getAttribute('aria-expanded'), indent: Math.round(kr.left - pr.left),
+      elbow: line.borderLeftWidth !== '0px' && line.borderBottomWidth !== '0px', below: kids.every((k) => rows.indexOf(k) > rows.indexOf('claude:sess-1')) }; })()`);
+  const want = (await apiJson(api, "/v1/sessions?limit=500")).filter((s) => s.parent === "claude:sess-1").map((s) => s.key).sort();
+  report("[tree] sub-agents nest under their parent, indented with tree lines", want.length === 2 && JSON.stringify(want) === JSON.stringify([...t.kids].sort()) && t.indent >= 20 && t.elbow && t.below, JSON.stringify({ ...t, want }));
+  report('[tree] parent row shows "2 个子代理", expanded', t.chip === "2 个子代理" && t.open === "true", t.chip);
+  const before = await cdp.eval(`document.querySelector('.row.sel')?.dataset.key || ''`);
+  await cdp.eval(`${famOf}.querySelector('.kid-tog').click()`);
+  const folded = await waitFor(`!${famOf}.querySelector('.kids > .node > .row') && ${famOf}.querySelector('.kid-tog').getAttribute('aria-expanded') === 'false'`, 3_000, "fold").catch(() => false);
+  const after = await cdp.eval(`document.querySelector('.row.sel')?.dataset.key || ''`);
+  report("[tree] the chip folds the children without opening the parent", !!folded && after === before, `${before} → ${after}`);
+  await shot("tree-folded.png");
+  await cdp.eval(`${famOf}.querySelector('.kid-tog').click()`);
+  const unfolded = await waitFor(`${famOf}.querySelectorAll(':scope > .kids > .node > .row').length === 2`, 3_000, "unfold").catch(() => false);
+  report("[tree] clicking again unfolds them", !!unfolded);
+  await click(`.row[data-key="${t.kids[0]}"]`);
+  const link = await waitFor(`document.querySelector('#sh-meta .parent-link')?.textContent`, 5_000, "parent link").catch(() => "");
+  report("[tree] a sub-agent's header names its parent", String(link).includes("网关新增 /demo 演示页"), String(link).trim());
+  await scheme("dark");
+  await sleep(300);
+  await shot("tree-dark.png");
+  await scheme("light");
+  await sleep(300);
+  await shot("tree-light.png");
+  await scheme(null);
+  await click("#sh-meta .parent-link");
+  const opened = await waitFor(`document.querySelector('.row.sel')?.dataset.key === 'claude:sess-1'`, 5_000, "open parent").catch(() => false);
+  report("[tree] the parent link opens the parent", !!opened);
+}
+
 async function runDetail() {
   const key = "claude:proj-0";
   await cdp.send("Browser.grantPermissions", { permissions: ["clipboardReadWrite", "clipboardSanitizedWrite"], origin: api }).catch(() => {});
@@ -516,7 +560,8 @@ async function runFts() {
     !!hit && hit.s === "claude:search-target" && hit.e === want?.hits[0]?.event && hit.mark === SEARCH_WORD, JSON.stringify(hit));
   report("[search] query is in the URL", (await cdp.eval("location.search")).includes(`sq=${enc(SEARCH_WORD).replace(/%20/g, "+")}`));
   await click(".hit[data-event]");
-  const at = await waitFor(`(() => { const n = document.querySelector('#timeline .hit-target[data-id="${hit?.e}"]'); if (!n) return null;
+  // the list marks the selection on the next frame, so wait for both the timeline and the list to settle
+  const at = await waitFor(`(() => { const n = document.querySelector('#timeline .hit-target[data-id="${hit?.e}"]'); if (!n || !document.querySelector('.row.sel')) return null;
     const r = n.getBoundingClientRect(), t = document.querySelector('#timeline').getBoundingClientRect();
     return { inView: r.top >= t.top - 1 && r.bottom <= t.bottom + 1, before: !!n.previousElementSibling?.dataset?.id, after: !!n.nextElementSibling?.dataset?.id,
       selected: document.querySelector('.row.sel')?.dataset.key, view: !document.querySelector('#app').hidden, url: location.search }; })()`, 8_000, "jump").catch(() => null);
@@ -1281,7 +1326,7 @@ try {
     for (const transport of ["sse", "ws", "ndjson"]) await runTransport(transport);
     await runCrossOrigin();
   }
-  for (const step of [runIdentity, runIcons, runUsage, runUsageControls, runDetail, runFts, runSearchHelp, runInsights, runNotify, runVisual, runDesign, runApi, runManage, runReadOnly, runRedact]) {
+  for (const step of [runIdentity, runIcons, runUsage, runUsageControls, runTree, runDetail, runFts, runSearchHelp, runInsights, runNotify, runVisual, runDesign, runApi, runManage, runReadOnly, runRedact]) {
     if (only.length && !only.includes(step.name)) continue;
     try { await step(); } catch (e) { report(`${step.name}`, false, String(e.message || e)); }
   }

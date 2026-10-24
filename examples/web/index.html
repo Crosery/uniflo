@@ -319,6 +319,27 @@ input[type=checkbox].cb:disabled { opacity: .35; cursor: not-allowed; }
 .row-side { display: flex; flex-direction: column; align-items: flex-end; gap: 1px; font-size: var(--fs-2xs); color: var(--text-3); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .row-cost { color: var(--text-2); }
 .row .sub-i { color: var(--text-3); flex: none; }
+/* sub-agent tree: children hang under the parent's icon; trunk + elbow lines, folded with the chip */
+#list { --tree: color-mix(in srgb, var(--text-3) 38%, var(--bg-side)); }
+.kids { position: relative; margin-left: 24px; }
+.kids .kids { margin-left: 21px; }
+.kids > .node { position: relative; padding-left: 12px; }
+.kids > .node:not(:last-child)::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; border-left: 1.5px solid var(--tree); pointer-events: none; }
+.kids > .node > .row::after { content: ""; position: absolute; left: -12px; top: -9px; width: 18px; height: calc(50% + 9px); border: solid var(--tree); border-width: 0 0 1.5px 1.5px; border-bottom-left-radius: 9px; pointer-events: none; }
+.kids > .node > .row[data-status=work]::after { border-color: color-mix(in srgb, var(--work) 60%, var(--bg-side)); }
+.kids > .node > .row.sel::after { border-color: var(--accent); }
+.kids .row.sel::before { display: none; }
+.kids .ricon { --s: 24px; }
+.kids .row { gap: 9px; padding-top: 6px; padding-bottom: 6px; }
+.kids .row-title { font-size: var(--fs-xs); }
+.kid-tog { display: inline-flex; align-items: center; gap: 4px; height: 22px; margin: 1px 0 2px 7px; padding: 0 9px 0 5px; border: 1px solid var(--border); border-radius: 999px; background: var(--bg); color: var(--text-2); font-size: 11px; cursor: pointer; }
+.kid-tog:hover { border-color: var(--border-strong); color: var(--text); }
+.kid-tog.busy { color: var(--work); border-color: color-mix(in srgb, var(--work) 35%, transparent); }
+.kid-tog svg.i { width: 12px; height: 12px; transition: transform var(--dur) var(--ease); }
+.kid-tog[aria-expanded=true] svg.i { transform: rotate(90deg); }
+.kids-more { display: block; margin: 1px 0 3px 7px; padding: 3px 8px; border: 0; border-radius: 7px; background: none; color: var(--text-3); font-size: var(--fs-2xs); cursor: pointer; }
+.kids-more:hover { background: var(--hover); color: var(--text); }
+.kids > .node:is(.kh, .more)::after { content: ""; position: absolute; left: 0; top: -9px; width: 7px; height: calc(50% + 9px); border: solid var(--tree); border-width: 0 0 1.5px 1.5px; border-bottom-left-radius: 7px; pointer-events: none; }
 
 .conv { position: relative; display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--bg); }
 .conv-h { display: flex; align-items: flex-start; gap: 12px; padding: 14px 20px 12px 24px; border-bottom: 1px solid var(--border); flex: none; }
@@ -331,6 +352,9 @@ input[type=checkbox].cb:disabled { opacity: .35; cursor: not-allowed; }
 .mchip > span { overflow: hidden; text-overflow: ellipsis; }
 .mchip svg.i { width: 13px; height: 13px; }
 .mchip.mono { font-size: 11.5px; }
+button.mchip { border: 0; background: none; padding: 0; font-family: inherit; cursor: pointer; }
+.parent-link:hover { color: var(--accent); }
+.parent-link .txt { color: var(--text-2); max-width: 22em; overflow: hidden; text-overflow: ellipsis; display: inline-block; vertical-align: bottom; }
 .ch-actions { display: flex; align-items: center; gap: 6px; flex: none; }
 #steps-toggle[aria-expanded=true] { background: var(--active); }
 .steps { margin: 0 20px 0 24px; border: 1px solid var(--border-2); border-top: 0; border-radius: 0 0 var(--r-lg) var(--r-lg); max-height: 300px; overflow: auto; flex: none; background: var(--panel); }
@@ -2289,20 +2313,25 @@ function renderList() {
   requestAnimationFrame(() => {
     listQueued = false;
     const all = order.map((k) => sessions.get(k)).filter(Boolean);
+    const tree = sessionTree(all), out = [];
     let html = "";
     if (filtered()) {
-      shown = all.map((s) => s.key);
-      html = all.map(rowHtml).join("");
+      html = tree.roots.map((s) => nodeHtml(s, tree, out)).join("");
     } else {
-      // Working sessions first, then the rest bucketed by the calendar day of their last activity.
+      // Working families first, then the rest bucketed by the calendar day of their latest activity.
       const today = new Date(); today.setHours(0, 0, 0, 0);
       const t0 = today.getTime(), y0 = addDays(today, -1).getTime(), w0 = addDays(today, -6).getTime();
       const groups = [["工作中", []], ["今天", []], ["昨天", []], ["最近 7 天", []], ["更早", []]];
-      for (const s of all) groups[s.status === "work" ? 0 : s.updated_at >= t0 ? 1 : s.updated_at >= y0 ? 2 : s.updated_at >= w0 ? 3 : 4][1].push(s);
-      shown = groups.flatMap(([, g]) => g.map((s) => s.key));
-      html = groups.filter(([, g]) => g.length).map(([name, g], i) =>
-        `<div class="group-h${name === "工作中" ? " live" : ""}">${name === "工作中" ? '<span class="dot work"></span>' : ""}<span>${name}</span><span class="n">${g.length}</span></div>` + g.map(rowHtml).join("")).join("");
+      for (const s of tree.roots) {
+        const f = tree.fam.get(s.key);
+        groups[f.work ? 0 : f.updated >= t0 ? 1 : f.updated >= y0 ? 2 : f.updated >= w0 ? 3 : 4][1].push(s);
+      }
+      html = groups.filter(([, g]) => g.length).map(([name, g]) => {
+        g.sort((a, b) => tree.fam.get(b.key).updated - tree.fam.get(a.key).updated);
+        return `<div class="group-h${name === "工作中" ? " live" : ""}">${name === "工作中" ? '<span class="dot work"></span>' : ""}<span>${name}</span><span class="n">${g.length}</span></div>` + g.map((s) => nodeHtml(s, tree, out)).join("");
+      }).join("");
     }
+    shown = out;
     $("#list").innerHTML = all.length ? html : `<div class="empty"><h3>没有匹配的会话</h3><p>试试 <kbd>s:work</kbd> 或换个关键词</p></div>`;
     const work = all.filter((s) => s.status === "work").length, badge = $("#rb-work");
     badge.hidden = !work;
@@ -2311,12 +2340,59 @@ function renderList() {
 }
 const usageCost = (u) => (!u || !u.steps ? "" : u.cost_usd != null ? money(u.cost_usd) : "未定价");
 const tile = (id, cls = "") => `<span class="htile ${cls}" style="--h:${hue(id)}">${hicon(id)}</span>`;
+// Sub-agents nest under their parent when the parent is in the list; a family sorts and groups by
+// its most active member, so a parent whose sub-agents are working sits in 工作中 with them.
+const kidFold = new Map(); // parent key -> true folded / false fully open; unset = auto
+const KIDS_AUTO = 4; // auto mode shows every working child plus the 3 latest, the rest behind "还有 N 个"
+function sessionTree(all) {
+  const by = new Map(all.map((s) => [s.key, s])), kids = new Map(), roots = [], fam = new Map();
+  for (const s of all) {
+    if (s.parent && s.parent !== s.key && by.has(s.parent)) (kids.get(s.parent) || kids.set(s.parent, []).get(s.parent)).push(s);
+    else roots.push(s);
+  }
+  const walk = (s, path) => {
+    if (fam.has(s.key)) return fam.get(s.key);
+    const f = { work: s.status === "work", updated: s.updated_at };
+    fam.set(s.key, f);
+    path.add(s.key);
+    for (const k of kids.get(s.key) || []) {
+      if (path.has(k.key)) continue;
+      const g = walk(k, path);
+      f.work ||= g.work; f.updated = Math.max(f.updated, g.updated);
+    }
+    path.delete(s.key);
+    return f;
+  };
+  for (const s of roots) walk(s, new Set());
+  // a parent cycle leaves its members unreachable from any root: list them as roots instead
+  for (const s of all) if (!fam.has(s.key)) { roots.push(s); walk(s, new Set()); }
+  for (const ks of kids.values()) ks.sort((a, b) => fam.get(b.key).work - fam.get(a.key).work || fam.get(b.key).updated - fam.get(a.key).updated);
+  return { roots, kids, fam };
+}
+function nodeHtml(s, tree, out, seen = new Set()) {
+  seen.add(s.key);
+  out.push(s.key);
+  const ks = (tree.kids.get(s.key) || []).filter((k) => !seen.has(k.key));
+  if (!ks.length) return `<div class="node">${rowHtml(s)}</div>`;
+  const fold = kidFold.get(s.key), busy = ks.filter((k) => tree.fam.get(k.key).work).length;
+  const vis = fold === true ? [] : fold === false || ks.length <= KIDS_AUTO ? ks : ks.slice(0, Math.max(3, busy));
+  const sel = ks.find((k) => k.key === selected); // the open session always stays visible
+  if (sel && !vis.includes(sel)) vis.push(sel);
+  const more = ks.length - vis.length;
+  const open = vis.length > 0;
+  const head = `<div class="node kh"><button class="kid-tog${busy ? " busy" : ""}" data-kids="${esc(s.key)}" aria-expanded="${open}" title="${open ? "收起" : "展开"}子代理">${icon("chev")}<span>${ks.length} 个子代理${busy ? ` · ${busy} 工作中` : ""}</span></button></div>`;
+  const kidsHtml = vis.map((k) => nodeHtml(k, tree, out, seen)).join("")
+    + (more && open ? `<div class="node more"><button class="kids-more" data-kids="${esc(s.key)}">还有 ${more} 个子代理</button></div>` : "");
+  return `<div class="node fam">${rowHtml(s)}<div class="kids" role="group" aria-label="${esc(label(s))} 的子代理">${head}${kidsHtml}</div></div>`;
+}
 function rowHtml(s) {
   const u = s.usage, cost = usageCost(u);
-  return `<div class="row${s.key === selected ? " sel" : ""}" data-key="${esc(s.key)}" data-status="${s.status}">
+  // a sub-agent whose parent is not in the list says so; nested ones show it through the tree lines
+  const orphan = s.parent && !sessions.has(s.parent) ? '<span class="sub-i" title="子代理，父会话不在当前列表">↳ 子代理</span>' : "";
+  return `<div class="row${s.key === selected ? " sel" : ""}${s.parent && sessions.has(s.parent) ? " kid" : ""}" data-key="${esc(s.key)}" data-status="${s.status}">
     <span class="ricon htile" style="--h:${hue(s.harness)}">${hicon(s.harness)}${s.status === "work" ? '<i class="live-ring"></i>' : ""}</span>
     <div class="row-main"><span class="row-title txt">${esc(label(s))}</span>
-      <div class="row-meta">${s.parent ? '<span class="sub-i" title="子会话">↳</span>' : ""}<span class="cwd txt">${esc(base(s.cwd) || s.harness)}</span>${s.model ? `<span class="sep">·</span><span class="mono">${esc(s.model)}</span>` : ""}${s.archived ? '<span class="tag acc" title="源文件已清理，内容来自精简归档">已归档</span>' : ""}${s.pid ? `<span class="pid" title="进程 ${s.pid}">⚡${s.pid}</span>` : ""}</div></div>
+      <div class="row-meta">${orphan}<span class="cwd txt">${esc(base(s.cwd) || s.harness)}</span>${s.model ? `<span class="sep">·</span><span class="mono">${esc(s.model)}</span>` : ""}${s.archived ? '<span class="tag acc" title="源文件已清理，内容来自精简归档">已归档</span>' : ""}${s.pid ? `<span class="pid" title="进程 ${s.pid}">⚡${s.pid}</span>` : ""}</div></div>
     <div class="row-side"><span class="age" data-ts="${s.updated_at}">${age(s.updated_at)}</span>${cost ? `<span class="row-cost" title="API 等价成本 ${esc(cost)} · ${full(tokensOf(u))} token · ${u.steps} 步">${esc(cost)}</span>` : ""}</div>
   </div>`;
 }
@@ -2539,7 +2615,7 @@ function renderHead(s, rebuild = false) {
     ${s.model ? `<span class="mchip mono">${icon("cpu")}<span>${esc(s.model)}</span></span>` : ""}
     ${s.cwd ? `<span class="mchip mono" title="${esc(s.cwd)}">${icon("folder")}<span class="txt">${esc(shortPath(s.cwd))}</span></span>` : ""}
     ${s.archived ? '<span class="tag acc" title="源文件已移入回收站，内容来自精简归档">已归档</span>' : ""}
-    ${s.parent ? `<span class="mchip">${icon("branch")}<span>子会话</span></span>` : ""}`;
+    ${s.parent ? `<button class="mchip parent-link" data-open="${esc(s.parent)}" title="打开父会话 ${esc(s.parent)}">${icon("branch")}<span>子代理 · 父会话 <span class="txt">${esc(sessions.has(s.parent) ? label(sessions.get(s.parent)) : short(s.parent))}</span></span></button>` : ""}`;
   renderInspector(s);
   loadHeadResume(s.key);
   renderUsageStrip(s.usage);
@@ -4754,6 +4830,12 @@ document.addEventListener("click", (e) => {
     syncFilters();
     queueSearch(0);
     return;
+  }
+  const kt = t.closest("[data-kids]");
+  if (kt) {
+    const k = kt.dataset.kids;
+    kidFold.set(k, kt.classList.contains("kids-more") ? false : kt.getAttribute("aria-expanded") === "true");
+    return renderList();
   }
   const row = t.closest(".row[data-key]");
   if (row) return select(row.dataset.key);
