@@ -223,7 +223,9 @@ async fn usage_groups_add_up_project_dir_window_and_tz() {
     }
     let (status, _) = get(srv.addr, "/v1/usage?group_by=nope").await;
     assert_eq!(status, 400);
-    let (status, _) = get(srv.addr, "/v1/usage?tz=Mars/Base").await;
+    // malformed everywhere; a well-formed unknown IANA name counts as local where the OS has no
+    // zoneinfo (Windows), see `usage::tz`
+    let (status, _) = get(srv.addr, "/v1/usage?tz=Mars/Base!").await;
     assert_eq!(status, 400);
 
     // Turn B (D-2 23:30 UTC) is already D-1 in +08:00.
