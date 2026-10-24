@@ -347,6 +347,7 @@ pub(crate) fn spawn_detached(bind: &str, token: Option<String>) -> Result<()> {
         const DETACHED_PROCESS: u32 = 0x0000_0008;
         const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
         cmd.creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+        uniflo_core::util::stdio_not_inheritable();
     }
     #[cfg(unix)]
     {

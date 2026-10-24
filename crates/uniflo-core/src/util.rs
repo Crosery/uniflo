@@ -155,6 +155,21 @@ pub fn pid_alive(pid: u32) -> bool {
     }
 }
 
+/// Keeps this process's stdin / stdout / stderr out of processes it spawns from now on.
+///
+/// Windows spawns with `bInheritHandles`, so a detached child would also inherit these handles;
+/// when they are a caller's pipes, the caller waits for EOF until that child exits.
+#[cfg(windows)]
+pub fn stdio_not_inheritable() {
+    use windows_sys::Win32::Foundation::{HANDLE_FLAG_INHERIT, SetHandleInformation};
+    use windows_sys::Win32::System::Console::{GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE};
+    for id in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+        // SAFETY: only the inherit flag of a handle this process owns changes; a missing std
+        // handle comes back null or invalid and SetHandleInformation rejects it.
+        unsafe { SetHandleInformation(GetStdHandle(id), HANDLE_FLAG_INHERIT, 0) };
+    }
+}
+
 #[cfg(windows)]
 pub const CREATE_NO_WINDOW: u32 = 0x08000000;
 
