@@ -217,6 +217,9 @@ button { font: inherit; color: inherit; }
 .prose blockquote { margin: 16px 0; padding: 2px 16px; border-left: 3px solid var(--accent); background: var(--accent-bg); border-radius: 0 10px 10px 0; }
 .prose hr { border: 0; border-top: 1px solid var(--line); margin: 32px 0; }
 .prose img { max-width: 100%; height: auto; border-radius: 12px; border: 1px solid var(--line); }
+/* badges: linked images inside a paragraph sit on one line */
+.prose p > a > img { display: inline-block; vertical-align: middle; border: 0; border-radius: 0; margin-right: 4px; }
+.table td img { border-radius: 8px; }
 .table { margin: 18px 0; overflow-x: auto; border: 1px solid var(--line); border-radius: 12px; }
 .table table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
 .table th { text-align: left; font-weight: 600; background: var(--bg2); color: var(--fg); white-space: nowrap; }

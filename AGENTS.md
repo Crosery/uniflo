@@ -15,7 +15,7 @@ Uniflo：本机常驻守护进程，持续读取所有 agent harness（Claude Co
 | 改网关接口、鉴权、CORS | `docs/api.md` + `docs/decisions/ADR-0004-网关只监听本机.md`；写接口再读 `docs/decisions/ADR-0006-会话清理与写接口.md` |
 | 改搜索语法 | `docs/search.md` |
 | 改 MCP 服务器、Skill、`uniflo setup`、resume / memory / context | `docs/agents.md` + `docs/decisions/ADR-0007-setup-写-harness-配置.md` |
-| 改网页演示 | `examples/web/index.html`、`scripts/demo-e2e.mjs`、`docs/conventions/DEVELOPMENT.md#测试` |
+| 改网页演示 | `examples/web/index.html`、`docs/console.md`、`scripts/demo-e2e.mjs`、`docs/conventions/DEVELOPMENT.md#测试` |
 | 提交代码 | `docs/conventions/COMMITS.md` |
 | 分支、MR/PR、合并 | `docs/conventions/BRANCHING.md`、`docs/conventions/GIT.md` |
 | 写或改文档、ADR、worklog | `docs/conventions/DOCUMENTATION.md` |

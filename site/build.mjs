@@ -2,7 +2,7 @@
 // Builds the developer site into target/site from the repo's own docs (single source of truth):
 // every page also ships as Markdown, plus llms.txt / llms-full.txt for agents. No dependencies.
 //   node site/build.mjs [outDir]
-import { mkdirSync, readFileSync, writeFileSync, copyFileSync, rmSync, existsSync } from "node:fs";
+import { mkdirSync, readFileSync, readdirSync, writeFileSync, copyFileSync, rmSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -20,6 +20,7 @@ const PAGES = [
   ["schema", "Wire schema", "docs/schema.md", "Session、Event、Envelope 与用量、检索响应类型"],
   ["search", "搜索语法", "docs/search.md", "会话过滤与模糊匹配、全文检索语法与排序"],
   ["agents", "Agent 接入", "docs/agents.md", "MCP 服务器、Skill、uniflo setup、恢复会话、记忆与接力上下文"],
+  ["console", "网页控制台", "docs/console.md", "/demo 的六个视图、命令面板、主题、URL 参数与验收"],
   ["architecture", "架构", "docs/architecture.md", "crate 分层、数据流、状态机、扩展点"],
   ["adapters", "Harness 适配", "docs/adapters.md", "33 个 harness 的存储位置、回合信号与用量口径"],
 ];
@@ -37,6 +38,8 @@ function link(href, from) {
   for (const seg of (base + path).split("/")) seg === ".." ? parts.pop() : seg && seg !== "." && parts.push(seg);
   const target = parts.join("/");
   if (bySource.has(target)) return `${bySource.get(target)}.html${hash ? "#" + hash : ""}`;
+  // docs/assets/* ship with the site (copied below); other repo files link to GitHub
+  if (target.startsWith("docs/assets/")) return `assets/${target.slice("docs/assets/".length)}`;
   if (!path) return "#" + hash;
   return `${REPO}/blob/main/${target}${hash ? "#" + hash : ""}`;
 }
@@ -182,7 +185,7 @@ const HERO = ["claude", "codex", "gemini", "opencode", "omp", "cursor", "copilot
 const symbols = HERO.map((id) => (sprite.match(new RegExp(`<symbol id="hi-${id}"[\\s\\S]*?</symbol>`)) || [""])[0]);
 if (symbols.some((x) => !x)) throw new Error("harness icon missing from examples/web/index.html: " + HERO.filter((_, i) => !symbols[i]).join(","));
 const iconSprite = `<svg width="0" height="0" style="position:absolute" aria-hidden="true">${symbols.join("")}</svg>`;
-copyFileSync(join(root, "docs/assets/demo.png"), join(out, "assets/demo.png"));
+for (const f of readdirSync(join(root, "docs/assets"))) copyFileSync(join(root, "docs/assets", f), join(out, "assets", f));
 
 const full = [`# Uniflo v${version} — full documentation\n\nSource: ${REPO} · Site: ${SITE}\n`];
 for (const p of PAGES) {

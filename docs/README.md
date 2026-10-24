@@ -2,7 +2,7 @@
 
 > Uniflo 的规范、架构与决策都在 `docs/`；本页是入口，按任务找文档。
 
-状态：`current` · 更新：2026-10-24
+状态：`current` · 更新：2026-10-25
 
 | 目录 / 文件 | 内容 |
 |---|---|
@@ -13,8 +13,9 @@
 | `search.md` | 会话搜索语法（fd 式过滤 + fzf 式模糊）与全文检索语法 |
 | `adapters.md` | 已支持的 harness 与新增适配步骤 |
 | `agents.md` | agent 接入：MCP 服务器、Skill、`uniflo setup`、恢复会话、记忆与指令文件、接力上下文 |
+| `console.md` | 网页控制台（`/demo`）：六个视图、命令面板与通知、布局与 URL 参数、依赖与验收 |
 | `conventions/DEVELOPMENT.md` | 模块边界、代码风格、性能预算、隐私红线 |
-| `assets/` | README 截图，由 `scripts/demo-e2e.mjs` 用合成数据生成，不含真实会话 |
+| `assets/` | README 与 `console.md` 的截图，由 `scripts/demo-e2e.mjs` 用合成数据生成，不含真实会话；头图 `banner.jpg` 由 gpt-image-2.5 生成；开发者站构建时整个目录随站发布 |
 | `conventions/COMMITS.md` | 提交信息与原子性 |
 | `conventions/BRANCHING.md` | main / stage 双长期分支模型与硬不变量 |
 | `conventions/GIT.md` | 分支、合并、推送与授权边界 |
