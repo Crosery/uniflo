@@ -4,10 +4,31 @@ use serde_json::Value;
 use std::collections::HashMap;
 use uniflo_schema::{CatalogEntry, MatchKind, PriceSegment, PriceTier};
 
-/// Official vendors whose own list prices are used; resellers mark up or drop cache prices.
+/// Official vendors whose own list price is used as-is. Every other models.dev provider
+/// (resellers and aggregators, including OpenRouter) is folded instead into one median-priced
+/// consensus entry per model — a reseller's headline price is often its cheapest route, not
+/// the vendor's price (e.g. OpenRouter lists glm-5.3 input at $0.079/M against Zhipu's official
+/// $1.4/M, kimi-k3 at $0.239/M against $3/M), so no single reseller price is trustworthy on its
+/// own; see [`parse_resellers`] and ADR-0010.
 /// Order breaks ties when two vendors list the same model id.
-pub const FIRST_PARTY: &[&str] =
-    &["anthropic", "openai", "google", "minimax", "moonshotai", "zai", "deepseek", "alibaba", "xai", "groq"];
+pub const FIRST_PARTY: &[&str] = &[
+    "anthropic",
+    "openai",
+    "google",
+    "minimax",
+    "moonshotai",
+    "zai",
+    "deepseek",
+    "alibaba",
+    "xai",
+    "groq",
+    "xiaomi",
+    "meta",
+    "stepfun",
+    "mistral",
+    "cohere",
+    "perplexity",
+];
 
 /// LiteLLM `litellm_provider` → vendor, in priority order.
 const LITELLM_PROVIDERS: &[(&str, &str)] = &[
@@ -39,13 +60,30 @@ fn round6(x: f64) -> f64 {
     (x * 1e6).round() / 1e6
 }
 
+/// Middle value of a non-empty, unsorted sample (average of the two middles when even-sized).
+fn median(mut xs: Vec<f64>) -> f64 {
+    if xs.is_empty() {
+        return f64::NAN;
+    }
+    xs.sort_by(|a, b| a.partial_cmp(b).expect("finite prices only"));
+    let n = xs.len();
+    if n % 2 == 1 { xs[n / 2] } else { round6((xs[n / 2 - 1] + xs[n / 2]) / 2.0) }
+}
+
+/// The key with the highest count, ties broken lexicographically smallest.
+fn most_frequent(counts: &HashMap<String, u32>) -> Option<String> {
+    counts.iter().max_by(|a, b| a.1.cmp(b.1).then_with(|| b.0.cmp(a.0))).map(|(k, _)| k.clone())
+}
+
 fn last_segment(id: &str) -> &str {
     id.rsplit('/').next().unwrap_or(id)
 }
 
 /// models.dev `api.json`: `{provider: {models: {id: {cost: {input, output, cache_read?,
 /// cache_write?, tiers?[{tier:{type:"context", size}, …}], context_over_200k?}, limit: {context, output}}}}}`.
-/// Only [`FIRST_PARTY`] vendors are read. A missing cache-read price is `NaN` until [`fill_missing`].
+/// [`FIRST_PARTY`] vendors are read as their own list price; every model name none of them
+/// covers gets one [`parse_resellers`] consensus entry from the remaining providers instead.
+/// A missing cache-read price is `NaN` until [`fill_missing`].
 pub fn parse_models_dev(v: &Value) -> Vec<CatalogEntry> {
     let mut out: Vec<CatalogEntry> = Vec::new();
     let mut seen: HashMap<String, ()> = HashMap::new();
@@ -109,7 +147,112 @@ pub fn parse_models_dev(v: &Value) -> Vec<CatalogEntry> {
             });
         }
     }
+    out.extend(parse_resellers(v, &seen));
     out
+}
+
+/// One reseller's listing of a model, kept only long enough to fold into a median.
+struct Listing {
+    input: f64,
+    output: f64,
+    cache_read: Option<f64>,
+    cache_write: Option<f64>,
+    context_limit: Option<f64>,
+    output_limit: Option<f64>,
+}
+
+/// Everything collected for one [`match_key`] group before it becomes one consensus entry.
+#[derive(Default)]
+struct Consensus {
+    listings: Vec<Listing>,
+    /// Original last-segment spelling → how many providers used exactly that spelling.
+    spellings: HashMap<String, u32>,
+    /// `vendor` prefix of ids shaped `vendor/model` (e.g. OpenRouter's `deepseek/deepseek-v4.1-flash`).
+    vendors: HashMap<String, u32>,
+}
+
+/// One median-priced entry per model name that no [`FIRST_PARTY`] vendor lists, built from
+/// every other models.dev provider (resellers, aggregators, including OpenRouter itself as one
+/// vote). `:free` / `-free` ids and listings without a positive input and output price are
+/// excluded so a free tier or a missing price never pulls the median down; see ADR-0010.
+fn parse_resellers(v: &Value, seen: &HashMap<String, ()>) -> Vec<CatalogEntry> {
+    let Some(obj) = v.as_object() else { return Vec::new() };
+    let mut providers: Vec<&String> = obj.keys().filter(|p| !FIRST_PARTY.contains(&p.as_str())).collect();
+    providers.sort();
+    let mut groups: HashMap<String, Consensus> = HashMap::new();
+    for provider in providers {
+        let Some(models) = v.pointer(&format!("/{provider}/models")).and_then(Value::as_object) else { continue };
+        let mut ids: Vec<&String> = models.keys().collect();
+        ids.sort();
+        for raw in ids {
+            let id = last_segment(raw);
+            if id.ends_with(":free") || id.ends_with("-free") {
+                continue;
+            }
+            let key = match_key(id);
+            if seen.contains_key(&key) {
+                continue;
+            }
+            let m = &models[raw];
+            let Some(cost) = m.get("cost") else { continue };
+            let (Some(input), Some(output)) = (num(cost, "input"), num(cost, "output")) else { continue };
+            if !(input > 0.0 && output > 0.0) {
+                continue;
+            }
+            let g = groups.entry(key).or_default();
+            *g.spellings.entry(id.to_owned()).or_insert(0) += 1;
+            if let Some((vendor, _)) = raw.rsplit_once('/') {
+                *g.vendors.entry(vendor.to_owned()).or_insert(0) += 1;
+            }
+            g.listings.push(Listing {
+                input,
+                output,
+                cache_read: num(cost, "cache_read"),
+                cache_write: num(cost, "cache_write"),
+                context_limit: m.pointer("/limit/context").and_then(Value::as_u64).filter(|n| *n > 0).map(|n| n as f64),
+                output_limit: m.pointer("/limit/output").and_then(Value::as_u64).filter(|n| *n > 0).map(|n| n as f64),
+            });
+        }
+    }
+    let mut keys: Vec<&String> = groups.keys().collect();
+    keys.sort();
+    keys.into_iter()
+        .map(|key| {
+            let g = &groups[key];
+            let cache_read = {
+                let xs: Vec<f64> = g.listings.iter().filter_map(|l| l.cache_read).collect();
+                if xs.is_empty() { f64::NAN } else { median(xs) }
+            };
+            let cache_write = {
+                let xs: Vec<f64> = g.listings.iter().filter_map(|l| l.cache_write).collect();
+                (!xs.is_empty()).then(|| median(xs))
+            };
+            let context_limit = {
+                let xs: Vec<f64> = g.listings.iter().filter_map(|l| l.context_limit).collect();
+                (!xs.is_empty()).then(|| median(xs).round() as u64)
+            };
+            let output_limit = {
+                let xs: Vec<f64> = g.listings.iter().filter_map(|l| l.output_limit).collect();
+                (!xs.is_empty()).then(|| median(xs).round() as u64)
+            };
+            CatalogEntry {
+                id: most_frequent(&g.spellings).unwrap_or_default(),
+                provider: most_frequent(&g.vendors).unwrap_or_default(),
+                prices: vec![PriceSegment {
+                    from: 0,
+                    until: None,
+                    input: median(g.listings.iter().map(|l| l.input).collect()),
+                    output: median(g.listings.iter().map(|l| l.output).collect()),
+                    cache_read,
+                    cache_write,
+                    tiers: Vec::new(),
+                }],
+                context_limit,
+                output_limit,
+                source: MODELS_DEV.into(),
+            }
+        })
+        .collect()
 }
 
 /// LiteLLM `model_prices_and_context_window.json`: per-token prices keyed by model name.
@@ -298,6 +441,101 @@ fn skeleton(key: &str) -> Option<(String, Vec<u64>)> {
     (!nums.is_empty()).then_some((sk, nums))
 }
 
+/// Words that mark a product tier/variant rather than the model family itself. Dropping one of
+/// these off the *end* of a name is never allowed (`qwen3.8-max` must not fall back to
+/// `qwen3.8`, `gpt-5-mini` must not fall back to `gpt-5`) because it would silently price a
+/// bigger or smaller tier as if it were the base model.
+const TIER_WORDS: &[&str] = &[
+    "mini",
+    "nano",
+    "micro",
+    "lite",
+    "flash",
+    "pro",
+    "max",
+    "plus",
+    "turbo",
+    "ultra",
+    "small",
+    "medium",
+    "large",
+    "xl",
+    "haiku",
+    "sonnet",
+    "opus",
+    "air",
+    "fast",
+    "instant",
+    "coder",
+    "codex",
+    "vision",
+    "omni",
+    "audio",
+    "image",
+    "embed",
+    "embedding",
+    "reasoner",
+    "chat",
+    "base",
+];
+
+fn is_tier_word(w: &str) -> bool {
+    TIER_WORDS.iter().any(|t| t.eq_ignore_ascii_case(w))
+}
+
+/// Byte spans of the words in `s`, splitting on `-` and `:` (the separators themselves are
+/// dropped but their position is implicit: joining the spans of a contiguous range reproduces
+/// the original separators between them).
+fn word_spans(s: &str) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    let mut start = None;
+    for (i, ch) in s.char_indices() {
+        if ch == '-' || ch == ':' {
+            if let Some(from) = start.take() {
+                spans.push((from, i));
+            }
+        } else if start.is_none() {
+            start = Some(i);
+        }
+    }
+    if let Some(from) = start {
+        spans.push((from, s.len()));
+    }
+    spans
+}
+
+/// Contiguous word-range substrings of `base`, strictly shorter than the whole name, longest
+/// first; within one length the window that drops the most *leading* words comes first (so a
+/// harness prefix like `qcn-` or `cline-` is tried before trimming any suffix). A window must
+/// start with an ASCII letter, carry an ASCII digit or span at least two words (`oc-space-bunny`
+/// → `space-bunny`, while `mimo-auto` never shrinks to a bare `mimo`), and may not drop a
+/// [`TIER_WORDS`] word off the end — handles prefixes (`qcn-qwen3.8-flash`), suffixes (`gemini-3.8-flash-high`,
+/// `claude-opus-4-6-thinking`, `qwen3.6-plus-free`) and both at once.
+fn name_windows(base: &str) -> Vec<&str> {
+    let spans = word_spans(base);
+    let n = spans.len();
+    let mut out = Vec::new();
+    if n < 2 {
+        return out;
+    }
+    for len in (1..n).rev() {
+        for start in (0..=(n - len)).rev() {
+            let end = start + len;
+            let dropped_trailing_is_tier = (end..n).any(|k| is_tier_word(&base[spans[k].0..spans[k].1]));
+            if dropped_trailing_is_tier {
+                continue;
+            }
+            let win = &base[spans[start].0..spans[end - 1].1];
+            if win.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
+                && (len >= 2 || win.bytes().any(|b| b.is_ascii_digit()))
+            {
+                out.push(win);
+            }
+        }
+    }
+    out
+}
+
 /// Entries plus lookup indexes; later layers are merged in by the caller.
 #[derive(Debug, Default, Clone)]
 pub struct Catalog {
@@ -341,27 +579,51 @@ impl Catalog {
         self.entries.is_empty()
     }
 
-    /// Exact (after normalization) → nearest version of the same name skeleton (`approx`) → none.
+    /// Exact (after normalization, incl. dateless) on the full name → exact on a trimmed name
+    /// window → nearest version of the same name skeleton (`approx`) on the full name →
+    /// nearest version on a window → none. A window hit is always `approx`: it already matched
+    /// by dropping harness/reseller prefixes or suffixes (see [`name_windows`]), so it is never
+    /// as certain as the full name matching outright.
     pub fn resolve(&self, model: &str) -> (MatchKind, Option<usize>) {
         let base = base_name(model);
         if base.is_empty() {
             return (MatchKind::None, None);
         }
-        let dateless = match_key(strip_date(base));
-        if let Some(&i) = self.exact.get(&match_key(base)).or_else(|| self.exact.get(&dateless)) {
+        if let Some(i) = self.exact_lookup(base) {
             return (MatchKind::Exact, Some(i));
         }
-        let Some((sk, want)) = skeleton(&dateless) else { return (MatchKind::None, None) };
-        let best = self.families.get(&sk).and_then(|cands| {
+        for win in name_windows(base) {
+            if let Some(i) = self.exact_lookup(win) {
+                return (MatchKind::Approx, Some(i));
+            }
+        }
+        if let Some(i) = self.nearest_version(&match_key(strip_date(base))) {
+            return (MatchKind::Approx, Some(i));
+        }
+        for win in name_windows(base) {
+            if let Some(i) = self.nearest_version(&match_key(strip_date(win))) {
+                return (MatchKind::Approx, Some(i));
+            }
+        }
+        (MatchKind::None, None)
+    }
+
+    /// `name`, normalized and with its date suffix also tried, looked up in the exact index.
+    fn exact_lookup(&self, name: &str) -> Option<usize> {
+        let dateless = match_key(strip_date(name));
+        self.exact.get(&match_key(name)).or_else(|| self.exact.get(&dateless)).copied()
+    }
+
+    /// Closest version within `dateless`'s name skeleton (see [`skeleton`]), ties broken by id.
+    fn nearest_version(&self, dateless: &str) -> Option<usize> {
+        let (sk, want) = skeleton(dateless)?;
+        self.families.get(&sk).and_then(|cands| {
             cands
                 .iter()
                 .map(|(i, got)| (got.iter().zip(&want).map(|(a, b)| a.abs_diff(*b)).sum::<u64>(), *i))
                 .min_by(|a, b| a.0.cmp(&b.0).then_with(|| self.entries[a.1].id.cmp(&self.entries[b.1].id)))
-        });
-        match best {
-            Some((_, i)) => (MatchKind::Approx, Some(i)),
-            None => (MatchKind::None, None),
-        }
+                .map(|(_, i)| i)
+        })
     }
 }
 
@@ -447,6 +709,80 @@ mod tests {
     }
 
     #[test]
+    fn name_windows_match_harness_prefixes_and_suffixes() {
+        let c = Catalog::new(vec![
+            entry("qwen3.8-flash"),
+            entry("deepseek-v4.1-flash"),
+            entry("gemini-3.8-flash"),
+            entry("claude-opus-4-6"),
+            entry("qwen3.6-plus"),
+        ]);
+        let id = |m: &str| {
+            let (k, i) = c.resolve(m);
+            (k, i.map(|i| c.entries[i].id.clone()))
+        };
+        let approx = |id: &str| (MatchKind::Approx, Some(id.to_string()));
+        // Harness/CLI wrappers prepend their own tag.
+        assert_eq!(id("qcn-qwen3.8-flash"), approx("qwen3.8-flash"));
+        assert_eq!(id("cline-deepseek-v4.1-flash"), approx("deepseek-v4.1-flash"));
+        // A non-tier suffix (a qualifier, an expiry tag, a free-tier marker) is dropped fine.
+        assert_eq!(id("gemini-3.8-flash-high"), approx("gemini-3.8-flash"));
+        assert_eq!(id("gemini-3.8-flash-exp-a"), approx("gemini-3.8-flash"));
+        assert_eq!(id("deepseek-v4.1-flash-expires-on-0910"), approx("deepseek-v4.1-flash"));
+        assert_eq!(id("claude-opus-4-6-thinking"), approx("claude-opus-4-6"));
+        assert_eq!(id("qwen/qwen3.6-plus:free"), approx("qwen3.6-plus"));
+        assert_eq!(id("qwen3.6-plus-free"), approx("qwen3.6-plus"));
+    }
+
+    #[test]
+    fn name_window_guard_blocks_tier_word_drop() {
+        let c = Catalog::new(vec![entry("gpt-5"), entry("qwen3.8"), entry("mimo"), entry("space-bunny")]);
+        assert_eq!(c.resolve("gpt-5").0, MatchKind::Exact);
+        assert_eq!(
+            c.resolve("gpt-5-mini"),
+            (MatchKind::None, None),
+            "mini is a tier word: must not fall back to gpt-5"
+        );
+        assert_eq!(
+            c.resolve("qwen3.8-max"),
+            (MatchKind::None, None),
+            "max is a tier word: must not fall back to qwen3.8"
+        );
+        assert_eq!(c.resolve("mimo-auto"), (MatchKind::None, None), "a one-word window needs a digit");
+        let (k, i) = c.resolve("oc-space-bunny");
+        assert_eq!(
+            (k, i.map(|i| c.entries[i].id.as_str())),
+            (MatchKind::Approx, Some("space-bunny")),
+            "two words need no digit"
+        );
+        assert_eq!(c.resolve("qfmodel"), (MatchKind::None, None), "single word: no window at all");
+    }
+
+    #[test]
+    fn reseller_consensus_median_free_and_zero_and_first_party_priority() {
+        let md = json!({
+            "anthropic": {"models": {"claude-x-1": {"cost": {"input": 3.0, "output": 15.0}}}},
+            "resellerA": {"models": {
+                "claude-x-1": {"cost": {"input": 1.0, "output": 1.0}},
+                "foo-1": {"cost": {"input": 1.0, "output": 2.0}}
+            }},
+            "resellerB": {"models": {"foo-1": {"cost": {"input": 2.0, "output": 4.0}}}},
+            "resellerC": {"models": {"foo-1": {"cost": {"input": 3.0, "output": 6.0}}}},
+            "resellerD": {"models": {"foo-1:free": {"cost": {"input": 0.0, "output": 0.0}}}},
+            "resellerE": {"models": {"bar-1": {"cost": {"input": 0.0, "output": 0.0}}}}
+        });
+        let e = parse_models_dev(&md);
+        assert_eq!(
+            e.iter().map(|x| x.id.as_str()).collect::<Vec<_>>(),
+            ["claude-x-1", "foo-1"],
+            "a reseller price never overrides the first-party one; :free and zero-priced listings are skipped"
+        );
+        assert_eq!(e[0].prices[0].input, 3.0, "first-party price, not resellerA's 1.0");
+        assert_eq!((e[1].prices[0].input, e[1].prices[0].output), (2.0, 4.0), "median of 1/2/3 and 2/4/6");
+        assert_eq!(e[1].source, MODELS_DEV);
+    }
+
+    #[test]
     fn cost_formula_tiers_and_cache_write_fallback() {
         let s = PriceSegment {
             input: 3.0,
@@ -485,11 +821,16 @@ mod tests {
         });
         let mut e = parse_models_dev(&md);
         fill_missing(&mut e);
-        assert_eq!(e.iter().map(|x| x.id.as_str()).collect::<Vec<_>>(), ["claude-x-1", "gemini-y-2"]);
+        assert_eq!(e.iter().map(|x| x.id.as_str()).collect::<Vec<_>>(), ["claude-x-1", "gemini-y-2", "resold"]);
         assert_eq!(e[0].prices[0].cache_write, Some(3.75));
         assert_eq!(e[1].prices[0].cache_read, 1.25, "missing cache price = full input price");
         assert_eq!(e[1].prices[0].tiers[0].above, 200_000);
         assert_eq!(e[1].context_limit, Some(1_000_000));
+        // openrouter is not a first-party vendor: its listing becomes a reseller-consensus entry
+        // (median over one vote = that vote), not a dropped/ignored one.
+        assert_eq!(e[2].source, MODELS_DEV);
+        assert_eq!(e[2].provider, "", "no `vendor/` prefix in the raw id");
+        assert_eq!((e[2].prices[0].input, e[2].prices[0].output), (9.0, 9.0));
 
         let ll = json!({
             "claude-x-1": {"litellm_provider": "anthropic", "mode": "chat", "input_cost_per_token": 1e-6, "output_cost_per_token": 2e-6},
@@ -504,7 +845,7 @@ mod tests {
         assert_eq!(l[1].prices[0].tiers[0].input, 2.5);
         assert_eq!(l[1].provider, "google");
         let m = merge(e, l);
-        assert_eq!(m.len(), 3, "primary keeps claude-x-1, fallback adds gemini-z");
+        assert_eq!(m.len(), 4, "primary keeps claude-x-1, gemini-y-2, resold, fallback adds gemini-z");
         assert_eq!(m[0].source, MODELS_DEV);
     }
 }

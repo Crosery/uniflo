@@ -15,7 +15,12 @@ import { readFileSync, writeFileSync } from 'node:fs'
 const MODELS_DEV_URL = 'https://models.dev/api.json'
 const LITELLM_URL = 'https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json'
 // Mirrors catalog::FIRST_PARTY / LITELLM_PROVIDERS: official list prices only, no resellers.
-const FIRST_PARTY = ['anthropic', 'openai', 'google', 'minimax', 'moonshotai', 'zai', 'deepseek', 'alibaba', 'xai', 'groq']
+// (The Rust side also folds every other models.dev provider into a median-priced consensus
+// entry per model — see catalog::parse_resellers — which this snapshot builder does not do.)
+const FIRST_PARTY = [
+  'anthropic', 'openai', 'google', 'minimax', 'moonshotai', 'zai', 'deepseek', 'alibaba', 'xai', 'groq',
+  'xiaomi', 'meta', 'stepfun', 'mistral', 'cohere', 'perplexity',
+]
 const LITELLM_PROVIDERS = ['anthropic', 'openai', 'gemini', 'minimax', 'moonshot', 'zai', 'deepseek', 'dashscope', 'xai', 'groq']
 const LITELLM_MODES = ['chat', 'responses', 'completion']
 const COST_KEYS = ['input', 'output', 'cache_read', 'cache_write', 'tiers', 'context_over_200k']
