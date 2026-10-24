@@ -29,7 +29,7 @@ node scripts/check-dist.mjs
 node scripts/third-party-notices.mjs --check
 
 step "tests"
-cargo test --workspace -q
+cargo test --workspace -q --no-fail-fast   # list every failing test binary in one run (CI on three OSes)
 
 step "daemon release build + smoke test"
 cargo build --release -q
