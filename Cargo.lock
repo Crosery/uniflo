@@ -1578,8 +1578,10 @@ name = "uniflo-search"
 version = "0.2.0-beta.3"
 dependencies = [
  "anyhow",
+ "memchr",
  "nucleo-matcher",
  "rusqlite",
+ "ruzstd",
  "serde_json",
  "tempfile",
  "tokio",

@@ -97,6 +97,25 @@ pub struct FtsStatus {
     pub errors: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
+    /// Tiered storage (ADR-0011): sessions active within this many days are kept in the hot
+    /// (ADR-0008) format; older ones are compressed into the cold tier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hot_days: Option<u32>,
+    /// Event rows currently in the hot tier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hot_events: Option<u64>,
+    /// Event rows currently in the cold tier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cold_events: Option<u64>,
+    /// Compressed blocks currently in the cold tier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cold_blocks: Option<u64>,
+    /// Converting a leftover `fts-v1.sqlite` into the tiered format.
+    #[serde(default, skip_serializing_if = "crate::is_false")]
+    pub migrating: bool,
+    /// Bytes reclaimed by deleting the old-format file after this start's migration (0 if none).
+    #[serde(default)]
+    pub reclaimed_bytes: u64,
 }
 
 #[cfg(test)]

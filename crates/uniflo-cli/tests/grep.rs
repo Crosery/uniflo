@@ -160,7 +160,7 @@ fn grep_matches_rest_and_renders_sessions() {
 
     let (out, _) = uniflo(home.path(), &["--url", &url, "grep", "缓存击穿", "--filter", "id:s2", "--json"]);
     assert_eq!(hits(&serde_json::from_str(&out).unwrap()), vec![("claude:s2".to_owned(), vec!["v1".to_owned()])]);
-    assert_eq!(find(home.path(), "fts-v1.sqlite").len(), 1, "index lives under UNIFLO_HOME's cache dir");
+    assert_eq!(find(home.path(), "fts-v2.sqlite").len(), 1, "index lives under UNIFLO_HOME's cache dir");
     drop(d);
 
     // No daemon: the in-process path opens the same index and answers identically.
@@ -181,5 +181,5 @@ fn no_fts_answers_503_and_creates_no_index() {
     let (st, s) = get(d.port, "/v1/stats").unwrap();
     assert!(st == 200 && s["fts"].is_null());
     drop(d);
-    assert!(find(home.path(), "fts-v1.sqlite").is_empty());
+    assert!(find(home.path(), "fts-v2.sqlite").is_empty());
 }

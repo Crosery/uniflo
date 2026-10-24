@@ -24,6 +24,18 @@ pub struct Plan {
     pub not_like: Vec<String>,
     /// Positive terms in query order: what a snippet highlights.
     pub marks: Vec<String>,
+    /// Raw text of the long positive terms in `fts`'s `AND` clause, in order: the cold tier's
+    /// per-phrase bm25 weight and term frequency need the text itself, not just the FTS5
+    /// expression (ADR-0011).
+    pub pos_long: Vec<String>,
+    /// Raw text of the long negative terms folded into `fts`'s `NOT` clause (only ever non-empty
+    /// together with `pos_long`, which anchors them): the cold tier excludes rows containing them.
+    pub neg_long: Vec<String>,
+    /// Raw (unescaped) text behind `like`, same order: the cold tier matches these itself
+    /// (`LIKE`'s ASCII case-insensitive semantics) rather than through SQL.
+    pub like_raw: Vec<String>,
+    /// Raw (unescaped) text behind `not_like`, same order.
+    pub not_like_raw: Vec<String>,
 }
 
 impl Plan {
@@ -106,6 +118,8 @@ pub fn plan(terms: &[Term]) -> Option<Plan> {
         return None;
     }
     let mut not_like = Vec::new();
+    let mut not_like_raw = Vec::new();
+    let mut neg_long = Vec::new();
     let mut phrases = 0;
     let fts = (!pos_long.is_empty()).then(|| {
         let mut e = format!("({})", pos_long.iter().map(|t| quote(t)).collect::<Vec<_>>().join(" AND "));
@@ -115,21 +129,33 @@ pub fn plan(terms: &[Term]) -> Option<Plan> {
                 e.push_str(" NOT ");
                 e.push_str(&quote(&t.text));
                 phrases += 1;
+                neg_long.push(t.text.clone());
             }
         }
         e
     });
     for t in terms.iter().filter(|t| t.neg && (fts.is_none() || !is_long(&t.text))) {
         not_like.push(like_pattern(&t.text));
+        not_like_raw.push(t.text.clone());
     }
     let marks = terms.iter().filter(|t| !t.neg).map(|t| t.text.clone()).collect();
-    Some(Plan { fts, phrases, like: short.iter().map(|t| like_pattern(t)).collect(), not_like, marks })
+    Some(Plan {
+        fts,
+        phrases,
+        like: short.iter().map(|t| like_pattern(t)).collect(),
+        not_like,
+        marks,
+        pos_long: pos_long.iter().map(|t| t.to_string()).collect(),
+        neg_long,
+        like_raw: short.iter().map(|t| t.to_string()).collect(),
+        not_like_raw,
+    })
 }
 
 /// Byte offset of the first ASCII-case-insensitive occurrence of `needle` (what SQLite `LIKE`
 /// matches). Never lowercases: case mapping changes byte lengths (`İ`, `K`), so offsets taken
 /// from a lowered copy would not be valid in `hay`.
-fn find_ascii_ci(hay: &str, needle: &str) -> Option<usize> {
+pub(crate) fn find_ascii_ci(hay: &str, needle: &str) -> Option<usize> {
     let (h, n) = (hay.as_bytes(), needle.as_bytes());
     if n.is_empty() || n.len() > h.len() {
         return None;
@@ -138,10 +164,14 @@ fn find_ascii_ci(hay: &str, needle: &str) -> Option<usize> {
 }
 
 /// The text around the first occurrence of any `needles` (40 characters before, 80 after), with
-/// every occurrence inside that window highlighted. `None` when no needle occurs under ASCII case
-/// folding; the FTS5 index also folds non-ASCII case, so its matches can miss here.
-pub fn snippet(text: &str, needles: &[String]) -> Option<String> {
-    let (s, e) = needles.iter().filter_map(|n| find_ascii_ci(text, n).map(|i| (i, i + n.len()))).min()?;
+/// every occurrence inside that window highlighted, located by `find` (the byte range of the first
+/// match of a needle in a text). `None` when no needle is found by `find`.
+pub(crate) fn snippet_with(
+    text: &str,
+    needles: &[String],
+    find: impl Fn(&str, &str) -> Option<(usize, usize)>,
+) -> Option<String> {
+    let (s, e) = needles.iter().filter_map(|n| find(text, n)).min()?;
     let start = text[..s].char_indices().rev().nth(39).map_or(0, |(i, _)| i);
     let end = text[e..].char_indices().nth(80).map_or(text.len(), |(i, _)| e + i);
     let mut out = String::new();
@@ -151,7 +181,7 @@ pub fn snippet(text: &str, needles: &[String]) -> Option<String> {
     let mut at = start;
     // Earliest occurrence first, the longest needle when several start there.
     while let Some((i, Reverse(len))) =
-        needles.iter().filter_map(|n| find_ascii_ci(&text[at..end], n).map(|i| (at + i, Reverse(n.len())))).min()
+        needles.iter().filter_map(|n| find(&text[at..end], n).map(|(i, j)| (at + i, Reverse(j - i)))).min()
     {
         out.push_str(&text[at..i]);
         out.push(HIGHLIGHT_START);
@@ -164,6 +194,13 @@ pub fn snippet(text: &str, needles: &[String]) -> Option<String> {
         out.push('…');
     }
     Some(clean(&out))
+}
+
+/// The text around the first occurrence of any `needles` under ASCII case folding. `None` when no
+/// needle occurs that way; the FTS5 index also folds non-ASCII case, so its matches can miss here
+/// (the cold tier falls back to [`crate::fts::verify::fold_snippet`] in that case).
+pub fn snippet(text: &str, needles: &[String]) -> Option<String> {
+    snippet_with(text, needles, |hay, n| find_ascii_ci(hay, n).map(|i| (i, i + n.len())))
 }
 
 /// [`snippet`], or the start of the text when no needle occurs.

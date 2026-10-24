@@ -18,7 +18,7 @@ Engine（单写者循环）                  ← uniflo-core
    ├─ live()：存活进程 → pid、退出即 idle
    ├─ 会话表 + 每源游标（字节偏移 / rowid）
    └─ 广播 + 重放环（8192 条 Envelope，带全局 seq）
-   │       └─► Fts 写线程               ← uniflo-search::fts（广播 + history 分页 → fts-v1.sqlite）
+   │       └─► Fts 写线程               ← uniflo-search::fts（广播 + history 分页 → fts-v2.sqlite）
    ▼
 Gateway（axum）                       ← uniflo-gateway
    REST 快照 · SSE / NDJSON / WebSocket 实时流 · /v1/search（只读 FTS 索引）
@@ -43,9 +43,9 @@ Gateway（axum）                       ← uniflo-gateway
 
 ## 全文索引
 
-决策与取舍见 `docs/decisions/ADR-0008-全文检索索引.md`，这里只写运行时结构。
+决策与取舍见 `docs/decisions/ADR-0008-全文检索索引.md`（基础设计）与 `docs/decisions/ADR-0011-全文索引紧凑格式.md`（按会话年龄分热/冷两层存储），这里只写运行时结构。
 
-- **单写者**：`Fts::start` 起一个 `uniflo-fts` 线程，独占 `fts-v1.sqlite` 的写连接；查询走只读连接池，WAL 下读写互不阻塞。守护进程启动时先就绪 REST，索引在后台追赶。
+- **单写者**：`Fts::start` 起一个 `uniflo-fts` 线程，独占 `fts-v2.sqlite` 的写连接；查询走只读连接池，WAL 下读写互不阻塞。守护进程启动时先就绪 REST，索引在后台追赶。
 - **数据只来自引擎**：正文通过 `Engine::history`（与 `GET …/events` 同一条读取路径）分页读取，新事件来自引擎广播；不直接打开 harness 文件。
 - **一次 pass**：一个会话从最新一页往回读，读完记下 `done_upd` / `done_pos`；会话按 `updated_at` 倒序排队。广播丢失（lagged）、摘要读取不广播的事件、被删除的会话，由每 30 s 一次的对账补齐。
 - **pinned 会话**：`Fts::index_session` 写入的会话不在引擎里，对账和 `removed` 不删除它们，只有 `remove_session` 删除。

@@ -72,6 +72,10 @@ enum Cmd {
         /// Do not build or serve the full-text index (`/v1/search` answers 503, no index file is created).
         #[arg(long)]
         no_fts: bool,
+        /// Sessions active within this many days stay in the full-text index's hot (position-aware)
+        /// tier; older ones compact into the cold (block-level) tier (ADR-0011).
+        #[arg(long, default_value_t = uniflo_search::fts::DEFAULT_HOT_DAYS)]
+        fts_hot_days: u32,
         /// Disable every write endpoint (cleanup, archive deletion): they answer 403.
         #[arg(long)]
         read_only: bool,
@@ -223,6 +227,7 @@ fn main() -> Result<()> {
             no_price_sync,
             price_sync_delay,
             no_fts,
+            fts_hot_days,
             read_only,
             foreground,
             stop,
@@ -252,7 +257,7 @@ fn main() -> Result<()> {
             }
             let price_sync = (!no_price_sync)
                 .then(|| PriceSync { delay: Duration::from_secs(price_sync_delay), ..Default::default() });
-            daemon(bind, guard, stale_after, no_cache, !no_update_check, price_sync, !no_fts)
+            daemon(bind, guard, stale_after, no_cache, !no_update_check, price_sync, !no_fts, fts_hot_days)
         }
         Cmd::Scan { json, no_cache } => scan(json, no_cache),
         Cmd::Update { check, prerelease, json } => update::run(check, prerelease, json),
@@ -385,6 +390,7 @@ pub(crate) fn spawn_detached(bind: &str, token: Option<String>) -> Result<()> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn daemon(
     bind: &str,
     guard: GuardOptions,
@@ -393,6 +399,7 @@ fn daemon(
     update_check: bool,
     price_sync: Option<PriceSync>,
     fts: bool,
+    fts_hot_days: u32,
 ) -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -417,7 +424,7 @@ fn daemon(
             report.sessions, report.files, report.ms, report.read, report.restored
         );
         let _ = engine.save_cache();
-        let fts = fts.then(|| start_fts(&engine)).flatten();
+        let fts = fts.then(|| start_fts(&engine, fts_hot_days)).flatten();
         let cleanup = Cleanup::new(engine.clone(), CleanupOptions::from_env()).ok().map(Arc::new);
         let runner = tokio::spawn(engine.clone().run());
         let router = uniflo_gateway::router_with(engine.clone(), guard, uniflo_gateway::Services { fts, cleanup });
@@ -458,8 +465,8 @@ fn daemon(
 }
 
 /// The index builds in its own thread; failing to open it only disables `/v1/search`.
-fn start_fts(engine: &Arc<Engine>) -> Option<Arc<Fts>> {
-    match Fts::start(engine.clone(), FtsOptions::default()) {
+fn start_fts(engine: &Arc<Engine>, hot_days: u32) -> Option<Arc<Fts>> {
+    match Fts::start(engine.clone(), FtsOptions { hot_days, ..FtsOptions::default() }) {
         Ok(f) => {
             let st = f.status();
             eprintln!(

@@ -42,10 +42,10 @@ Uniflo：本机常驻守护进程，持续读取所有 agent harness（Claude Co
 ## 非显然的环境事实
 
 - 默认端口 `127.0.0.1:7311`；CLI 读 `UNIFLO_URL`、`UNIFLO_TOKEN`；`UNIFLO_HOME` 覆盖家目录（测试用）。
-- Uniflo 自己的数据目录走 `uniflo_core::paths`（macOS `~/Library/Application Support/uniflo`，价格在 `pricing/`）；`UNIFLO_DATA_DIR` 直接指定。注意索引缓存 `cache::default_path()` 只看 `dirs::cache_dir()`（即 `HOME`），对真实数据起测试守护进程要同时设 `HOME=<tmp>`、`UNIFLO_HOME=<真实家目录>`、`UNIFLO_DATA_DIR=<tmp>`，并绑 `127.0.0.1:74xx`，否则会覆盖本机常驻守护进程的缓存或价格文件。
+- Uniflo 自己的数据目录走 `uniflo_core::paths`（macOS `~/Library/Application Support/uniflo`，价格在 `pricing/`）；`UNIFLO_DATA_DIR` 直接指定。缓存目录 `cache_dir()` 也随 `UNIFLO_HOME` 重定位（`paths::rerooted()`）。对真实数据起测试守护进程必须同时设 `HOME=<tmp>`、`UNIFLO_HOME=<真实家目录>`、`UNIFLO_DATA_DIR=<tmp>`、`UNIFLO_CACHE_DIR=<tmp>`，并绑 `127.0.0.1:74xx`；漏设 `UNIFLO_CACHE_DIR` 会读写真实的索引、用量账本和价格文件，全文索引的迁移还会删掉真实的 `fts-v1.sqlite`。
 - 价格同步测试用 `UNIFLO_PRICING_URL` 指本地 HTTP 服务、`UNIFLO_PRICING_FALLBACK_URL=` 置空关闭 LiteLLM；守护进程隐藏参数 `--price-sync-delay <秒>` 控制首次同步时间。用量账本缓存 `usage-v1.json` 与索引缓存同目录，排查用量问题时删它或加 `--no-cache`。
 - 索引缓存 `~/Library/Caches/uniflo/index-v1.json`（macOS），标签含版本、schema 版本和适配器列表，任一变化自动失效；排查索引问题时加 `--no-cache`。
-- 全文索引 `~/Library/Caches/uniflo/fts-v1.sqlite`（含 `-wal`/`-shm`，本机约 5.6 GB，首建约 14 min），标签含格式版本、Uniflo 版本和 schema 版本，变化即整份重建。缓存目录随 `UNIFLO_HOME` 移动；一个缓存目录同时只该有一个守护进程写索引；用真实家目录另起守护进程做实验时，若常驻守护进程也开着全文索引，给其中一个加 `--no-fts`。
+- 全文索引 `~/Library/Caches/uniflo/fts-v2.sqlite`（含 `-wal`/`-shm`，分热/冷两层，ADR-0011，本机约 1.8 GB）。标签只含格式与 schema 版本，Uniflo 版本存在 `meta.version`：版本变化只在后台就地刷新，不整份重建。旁边有旧版 `fts-v1.sqlite` 时写线程在后台转换它、转完删除（`fts.migrating`、`fts.reclaimed_bytes`）。一个缓存目录同时只该有一个守护进程写索引；用真实家目录另起守护进程做实验时，若常驻守护进程也开着全文索引，给其中一个加 `--no-fts`。
 - macOS FSEvents 报告规范化路径（`/private/var/...`），`core::watch` 会映射回配置的根；新增根目录时别绕过它。
 - omp/Pi 没有在线注册表：存活进程靠 `core::procs`（`ps` + 一次批量 `lsof`）按 `--resume` 参数 → 打开的会话文件 → cwd 推断三级映射。Codex app-server 一个进程服务多会话，不做 pid 映射，状态全靠 `task_started/task_complete`。
 - Claude 子代理收尾时 `stop_reason` 为空、没有回合结束标记，靠 90 s settle 窗口转 idle；不要为此给适配器加时间判断。

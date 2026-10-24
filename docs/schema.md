@@ -169,13 +169,13 @@
 | `progress` | `{done, total, events}` | 已建完的会话数 / 会话总数 / 已入索引的事件数 |
 | `results` | `SearchSession[]` | 当前页 |
 | `partial` | bool? | 含短词的查询在时间预算（2 s）内没扫完：`results` 是已找到的最新命中，更早的可能缺失；缺省为 false |
-| `scanned_until` | i64? | 含短词的查询在扫到最老的会话之前就停了（结果已够，或 `partial`）：最后活动时间不晚于此刻的会话可能没被搜索，`total` 只是下限 |
+| `scanned_until` | i64? | 两种情况之一：含短词的查询在扫到最老的会话之前就停了（结果已够，或 `partial`）；或相关性查询确认了这一页之后，在约 250 ms 的预算内确认精确 `total` 也没扫完冷层剩下的候选。都表示最后活动时间不晚于此刻的会话可能没被数进 `total`（但不影响已返回的 `results`，那一页本身是确定的），`total` 退化为下限 |
 
 `SearchSession`：`session`（会话 key）、`harness`、`title?`、`cwd?`、`updated_at?`、`score`（越大越相关，`recent` 时为 0）、`hits`（最多 3 条，最好的在前）。
 
 `SearchHit`：`event`（事件 id，传给 `events?around=`）、`kind`、`ts`、`snippet`（高亮区间以 `\u0002` 开始、`\u0003` 结束，常量 `HIGHLIGHT_START` / `HIGHLIGHT_END`）。
 
-`FtsStatus`（`GET /v1/stats` 的 `fts`）：`indexing`、`progress`、`path`（索引文件）、`bytes`（索引文件含 WAL 的磁盘占用）、`rebuilt`（本次启动因格式标签变化或文件损坏而重建）、`warming?`（启动后索引仍在合并成一个段、或在读进系统页缓存，期间某个词的第一次查询可能较慢；缺省为 false）、`build_ms?`（从空索引开始的最近一次全量构建耗时）、`errors`、`last_error?`。
+`FtsStatus`（`GET /v1/stats` 的 `fts`）：`indexing`、`progress`、`path`（索引文件）、`bytes`（索引文件含 WAL 的磁盘占用）、`rebuilt`（本次启动因格式标签变化或文件损坏而重建）、`warming?`（启动后索引仍在合并成一个段、或在读进系统页缓存，期间某个词的第一次查询可能较慢；缺省为 false）、`build_ms?`（从空索引开始的最近一次全量构建耗时）、`errors`、`last_error?`。ADR-0011 的热/冷分层新增：`hot_days?`（当前生效的 `--fts-hot-days`，省略表示未知）、`hot_events?` / `cold_events?`（两层各自的事件行数，省略表示未知）、`cold_blocks?`（冷层压缩块数，省略表示未知）、`migrating`（后台正在把旧版 `fts-v1.sqlite` 转换进来；缺省为 false）、`reclaimed_bytes`（迁移删除旧文件释放的字节数；缺省为 0）。
 
 ## 会话清理
 
