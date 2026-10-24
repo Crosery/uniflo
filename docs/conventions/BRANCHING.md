@@ -56,7 +56,7 @@ node scripts/check-branch-invariants.mjs
 
 推送 `v*` tag 触发发布流水线，按 tag 名称路由发布通道。流水线分三个 job，顺序固定：
 
-1. **`publish`**：跑 `scripts/verify.sh` 全部门禁，通过后按拓扑顺序把 6 个 crate 发布到 crates.io（`scripts/publish-crates.sh`）。crates.io 是主渠道，先发，不等二进制。
+1. **`publish`**：跑 `scripts/verify.sh` 全部门禁，通过后按拓扑顺序把 7 个 crate 发布到 crates.io（`scripts/publish-crates.sh`）。crates.io 是主渠道，先发，不等二进制。
 2. **`build`**：5 个目标并行构建预编译二进制，见 ADR-0009：
    - `aarch64-apple-darwin`、`x86_64-apple-darwin`
    - `x86_64-unknown-linux-musl`、`aarch64-unknown-linux-musl`
