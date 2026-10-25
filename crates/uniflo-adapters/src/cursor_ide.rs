@@ -68,6 +68,20 @@ struct Cached {
     parents: Option<HashMap<String, String>>,
 }
 
+/// Cursor writes `""` and `"default"` where no model was recorded.
+fn named(m: &str) -> bool {
+    !m.is_empty() && m != "default"
+}
+
+/// The one model `usageData` bills when the composer has no `modelConfig`: its keys are model
+/// names. Several keys mean the composer switched models and nothing says which bubble used
+/// which, so no model is guessed.
+fn usage_model(d: &Value) -> Option<String> {
+    let mut named_keys = d.get("usageData")?.as_object()?.keys().filter(|k| named(k));
+    let only = named_keys.next()?;
+    named_keys.next().is_none().then(|| only.clone())
+}
+
 fn data_meta(d: &Value) -> MetaPatch {
     let cwd = d
         .pointer("/workspaceIdentifier/uri/fsPath")
@@ -81,8 +95,9 @@ fn data_meta(d: &Value) -> MetaPatch {
         model: d
             .pointer("/modelConfig/modelName")
             .and_then(Value::as_str)
-            .filter(|m| !m.is_empty() && *m != "default")
-            .map(str::to_owned),
+            .filter(|m| named(m))
+            .map(str::to_owned)
+            .or_else(|| usage_model(d)),
         started_at: d.get("createdAt").and_then(ts),
         updated_at: d.get("lastUpdatedAt").and_then(ts),
         ..Default::default()
@@ -192,11 +207,8 @@ impl Ide {
                 }
                 continue;
             }
-            let bmodel = b
-                .pointer("/modelInfo/modelName")
-                .and_then(Value::as_str)
-                .filter(|m| *m != "default")
-                .map(str::to_owned);
+            let bmodel =
+                b.pointer("/modelInfo/modelName").and_then(Value::as_str).filter(|m| named(m)).map(str::to_owned);
             if let Some(th) = b.pointer("/thinking/text").and_then(Value::as_str).filter(|t| !t.trim().is_empty()) {
                 evs.push((format!("b{bid}:r"), t, pos, Body::Reasoning { text: th.to_owned() }));
             }
@@ -309,6 +321,51 @@ pub mod tests {
             )
             .unwrap();
         }
+    }
+
+    #[test]
+    fn composer_model_comes_from_config_then_the_single_billed_model() {
+        let model = |d: Value| data_meta(&d).model;
+        assert_eq!(model(json!({"modelConfig":{"modelName":"gpt-5"}})).as_deref(), Some("gpt-5"));
+        let billed = json!({"modelConfig":{"modelName":"default"},"usageData":{"claude-4.5-opus-high-thinking":{"costInCents":3,"amount":2}}});
+        assert_eq!(model(billed).as_deref(), Some("claude-4.5-opus-high-thinking"));
+        assert_eq!(model(json!({"usageData":{"a":{"amount":1},"b":{"amount":2}}})), None, "two models: not guessed");
+        assert_eq!(model(json!({"usageData":{"default":{"amount":1}}})), None);
+        assert_eq!(model(json!({"modelConfig":{"modelName":""},"usageData":{}})), None);
+        assert_eq!(model(json!({})), None);
+    }
+
+    #[test]
+    fn bubbles_without_a_recorded_model_fall_back_to_the_composer_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("state.vscdb");
+        let bubble = |model: &str| {
+            json!({"type":2,"text":"answer","createdAt":"2026-09-21T14:13:30Z",
+                "tokenCount":{"inputTokens":40,"outputTokens":9},"modelInfo":{"modelName":model}})
+        };
+        let composer = json!({"composerId":"c","createdAt":1790000000000i64,"modelConfig":{"modelName":"gpt-5"},
+            "fullConversationHeadersOnly":[{"bubbleId":"b1","type":2},{"bubbleId":"b2","type":2}]});
+        store(
+            &db,
+            &[
+                ("composerData:c".into(), composer),
+                ("bubbleId:c:b1".into(), bubble("")),
+                ("bubbleId:c:b2".into(), bubble("claude-4-sonnet")),
+            ],
+            &[("c", 0, json!({}))],
+        );
+        let mut batch = Batch::default();
+        let conn = open_ro(&db).unwrap();
+        assert!(Ide::conversation(&conn, "c", &HashMap::new(), &mut batch).unwrap());
+        let models: Vec<Option<String>> = batch
+            .items
+            .iter()
+            .filter_map(|(_, r)| match r {
+                Record::Event(Event { body: Body::Usage(u), .. }) => Some(u.model.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(models, [Some("gpt-5".into()), Some("claude-4-sonnet".into())]);
     }
 
     #[test]

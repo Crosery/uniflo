@@ -50,7 +50,7 @@
 | `steps` | u64 | usage 事件数（一次模型调用一步） |
 | `input` `output` `cache_read` `cache_write` `reasoning` | u64 | 各步之和，口径同 [usage](#usage-口径) |
 | `cost_usd` | f64? | 已定价各步的费用之和；一步都定不了价时为 `null`，不是 0 |
-| `unpriced_steps` | u64 | 无自报金额、模型也不在价格目录里的步数 |
+| `unpriced_steps` | u64 | 无自报金额、模型也不在价格目录里的步数；token 全为 0 的步骤不算（没有可计价的东西，费用为 0） |
 | `last_context_tokens` | u64 | 最后一步的 `input + cache_read + cache_write` |
 | `context_limit` | u64? | 最后一步模型在目录里的上下文上限 |
 

@@ -1,7 +1,7 @@
 //! Catalog building blocks: upstream formats → [`CatalogEntry`], model-name matching, step cost.
 
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use uniflo_schema::{CatalogEntry, MatchKind, PriceSegment, PriceTier};
 
 /// Official vendors whose own list price is used as-is. Every other models.dev provider
@@ -175,22 +175,23 @@ struct Consensus {
 
 /// One median-priced entry per model name that no [`FIRST_PARTY`] vendor lists, built from
 /// every other models.dev provider (resellers, aggregators, including OpenRouter itself as one
-/// vote). `:free` / `-free` ids and listings without a positive input and output price are
-/// excluded so a free tier or a missing price never pulls the median down; see ADR-0010.
+/// vote). `:free` / `-free` ids and listings without a positive input and output price never
+/// enter a median, so a free tier or a missing price cannot pull it down. A free-tier id listed
+/// at an explicit 0/0 whose paid sibling nobody lists gets a zero-price entry of its own; see
+/// ADR-0010.
 fn parse_resellers(v: &Value, seen: &HashMap<String, ()>) -> Vec<CatalogEntry> {
     let Some(obj) = v.as_object() else { return Vec::new() };
     let mut providers: Vec<&String> = obj.keys().filter(|p| !FIRST_PARTY.contains(&p.as_str())).collect();
     providers.sort();
     let mut groups: HashMap<String, Consensus> = HashMap::new();
+    // Free-tier ids (`x-free`, `x:free`) listed at an explicit 0/0: key → (id, paid sibling's id, vendor).
+    let mut free: HashMap<String, (String, String, Option<String>)> = HashMap::new();
     for provider in providers {
         let Some(models) = v.pointer(&format!("/{provider}/models")).and_then(Value::as_object) else { continue };
         let mut ids: Vec<&String> = models.keys().collect();
         ids.sort();
         for raw in ids {
             let id = last_segment(raw);
-            if id.ends_with(":free") || id.ends_with("-free") {
-                continue;
-            }
             let key = match_key(id);
             if seen.contains_key(&key) {
                 continue;
@@ -198,6 +199,14 @@ fn parse_resellers(v: &Value, seen: &HashMap<String, ()>) -> Vec<CatalogEntry> {
             let m = &models[raw];
             let Some(cost) = m.get("cost") else { continue };
             let (Some(input), Some(output)) = (num(cost, "input"), num(cost, "output")) else { continue };
+            if let Some(paid) = free_tier_of(id) {
+                if input == 0.0 && output == 0.0 {
+                    free.entry(key).or_insert_with(|| {
+                        (id.to_owned(), paid.to_owned(), raw.rsplit_once('/').map(|v| v.0.to_owned()))
+                    });
+                }
+                continue;
+            }
             if !(input > 0.0 && output > 0.0) {
                 continue;
             }
@@ -218,7 +227,8 @@ fn parse_resellers(v: &Value, seen: &HashMap<String, ()>) -> Vec<CatalogEntry> {
     }
     let mut keys: Vec<&String> = groups.keys().collect();
     keys.sort();
-    keys.into_iter()
+    let mut out: Vec<CatalogEntry> = keys
+        .into_iter()
         .map(|key| {
             let g = &groups[key];
             let cache_read = {
@@ -256,7 +266,32 @@ fn parse_resellers(v: &Value, seen: &HashMap<String, ()>) -> Vec<CatalogEntry> {
                 consensus: true,
             }
         })
-        .collect()
+        .collect();
+    // A free tier with no paid sibling anywhere costs nothing; with one, it is still priced as
+    // that sibling (see `name_windows`), the API-equivalent value of what was used.
+    let mut free: Vec<_> = free.into_iter().collect();
+    free.sort();
+    out.extend(
+        free.into_iter()
+            .filter(|(_, (_, paid, _))| {
+                let paid = match_key(paid);
+                !seen.contains_key(&paid) && !groups.contains_key(&paid)
+            })
+            .map(|(_, (id, _, vendor))| CatalogEntry {
+                id,
+                provider: vendor.unwrap_or_default(),
+                prices: vec![PriceSegment { cache_read: 0.0, ..Default::default() }],
+                source: MODELS_DEV.into(),
+                consensus: true,
+                ..Default::default()
+            }),
+    );
+    out
+}
+
+/// The paid sibling's id when `id` names a free tier (`qwen3.6-plus-free`, `dots-3:free`).
+fn free_tier_of(id: &str) -> Option<&str> {
+    id.strip_suffix(":free").or_else(|| id.strip_suffix("-free"))
 }
 
 /// LiteLLM `model_prices_and_context_window.json`: per-token prices keyed by model name.
@@ -554,6 +589,98 @@ fn name_windows(base: &str) -> Vec<&str> {
     out
 }
 
+/// Other spellings a harness or editor uses for the same model, to try after the name as
+/// written. Cursor and several IDE tools put the version first (`claude-4.5-opus-high-thinking`
+/// for Anthropic's `claude-opus-4-5`) or drop the vendor (`opus-5.5`). They are tried before any
+/// trimmed window so that the vendor's own listing outranks a reseller's spelling of the name;
+/// everything less regular is left to [`Catalog::similar`].
+fn respellings(base: &str) -> Vec<String> {
+    const FAMILIES: &[&str] = &["opus", "sonnet", "haiku"];
+    let key = match_key(base);
+    let words: Vec<&str> = key.split(['-', ':']).filter(|w| !w.is_empty()).collect();
+    let mut out = Vec::new();
+    let version = |w: &str| !w.is_empty() && w.bytes().all(|b| b.is_ascii_digit());
+    // `claude-<ver…>-<family>[-…]` → `claude-<family>-<ver…>[-…]`
+    if words.first() == Some(&"claude")
+        && let Some(f) = words.iter().position(|w| FAMILIES.contains(w))
+        && f >= 2
+        && words[1..f].iter().all(|w| version(w))
+    {
+        let mut v = vec!["claude", words[f]];
+        v.extend(&words[1..f]);
+        v.extend(&words[f + 1..]);
+        out.push(v.join("-"));
+    }
+    // `opus-5.5` → `claude-opus-5-5`
+    if words.first().is_some_and(|w| FAMILIES.contains(w)) && words.get(1).is_some_and(|w| version(w)) {
+        out.push(format!("claude-{}", words.join("-")));
+    }
+    out
+}
+
+/// Words of a model name for [`Catalog::similar`]: lowercase, split at every non-alphanumeric
+/// and at every letter/digit boundary (`gpt-4o` → `gpt 4 o`, `qwen3.6` → `qwen 3 6`, `4.5` and
+/// `4-5` alike), with release dates dropped.
+fn similarity_words(s: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut digit = false;
+    let mut flush = |cur: &mut String| {
+        let date = cur.len() >= 6 && cur.bytes().all(|b| b.is_ascii_digit());
+        if !cur.is_empty() && !date {
+            out.push(std::mem::take(cur));
+        }
+        cur.clear();
+    };
+    for ch in strip_date(s).chars() {
+        if !ch.is_ascii_alphanumeric() {
+            flush(&mut cur);
+            continue;
+        }
+        if !cur.is_empty() && ch.is_ascii_digit() != digit {
+            flush(&mut cur);
+        }
+        digit = ch.is_ascii_digit();
+        cur.push(ch.to_ascii_lowercase());
+    }
+    flush(&mut cur);
+    out
+}
+
+/// The maximal runs of numeric words, sorted: `claude 4 5 opus` and `claude opus 4 5` both
+/// have `[[4, 5]]`, `llama 3 1 70 b` has `[[3, 1], [70]]`.
+fn version_runs(words: &[String]) -> Vec<Vec<&str>> {
+    let numeric = |w: &String| w.bytes().all(|b| b.is_ascii_digit());
+    let mut runs: Vec<Vec<&str>> = Vec::new();
+    let mut prev = false;
+    for w in words {
+        if numeric(w) {
+            match runs.last_mut().filter(|_| prev) {
+                Some(r) => r.push(w),
+                None => runs.push(vec![w]),
+            }
+        }
+        prev = numeric(w);
+    }
+    runs.sort();
+    runs
+}
+
+/// Whether every word of `part` occurs in `whole`, counting repeats.
+fn contains_all(whole: &[String], part: &[String]) -> bool {
+    let mut left: HashMap<&str, usize> = HashMap::new();
+    for w in whole {
+        *left.entry(w).or_insert(0) += 1;
+    }
+    part.iter().all(|w| match left.get_mut(w.as_str()) {
+        Some(n) if *n > 0 => {
+            *n -= 1;
+            true
+        }
+        _ => false,
+    })
+}
+
 /// Entries plus lookup indexes; later layers are merged in by the caller.
 #[derive(Debug, Default, Clone)]
 pub struct Catalog {
@@ -562,6 +689,10 @@ pub struct Catalog {
     /// [`display_key`] of a vendor's display name → its listings.
     names: HashMap<String, Vec<usize>>,
     families: HashMap<String, Vec<(usize, Vec<u64>)>>,
+    /// [`similarity_words`] of every entry id.
+    words: Vec<Vec<String>>,
+    /// First word of an id → the entries starting with it, to find [`Catalog::similar`] candidates.
+    anchors: HashMap<String, Vec<usize>>,
 }
 
 impl Catalog {
@@ -594,7 +725,14 @@ impl Catalog {
                 names.entry(display_key(n)).or_default().push(i);
             }
         }
-        Catalog { entries, exact, names, families }
+        let words: Vec<Vec<String>> = entries.iter().map(|e| similarity_words(&e.id)).collect();
+        let mut anchors: HashMap<String, Vec<usize>> = HashMap::new();
+        for (i, w) in words.iter().enumerate() {
+            if let Some(first) = w.first() {
+                anchors.entry(first.clone()).or_default().push(i);
+            }
+        }
+        Catalog { entries, exact, names, families, words, anchors }
     }
 
     pub fn len(&self) -> usize {
@@ -611,29 +749,105 @@ impl Catalog {
     /// window → none. Only a vendor id hit on the full name is `exact`. A display-name hit is
     /// `approx` (the id differs, e.g. harnesses say `deepseek-v4.1-flash` where the vendor lists
     /// `deepseek-flash`), and so is a window hit: it already matched by dropping harness/reseller
-    /// prefixes or suffixes (see [`name_windows`]).
+    /// prefixes or suffixes (see [`name_windows`]) — and a respelled-name hit (see [`respellings`]),
+    /// which every stage tries right after the name as written, before any guess by version.
     pub fn resolve(&self, model: &str) -> (MatchKind, Option<usize>) {
         let base = base_name(model);
         if base.is_empty() {
             return (MatchKind::None, None);
         }
-        if let Some((i, by_id)) = self.lookup(base) {
-            return (if by_id { MatchKind::Exact } else { MatchKind::Approx }, Some(i));
+        let respelled = respellings(base);
+        let names: Vec<&str> = std::iter::once(base).chain(respelled.iter().map(String::as_str)).collect();
+        let hits: Vec<(usize, bool, usize)> = names
+            .iter()
+            .enumerate()
+            .filter_map(|(n, name)| self.lookup(name).map(|(i, by_id)| (i, by_id, n)))
+            .collect();
+        if let Some(&(i, by_id, n)) = self.vendor_first(&hits, |h| h.0) {
+            return (if by_id && n == 0 { MatchKind::Exact } else { MatchKind::Approx }, Some(i));
         }
-        for win in name_windows(base) {
-            if let Some((i, _)) = self.lookup(win) {
+        let windowed: Vec<usize> = names
+            .iter()
+            .filter_map(|name| name_windows(name).into_iter().find_map(|win| self.lookup(win)).map(|(i, _)| i))
+            .collect();
+        let windowed = self.vendor_first(&windowed, |i| *i).copied();
+        if let Some(i) = windowed.filter(|&i| !self.entries[i].consensus) {
+            return (MatchKind::Approx, Some(i));
+        }
+        // A reseller median found by trimming the name yields to a vendor's listing found by similarity.
+        let similar = self.similar(base);
+        if let Some(i) = similar.filter(|&i| !self.entries[i].consensus).or(windowed).or(similar) {
+            return (MatchKind::Approx, Some(i));
+        }
+        for name in &names {
+            if let Some(i) = self.nearest_version(&match_key(strip_date(name))) {
                 return (MatchKind::Approx, Some(i));
             }
         }
-        if let Some(i) = self.nearest_version(&match_key(strip_date(base))) {
-            return (MatchKind::Approx, Some(i));
-        }
-        for win in name_windows(base) {
-            if let Some(i) = self.nearest_version(&match_key(strip_date(win))) {
-                return (MatchKind::Approx, Some(i));
+        for name in &names {
+            for win in name_windows(name) {
+                if let Some(i) = self.nearest_version(&match_key(strip_date(win))) {
+                    return (MatchKind::Approx, Some(i));
+                }
             }
         }
         (MatchKind::None, None)
+    }
+
+    /// The first hit that is a vendor listing, else the first hit: a reseller median never
+    /// outranks the vendor's own price just because its spelling of the name came first.
+    fn vendor_first<'a, T>(&self, hits: &'a [T], entry: impl Fn(&T) -> usize) -> Option<&'a T> {
+        hits.iter().find(|h| !self.entries[entry(h)].consensus).or(hits.first())
+    }
+
+    /// Similarity match for names that carry extra words around a listed model: harness or
+    /// editor prefixes, effort and mode suffixes, a reordered version (`cursor-claude-4.5-opus-
+    /// high-thinking` → `claude-opus-4-5`). A listing matches when
+    /// - all of its words occur in the name,
+    /// - its version numbers are exactly the name's (`gpt-5` never stands in for `gpt-5.1`, and a
+    ///   size such as `70b` is never dropped),
+    /// - every [`TIER_WORDS`] word of the name is in the listing too (`qwen3.8-max` is not
+    ///   `qwen3.8`), except `max` and `medium` on Claude names where they only say how hard the
+    ///   model thought, and
+    /// - the listing is at least half of the name's words.
+    ///
+    /// The most specific listing wins (most words), a vendor's before a reseller median.
+    fn similar(&self, name: &str) -> Option<usize> {
+        let words = similarity_words(name);
+        let runs = version_runs(&words);
+        if words.len() < 2 {
+            return None;
+        }
+        let mut seen = HashSet::new();
+        let mut best: Option<usize> = None;
+        for w in &words {
+            for &i in self.anchors.get(w.as_str()).into_iter().flatten() {
+                if !seen.insert(i) {
+                    continue;
+                }
+                let cand = &self.words[i];
+                let rank = |j: usize| {
+                    (self.words[j].len(), !self.entries[j].consensus, std::cmp::Reverse(&self.entries[j].id))
+                };
+                if cand.len() < 2
+                    || cand.len() * 2 < words.len()
+                    || !contains_all(&words, cand)
+                    || version_runs(cand) != runs
+                    || best.is_some_and(|b| rank(i) <= rank(b))
+                {
+                    continue;
+                }
+                let claude = cand.iter().any(|c| matches!(c.as_str(), "opus" | "sonnet" | "haiku"));
+                let tier_kept = words
+                    .iter()
+                    .filter(|w| is_tier_word(w))
+                    .all(|w| cand.contains(w) || (claude && matches!(w.as_str(), "max" | "medium")));
+                if tier_kept {
+                    best = Some(i);
+                }
+            }
+        }
+        best
     }
 
     /// A vendor's own listing outranks a reseller median: the vendor id, then the vendor's
@@ -769,6 +983,69 @@ mod tests {
     }
 
     #[test]
+    fn respelled_names_match_what_cursor_style_tools_write() {
+        let c = Catalog::new(vec![
+            entry("claude-opus-4-5"),
+            entry("claude-opus-5-5"),
+            entry("claude-sonnet-4"),
+            entry("claude-3-sonnet"),
+            entry("claude-3-7-sonnet"),
+            entry("gpt-5-mini"),
+            entry("gpt-5"),
+        ]);
+        let id = |m: &str| {
+            let (k, i) = c.resolve(m);
+            (k, i.map(|i| c.entries[i].id.clone()))
+        };
+        let approx = |id: &str| (MatchKind::Approx, Some(id.to_string()));
+        // version first, effort and thinking tags after
+        assert_eq!(id("claude-4.5-opus-high-thinking"), approx("claude-opus-4-5"));
+        assert_eq!(id("claude-4.5-opus"), approx("claude-opus-4-5"));
+        assert_eq!(id("claude-4-sonnet"), approx("claude-sonnet-4"), "not the older claude-3-sonnet");
+        // the vendor's own order is left alone
+        assert_eq!(id("claude-3.7-sonnet"), (MatchKind::Exact, Some("claude-3-7-sonnet".into())));
+        // vendor dropped
+        assert_eq!(id("opus-5.5"), approx("claude-opus-5-5"));
+        // a tier word is never respelled into a neighbour
+        assert_eq!(id("gpt-5-nano"), (MatchKind::None, None));
+        assert_eq!(id("gpt-5"), (MatchKind::Exact, Some("gpt-5".into())));
+    }
+
+    #[test]
+    fn similar_names_match_the_listing_they_extend() {
+        let median = |id: &str| CatalogEntry { consensus: true, ..entry(id) };
+        let c = Catalog::new(vec![
+            entry("claude-opus-4-5"),
+            median("claude-4.5-opus"),
+            entry("claude-opus-4-6"),
+            entry("gpt-5"),
+            entry("gpt-5-codex"),
+            entry("gpt-5.1"),
+            entry("qwen3.8"),
+            entry("qwen3.8-max"),
+            entry("llama-3.1"),
+            entry("llama-3.1-8b-instruct"),
+            entry("llama-3.1-70b-instruct"),
+        ]);
+        let id = |m: &str| {
+            let (k, i) = c.resolve(m);
+            (k, i.map(|i| c.entries[i].id.clone()))
+        };
+        let approx = |id: &str| (MatchKind::Approx, Some(id.to_string()));
+        // an extra prefix, a reordered version, effort and mode words around the listing
+        assert_eq!(id("cursor-claude-4.5-opus-high-thinking"), approx("claude-opus-4-5"), "vendor before median");
+        assert_eq!(id("team-claude-opus-4-6-max-thinking"), approx("claude-opus-4-6"), "max is effort on Claude");
+        assert_eq!(id("acme-gpt-5.1-high-v2"), approx("gpt-5.1"), "the version is exact, not the shorter gpt-5");
+        assert_eq!(id("acme-gpt-5-codex-high"), approx("gpt-5-codex"), "the most specific listing");
+        assert_eq!(id("my-llama-3.1-70b-instruct-q4"), approx("llama-3.1-70b-instruct"));
+        // a tier the listing does not have is a different model
+        assert_eq!(id("acme-qwen3.8-max-thinking"), approx("qwen3.8-max"));
+        assert_eq!(id("acme-qwen3.8-turbo"), (MatchKind::None, None));
+        // a bare word is not enough to go on
+        assert_eq!(id("gpt-nonsense"), (MatchKind::None, None));
+    }
+
+    #[test]
     fn name_windows_match_harness_prefixes_and_suffixes() {
         let c = Catalog::new(vec![
             entry("qwen3.8-flash"),
@@ -842,6 +1119,34 @@ mod tests {
         assert_eq!(e[1].source, MODELS_DEV);
     }
 
+    #[test]
+    fn a_free_tier_nobody_sells_costs_nothing() {
+        let md = json!({
+            "opencode": {"models": {"zen-preview-free": {"cost": {"input": 0, "output": 0}}}},
+            "kilo": {"models": {
+                "acme/note-3:free": {"cost": {"input": 0, "output": 0}},
+                "acme/paid-1:free": {"cost": {"input": 0, "output": 0}},
+                "acme/half-1:free": {"cost": {"input": 0.1, "output": 0}}
+            }},
+            "resellerA": {"models": {
+                "paid-1": {"cost": {"input": 1.0, "output": 2.0}},
+                "unknown-2": {"cost": {"input": 0, "output": 0}}
+            }}
+        });
+        let e = parse_models_dev(&md);
+        let ids: Vec<&str> = e.iter().map(|x| x.id.as_str()).collect();
+        assert_eq!(ids, ["paid-1", "note-3:free", "zen-preview-free"], "{ids:?}");
+        let free = e.iter().find(|x| x.id == "note-3:free").unwrap();
+        assert_eq!((free.prices[0].input, free.prices[0].output, free.prices[0].cache_read), (0.0, 0.0, 0.0));
+        let c = Catalog::new(e);
+        assert_eq!(c.resolve("zen-preview-free").0, MatchKind::Exact);
+        assert_eq!(
+            c.resolve("paid-1:free").0,
+            MatchKind::Approx,
+            "a free tier of a paid model is priced as that model"
+        );
+    }
+
     fn vendor(id: &str, provider: &str, name: &str, input: f64, output: f64) -> CatalogEntry {
         CatalogEntry {
             provider: provider.into(),
@@ -884,8 +1189,8 @@ mod tests {
     #[test]
     fn display_name_shared_by_vendors_needs_an_owner_or_one_price() {
         let owned = Catalog::new(vec![
-            vendor("kimi-a", "alibaba", "Kimi K3", 9.0, 9.0),
-            vendor("kimi-k3", "moonshotai", "Kimi K3", 3.0, 15.0),
+            vendor("alpha-1", "alibaba", "Kimi K3", 9.0, 9.0),
+            vendor("beta-1", "moonshotai", "Kimi K3", 3.0, 15.0),
         ]);
         // neither provider prefixes `kimik3` and the prices differ: no guess
         assert_eq!(owned.resolve("kimi k3").0, MatchKind::None);

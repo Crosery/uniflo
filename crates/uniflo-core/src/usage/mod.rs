@@ -71,6 +71,9 @@ impl Step {
             Some(c) => (Some(c), Some(CostSource::Harness)),
             None => match self.model.as_deref().and_then(|m| p.price(m, self.ts, self.tokens())) {
                 Some((c, s)) => (Some(c), Some(s)),
+                // Nothing was billed, so there is nothing to price: an unknown model name on a
+                // step without tokens is not an unpriced step.
+                None if self.tokens() == Tokens::default() && self.reasoning == 0 => (Some(0.0), None),
                 None => (None, None),
             },
         };
@@ -598,6 +601,7 @@ mod tests {
             ev("big", 2, step(150_000, 100, 60_000, 0, "model-m", None)),
             ev("own", 3, step(10, 10, 0, 0, "model-m", Some(0.5))),
             ev("unknown", 4, step(10, 10, 0, 0, "totally-unknown-model", None)),
+            ev("empty", 5, step(0, 0, 0, 0, "totally-unknown-model", None)),
         ] {
             l.apply(&r, &mut n, &p);
         }
@@ -609,6 +613,7 @@ mod tests {
         assert_eq!((d.steps[2].cost_usd, d.steps[2].cost_source), (Some(0.5), Some(CostSource::Harness)));
         assert_eq!(d.steps[0].cost_source, Some(CostSource::Catalog));
         assert_eq!((d.steps[3].cost_usd, d.steps[3].cost_source), (None, None));
+        assert_eq!((d.steps[4].cost_usd, d.steps[4].cost_source), (Some(0.0), None), "no tokens, nothing to price");
         assert_eq!(d.totals.unpriced_steps, 1, "unknown model is unpriced, not $0");
         assert!((d.totals.cost_usd.unwrap() - (plain + big + 0.5)).abs() < 1e-9);
     }

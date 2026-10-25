@@ -69,7 +69,7 @@
 | codebuddy | 同 workbuddy；记录没有 `providerData.usage` 时用 `providerData.rawUsage`（OpenAI completions 形） | `input = prompt_tokens − cached_tokens`（或 `prompt_tokens_details.cached_tokens`），后者记为 `cache_read`；`output = completion_tokens`；`reasoning = completion_tokens_details.reasoning_tokens`（或 `completion_thinking_tokens`），output 未含时加回 | `providerData.model`，否则 `requestModelName` | — |
 | openclaw | 同 Pi（条目由 Pi 解码） | 同 Pi | `message.model` | `usage.cost.total` |
 | devin | 消息 `metadata.metrics` | 原样（`input_tokens` 不含缓存，`cache_read_tokens` / `cache_creation_tokens` 分列） | `metadata.generation_model` | — |
-| cursor（IDE 旧版会话） | 气泡的 `tokenCount` | 原样（`inputTokens` / `outputTokens`） | 气泡 `modelInfo.modelName`，否则会话的 `modelConfig.modelName` | — |
+| cursor（IDE 旧版会话） | 气泡的 `tokenCount` | 原样（`inputTokens` / `outputTokens`） | 气泡 `modelInfo.modelName`，否则会话的 `modelConfig.modelName`，再否则 `usageData` 里唯一的模型名（`""` 与 `default` 都算没记录；`usageData` 有多个模型时不猜） | — |
 | antigravity / cursor（transcript）/ factory / reasonix / kiro / copilot / craft | 不记录用量（craft 头部的 `tokenUsage` 是会话合计，且已由 `claude` 逐步计入） | — | — | — |
 
 - 重复计数：Codex 一旦出现 `token_usage_record`，同文件的 `token_count` 都是它的重复，全部跳过；旧 rollout 只有 `token_count`，`total_token_usage` 未变化的重复行（限流刷新）跳过。Pi / Prime 的 `child_usage_attributed` 是子代理文件自身用量的合计（真实数据逐 token 相等），子代理会话本身已计，故不再产出 usage。
