@@ -3,12 +3,13 @@
 // Runs natively on macOS, Linux, and Windows.
 
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { resolve, join } from "node:path";
+import { tmpdir } from "node:os";
 
 const isWin = process.platform === "win32";
 const binName = isWin ? "uniflo.exe" : "uniflo";
-const binPath = resolve(process.cwd(), "target", "release", binName);
+const binPath = resolve(process.env.UNIFLO_BIN || join(process.env.CARGO_TARGET_DIR || "target", "release", binName));
 
 const port = process.env.UNIFLO_TEST_PORT || "7399";
 const bind = `127.0.0.1:${port}`;
@@ -21,10 +22,21 @@ if (!existsSync(binPath)) {
 
 console.log(`==> Starting ${binName} daemon smoke test on ${process.platform} (${process.arch}) at ${base}...`);
 
-// Real home, so keep every on-disk index out of the user's cache: no snapshot, no full-text index;
-// no price sync either (no network from the smoke test).
-const daemon = spawn(binPath, ["daemon", "--bind", bind, "--no-cache", "--no-fts", "--no-price-sync"], {
-  stdio: ["ignore", "pipe", "pipe"],
+const home = mkdtempSync(join(tmpdir(), "uniflo-smoke-"));
+const sessionsDir = join(home, ".claude", "projects", "smoke");
+mkdirSync(sessionsDir, { recursive: true });
+writeFileSync(join(sessionsDir, "smoke.jsonl"), JSON.stringify({
+  type: "user", uuid: "smoke-user", timestamp: Date.now(), cwd: home,
+  message: { role: "user", content: "synthetic daemon smoke" },
+}) + "\n");
+const env = { ...process.env, HOME: home, USERPROFILE: home, UNIFLO_HOME: home,
+  UNIFLO_DATA_DIR: join(home, "data"), UNIFLO_CACHE_DIR: join(home, "cache"), UNIFLO_CONFIG_DIR: join(home, "config"),
+  UNIFLO_LANG: "en" };
+delete env.UNIFLO_TOKEN;
+delete env.CLAUDE_CONFIG_DIR;
+delete env.CODEX_HOME;
+const daemon = spawn(binPath, ["daemon", "--bind", bind, "--no-cache", "--no-fts", "--no-price-sync", "--no-update-check"], {
+  stdio: ["ignore", "pipe", "pipe"], env,
 });
 
 let stderr = "";
@@ -80,7 +92,10 @@ async function run() {
     const sRes = await fetch(`${base}/v1/sessions?limit=5`);
     if (!sRes.ok) throw new Error(`/v1/sessions returned status ${sRes.status}`);
     const sessions = await sRes.json();
-    console.log(`✓ /v1/sessions returned response with ${sessions.items ? sessions.items.length : 0} items`);
+    if (!Array.isArray(sessions) || sessions.length !== 1 || sessions[0].key !== "claude:smoke") {
+      throw new Error("/v1/sessions did not return the isolated synthetic session");
+    }
+    console.log(`✓ /v1/sessions returned the synthetic session`);
 
     const ftsRes = await fetch(`${base}/v1/search?q=smoke`);
     if (ftsRes.status !== 503) throw new Error(`/v1/search with --no-fts returned ${ftsRes.status}, want 503`);
@@ -91,6 +106,8 @@ async function run() {
     daemon.kill("SIGINT");
     await new Promise((r) => setTimeout(r, 500));
     daemon.kill("SIGKILL");
+    await new Promise((r) => setTimeout(r, 100));
+    rmSync(home, { recursive: true, force: true });
   }
 }
 

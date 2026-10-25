@@ -33,6 +33,9 @@ cargo test --workspace -q --no-fail-fast   # list every failing test binary in o
 
 step "daemon release build + smoke test"
 cargo build --release -q
+exe=uniflo
+[[ "${OS:-}" == "Windows_NT" ]] && exe=uniflo.exe
+export UNIFLO_BIN="${UNIFLO_BIN:-${CARGO_TARGET_DIR:-target}/release/$exe}"
 node scripts/daemon-smoke.mjs
 
 if [[ "${1:-}" == "--e2e" ]]; then
