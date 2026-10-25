@@ -73,6 +73,8 @@ impl Engine {
         };
         let mut e = Entry {
             session,
+            tracker_since: tracker.since,
+            turn_ended: false,
             tracker,
             title_rank: u8::MAX,
             adapter,

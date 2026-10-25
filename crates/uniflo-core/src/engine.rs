@@ -79,6 +79,8 @@ const TITLE_CHARS: usize = 200;
 struct Entry {
     session: Session,
     tracker: StatusTracker,
+    tracker_since: i64,
+    turn_ended: bool,
     title_rank: u8,
     adapter: usize,
     src: PathBuf,
@@ -110,6 +112,8 @@ impl Entry {
                 usage: None,
                 archived: false,
             },
+            tracker_since: 0,
+            turn_ended: false,
             tracker: StatusTracker::default(),
             title_rank: 0,
             adapter,
@@ -148,6 +152,7 @@ impl Entry {
 
     fn observe(&mut self, e: &Event) {
         self.tracker.observe(e);
+        self.turn_ended |= !e.partial && matches!(&e.body, Body::TurnEnd { .. });
         if e.ts > 0 {
             self.session.updated_at = self.session.updated_at.max(e.ts);
             if self.session.started_at.is_none() {
@@ -168,8 +173,26 @@ impl Entry {
     fn refresh(&mut self, now: i64, w: Windows) -> bool {
         let before = sig(&self.session);
         let eff = effective(&self.tracker, self.live_pid.is_some(), self.live_status, now, w);
+        // A read can end one turn and start the next without publishing the intermediate Idle.
+        // Ignore replayed boundaries and boundaries overridden by a continuous live Work state.
+        let restarted = self.turn_ended
+            && self.live_status.is_none()
+            && eff.status == Status::Work
+            && self.tracker.since > self.tracker_since;
+        let since = if self.session.status == eff.status && self.session.status_since > 0 && !restarted {
+            self.session.status_since
+        } else if self.session.status_since > 0 && eff.since <= self.session.status_since {
+            // Staleness does not mutate the tracker: new activity must not reuse its old Work time.
+            if self.tracker.last > self.session.status_since { self.tracker.last } else { now }
+        } else if eff.since > 0 {
+            eff.since
+        } else {
+            now
+        };
+        self.tracker_since = self.tracker.since;
+        self.turn_ended = false;
         self.session.status = eff.status;
-        self.session.status_since = eff.since;
+        self.session.status_since = since;
         self.session.status_reason = (!eff.reason.is_empty()).then_some(eff.reason);
         self.session.pid = self.live_pid;
         before != sig(&self.session)
@@ -186,6 +209,7 @@ fn sig(s: &Session) -> impl PartialEq + use<> {
         s.preview.clone(),
         s.started_at,
         s.status,
+        s.status_since,
         s.pid,
     )
 }
@@ -650,6 +674,8 @@ impl Engine {
                 key,
                 Entry {
                     session: cs.session,
+                    tracker_since: cs.tracker.since,
+                    turn_ended: false,
                     tracker: cs.tracker,
                     title_rank: cs.title_rank,
                     adapter,
@@ -984,4 +1010,143 @@ fn spawn_ticker(tx: mpsc::UnboundedSender<Msg>, every: Duration, make: impl Fn()
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use uniflo_schema::Event;
+
+    #[test]
+    fn refresh_preserves_status_since_during_same_effective_status() {
+        let mut entry = Entry::new("toy:s1".into(), "toy", "s1", 0, Path::new("/tmp/s1.jsonl"));
+        let w = Windows { stale_ms: 600_000, settle_ms: 90_000 };
+
+        // Tracker is Idle, but live process/status override indicates Work at t=1000.
+        entry.live_status = Some(Status::Work);
+        entry.refresh(1000, w);
+        assert_eq!(entry.session.status, Status::Work);
+        assert_eq!(entry.session.status_since, 1000);
+
+        // Activity updates arrive while live_status is still Work, advancing tracker.last to 1500.
+        entry.observe(&Event {
+            id: "e1".into(),
+            session: "toy:s1".into(),
+            ts: 1500,
+            pos: None,
+            partial: false,
+            truncated: false,
+            body: Body::ToolCall { call_id: "c1".into(), name: "bash".into(), input: serde_json::Value::Null },
+        });
+        // Subsequent refresh must NOT advance status_since to 1500 while continuously working.
+        entry.refresh(1600, w);
+        assert_eq!(entry.session.status, Status::Work);
+        assert_eq!(entry.session.status_since, 1000);
+
+        // Turn completes: status transitions to Idle at t=2000.
+        entry.live_status = None;
+        entry.observe(&Event {
+            id: "e2".into(),
+            session: "toy:s1".into(),
+            ts: 2000,
+            pos: None,
+            partial: false,
+            truncated: false,
+            body: Body::TurnEnd { reason: None },
+        });
+        entry.refresh(2000, w);
+        assert_eq!(entry.session.status, Status::Idle);
+        assert_eq!(entry.session.status_since, 2000);
+
+        // Subsequent idle refresh retains idle status_since.
+        entry.refresh(2500, w);
+        assert_eq!(entry.session.status, Status::Idle);
+        assert_eq!(entry.session.status_since, 2000);
+
+        // New turn begins at t=3000: transitions to Work.
+        entry.observe(&Event {
+            id: "e3".into(),
+            session: "toy:s1".into(),
+            ts: 3000,
+            pos: None,
+            partial: false,
+            truncated: false,
+            body: Body::UserMessage { text: "next turn".into(), synthetic: false },
+        });
+        entry.refresh(3000, w);
+        assert_eq!(entry.session.status, Status::Work);
+        assert_eq!(entry.session.status_since, 3000);
+    }
+
+    fn event(ts: i64, body: Body) -> Event {
+        Event { id: format!("e{ts}"), session: "toy:s1".into(), ts, pos: None, partial: false, truncated: false, body }
+    }
+
+    #[test]
+    fn refresh_restarts_work_after_batched_turn_boundary() {
+        let w = Windows { stale_ms: 600_000, settle_ms: 90_000 };
+        for (live_status, partial, expected_since) in
+            [(None, false, 3000), (Some(Status::Work), false, 1000), (None, true, 1000)]
+        {
+            let mut entry = Entry::new("toy:s1".into(), "toy", "s1", 0, Path::new("/tmp/s1.jsonl"));
+            entry.observe(&event(1000, Body::UserMessage { text: "first".into(), synthetic: false }));
+            entry.refresh(1000, w);
+            entry.live_status = live_status;
+
+            let mut end = event(2000, Body::TurnEnd { reason: None });
+            end.partial = partial;
+            entry.observe(&end);
+            entry.observe(&event(3000, Body::UserMessage { text: "next".into(), synthetic: false }));
+            let changed = entry.refresh(3000, w);
+
+            assert_eq!(entry.session.status, Status::Work);
+            assert_eq!(entry.session.status_since, expected_since, "live={live_status:?}, partial={partial}");
+            assert_eq!(changed, expected_since == 3000, "a new work stint must emit a session snapshot");
+            assert!(!entry.refresh(3500, w));
+        }
+    }
+
+    #[test]
+    fn refresh_restarts_work_after_published_staleness() {
+        let mut entry = Entry::new("toy:s1".into(), "toy", "s1", 0, Path::new("/tmp/s1.jsonl"));
+        let w = Windows { stale_ms: 1000, settle_ms: 1000 };
+        entry.observe(&event(1000, Body::TurnStart {}));
+        entry.refresh(1000, w);
+        entry.refresh(2001, w);
+        assert_eq!((entry.session.status, entry.session.status_since), (Status::Idle, 2000));
+
+        entry.observe(&event(
+            3000,
+            Body::ToolResult { call_id: "c1".into(), name: None, output: "done".into(), is_error: false },
+        ));
+        assert!(entry.refresh(3000, w));
+        assert_eq!((entry.session.status, entry.session.status_since), (Status::Work, 3000));
+        assert!(!entry.refresh(3500, w));
+    }
+
+    #[test]
+    fn refresh_preserves_live_work_slot_after_transcript_replay() {
+        let mut entry = Entry::new("toy:s1".into(), "toy", "s1", 0, Path::new("/tmp/s1.jsonl"));
+        let w = Windows { stale_ms: 600_000, settle_ms: 90_000 };
+        entry.live_status = Some(Status::Work);
+        entry.refresh(1000, w);
+        let events = [
+            event(1500, Body::TurnStart {}),
+            event(2000, Body::TurnEnd { reason: None }),
+            event(3000, Body::TurnStart {}),
+        ];
+        for e in &events {
+            entry.observe(e);
+        }
+        assert!(!entry.refresh(3000, w));
+        assert_eq!(entry.session.status_since, 1000);
+
+        entry.live_status = None;
+        entry.tracker = StatusTracker::default();
+        for e in &events {
+            entry.observe(e);
+        }
+        assert!(!entry.refresh(3500, w));
+        assert_eq!((entry.session.status, entry.session.status_since), (Status::Work, 1000));
+    }
 }

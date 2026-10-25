@@ -475,10 +475,10 @@ async function runTree() {
     const line = getComputedStyle(fam.querySelector('.kids > .node > .row'), '::after'); return { indent: Math.round(kr.left - pr.left), elbow: line.borderLeftWidth !== '0px' && line.borderBottomWidth !== '0px' }; })()`);
   report("[tree] children are indented under the parent with tree lines", geo.indent >= 20 && geo.elbow, JSON.stringify(geo));
 
-  // 工作中 keeps launch order: whoever answers last does not move up, for sessions and sub-agents alike.
-  // Needs an unfolded family and a bump on a root, so the page is reloaded once the daemon has seen the answers.
+  // Current work-entry order must survive answers and a fresh snapshot.
   const sub1 = join(home, ".claude/projects/-w-demo/sess-1/subagents/agent-sub1.jsonl");
   const busyKey = "claude:busy";
+  const relevantRoots = (keys) => keys.filter((key) => ["claude:busy", "claude:sess-1", "claude:cleanme"].includes(key));
   appendFileSync(sub1, cu("t5", Date.now(), "Re-check the diff", "/w/demo"));
   await waitFor(`(() => { const s = ${state}; return s && s.kids.length === 2 ? s : null; })()`, 8_000, "two working kids").catch(() => null);
   appendFileSync(sub2, cu("t6", Date.now(), "Add the 500 path", "/w/demo"));
@@ -493,17 +493,103 @@ async function runTree() {
   }
   await load(`${api}/demo?token=${TOKEN}`);
   await waitFor(`(() => { const s = ${state}; return s && s.kids.length === 2 ? s : null; })()`, 8_000, "two working kids after reload").catch(() => null);
-  const startedAt = new Map(all.map((x) => [x.key, x.started_at]));
-  const byLaunch = (keys) => [...keys].sort((a, b) => startedAt.get(a) - startedAt.get(b));
   const live = await cdp.eval(`(() => { const out = []; let on = false;
     for (const n of document.querySelector('#list').children) { if (n.classList.contains('group-h')) on = n.textContent.trim().startsWith('工作中'); else if (on) out.push(n.querySelector(':scope > .row')?.dataset.key); }
     return { roots: out, kids: ${state}.kids }; })()`);
   const answered = [...all.filter((x) => live.roots.includes(x.key) || live.kids.includes(x.key))].sort((a, b) => b.updated_at - a.updated_at)[0]?.key;
-  report("[tree] working sessions and sub-agents stay in launch order, not in the order they answered",
-    all.find((x) => x.key === busyKey)?.updated_at >= bump && answered === busyKey && JSON.stringify(live.roots) === JSON.stringify(byLaunch(live.roots)) && live.roots[0] === "claude:sess-1" && live.roots.at(-1) === busyKey
-      && JSON.stringify(live.kids) === JSON.stringify(byLaunch(live.kids)) && live.kids[0] === "claude:agent-sub1", JSON.stringify({ live, answered }));
+  report("[tree] working sessions and sub-agents stay ordered by current work entry time, not in the order they answered",
+    all.find((x) => x.key === busyKey)?.updated_at >= bump && answered === busyKey
+      && JSON.stringify(relevantRoots(live.roots)) === '["claude:busy","claude:sess-1"]'
+      && JSON.stringify(live.kids) === '["claude:agent-sub2","claude:agent-sub1"]',
+    JSON.stringify({ live, answered }));
+
+  // Reused old session joins behind existing workers in queue order
+  const cleanFile = join(home, ".claude/projects/-w-clean/cleanme.jsonl");
+  appendFileSync(cleanFile, cu("clean-reused", Date.now(), "清理日志第二批", "/w/clean"));
+  await waitFor(`document.querySelector('.row[data-key="claude:cleanme"]')?.dataset.status === 'work'`, 8_000, "cleanme work");
+  const rootsWithReused = await cdp.eval(`(() => { const out = []; let on = false;
+    for (const n of document.querySelector('#list').children) {
+      if (n.classList.contains('group-h')) on = n.textContent.trim().startsWith('工作中');
+      else if (on) out.push(n.querySelector(':scope > .row')?.dataset.key);
+    }
+    return out; })()`);
+  report("[tree] reused old session joins behind existing workers in queue order",
+    JSON.stringify(relevantRoots(rootsWithReused)) === '["claude:busy","claude:sess-1","claude:cleanme"]',
+    JSON.stringify(rootsWithReused));
+
+  // Reload retains deterministic current working order for roots and subagents
+  await load(`${api}/demo?token=${TOKEN}`);
+  await waitFor(`(() => { const s = ${state}; return s && s.kids.length === 2 ? s : null; })()`, 8_000, "two working kids after reload").catch(() => null);
+  const reloaded = await cdp.eval(`(() => { const out = []; let on = false;
+    for (const n of document.querySelector('#list').children) {
+      if (n.classList.contains('group-h')) on = n.textContent.trim().startsWith('工作中');
+      else if (on) out.push(n.querySelector(':scope > .row')?.dataset.key);
+    }
+    return { roots: out, kids: ${state}.kids }; })()`);
+  report("[tree] reload retains deterministic current working order for roots and subagents",
+    JSON.stringify(relevantRoots(reloaded.roots)) === '["claude:busy","claude:sess-1","claude:cleanme"]' && JSON.stringify(reloaded.kids) === '["claude:agent-sub2","claude:agent-sub1"]',
+    JSON.stringify(reloaded));
+
+  // Early child stops while sibling continues without family jumping its queue slot
+  appendFileSync(sub2, ca("t4", Date.now(), [{ type: "text", text: "404 covered." }], "end_turn"));
+  await waitFor(`(() => { const s = ${state}; return s && s.kids.length === 1 && s.kids[0] === 'claude:agent-sub1' ? s : null; })()`, 8_000, "sub2 finished, sub1 working").catch(() => null);
+  const rootsEarlyStops = await cdp.eval(`(() => { const out = []; let on = false;
+    for (const n of document.querySelector('#list').children) {
+      if (n.classList.contains('group-h')) on = n.textContent.trim().startsWith('工作中');
+      else if (on) out.push(n.querySelector(':scope > .row')?.dataset.key);
+    }
+    return out; })()`);
+  report("[tree] early child stops while sibling continues without family jumping its queue slot",
+    JSON.stringify(relevantRoots(rootsEarlyStops)) === '["claude:busy","claude:sess-1","claude:cleanme"]',
+    JSON.stringify(rootsEarlyStops));
+  await load(`${api}/demo?token=${TOKEN}`);
+  await waitFor(`(() => { const s = ${state}; return s && s.kids.length === 1 ? s : null; })()`, 8_000, "reload while sibling works");
+  const continuousReload = await cdp.eval(`(() => { const out = []; let on = false;
+    for (const n of document.querySelector('#list').children) {
+      if (n.classList.contains('group-h')) on = n.textContent.trim().startsWith('工作中');
+      else if (on) out.push(n.querySelector(':scope > .row')?.dataset.key);
+    } return out; })()`);
+  report("[tree] family keeps its continuous queue slot across reload after its earliest worker finishes",
+    JSON.stringify(continuousReload) === JSON.stringify(rootsEarlyStops), JSON.stringify(continuousReload));
+
+  // Idle family rework joins current queue tail behind existing workers
   appendFileSync(sub1, ca("t7", Date.now(), [{ type: "text", text: "Diff re-checked." }], "end_turn"));
-  await waitFor(`(() => { const s = ${state}; return s && s.kids.length === 1 ? s : null; })()`, 8_000, "sub1 idle again").catch(() => null);
+  await waitFor(`(() => { const s = ${state}; return s && s.open === 'false' && s.kids.length === 0 ? s : null; })()`, 8_000, "family idle refold").catch(() => null);
+  appendFileSync(sub2, cu("t4-rework", Date.now(), "Rework verification", "/w/demo"));
+  await waitFor(`(() => { const s = ${state}; return s && s.kids.length === 1 && s.kids[0] === 'claude:agent-sub2' ? s : null; })()`, 8_000, "family rework").catch(() => null);
+  const rootsAfterRework = await cdp.eval(`(() => { const out = []; let on = false;
+    for (const n of document.querySelector('#list').children) {
+      if (n.classList.contains('group-h')) on = n.textContent.trim().startsWith('工作中');
+      else if (on) out.push(n.querySelector(':scope > .row')?.dataset.key);
+    }
+    return out; })()`);
+  report("[tree] idle family rework joins current queue tail behind existing workers",
+    JSON.stringify(relevantRoots(rootsAfterRework)) === '["claude:busy","claude:cleanme","claude:sess-1"]',
+    JSON.stringify(rootsAfterRework));
+
+  // Pure structured s:work filter maintains stable working queue order without churn
+  await cdp.eval(`$('#q').value = 's:work'; $('#q').dispatchEvent(new Event('input'))`);
+  await waitFor(`document.querySelector('.row[data-key="claude:agent-sub2"]') && !document.querySelector('.row[data-key="claude:sess-1"]')`, 8_000, "s:work filter results");
+  const filteredBefore = await cdp.eval(`[...document.querySelectorAll('#list .row[data-key]')].map((r) => r.dataset.key)`);
+  report("[tree] pure structured s:work filter maintains stable working queue order without churn",
+    JSON.stringify(filteredBefore.filter((key) => ["claude:busy", "claude:cleanme", "claude:agent-sub2"].includes(key))) === '["claude:busy","claude:cleanme","claude:agent-sub2"]',
+    JSON.stringify(filteredBefore));
+
+  const filteredBump = Date.now();
+  appendFileSync(cleanFile, cu("clean-update", filteredBump, "补充清理路径", "/w/clean"));
+  await until(async () => (await apiJson(api, "/v1/sessions?limit=500")).find((s) => s.key === "claude:cleanme")?.updated_at >= filteredBump, 8_000, "filtered update indexed");
+  await cdp.eval(`runSearch().then(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))))`);
+  const filteredAfter = await cdp.eval(`[...document.querySelectorAll('#list .row[data-key]')].map((r) => r.dataset.key)`);
+  report("[tree] activity update under s:work filter does not churn row order",
+    JSON.stringify(filteredBefore) === JSON.stringify(filteredAfter),
+    JSON.stringify({ before: filteredBefore, after: filteredAfter }));
+
+  await cdp.eval(`$('#q').value = ''; $('#q').dispatchEvent(new Event('input'))`);
+  await waitFor(`document.querySelector('.row[data-key="claude:sess-1"]')`, 8_000, "filter reset");
+
+  // Clean up cleanme so it is idle for runManage
+  appendFileSync(cleanFile, ca("clean-done", Date.now(), [{ type: "text", text: "清理完成。" }], "end_turn"));
+  await waitFor(`document.querySelector('.row[data-key="claude:cleanme"]')?.dataset.status === 'idle'`, 8_000, "cleanme idle again");
   await scheme("dark");
   await sleep(300);
   await shot("tree-dark.png");
@@ -522,7 +608,7 @@ async function runTree() {
   report('[tree] "只看工作中" goes back to the working ones', !!st3 && st3.kids[0] === "claude:agent-sub2", JSON.stringify(st3));
 
   const before = await cdp.eval(`document.querySelector('.row.sel')?.dataset.key || ''`);
-  appendFileSync(sub2, ca("t4", Date.now(), [{ type: "text", text: "404 covered." }], "end_turn"));
+  appendFileSync(sub2, ca("t4-final", Date.now(), [{ type: "text", text: "404 covered." }], "end_turn"));
   const st4 = await waitFor(`(() => { const s = ${state}; return s && s.open === 'false' && s.kids.length === 0 ? s : null; })()`, 8_000, "refold").catch(() => null);
   report("[tree] when the last sub-agent stops, the family folds again", !!st4 && st4.chip === "2 个子代理", JSON.stringify(st4));
   await shot("tree-folded.png");

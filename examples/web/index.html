@@ -2306,7 +2306,11 @@ function showView(v, push = false) {
 // ---------------------------------------------------------------- session list
 const filtered = () => $("#q").value.trim() !== "";
 function sortOrder() {
-  if (!filtered()) order.sort((a, b) => sessions.get(b).updated_at - sessions.get(a).updated_at);
+  if (!filtered()) {
+    order.sort((a, b) => sessions.get(b).updated_at - sessions.get(a).updated_at || (a < b ? -1 : 1));
+  } else if (isPureWorkFilter($("#q").value.trim())) {
+    order.sort((a, b) => (workSince(sessions.get(a)) || Infinity) - (workSince(sessions.get(b)) || Infinity) || (a < b ? -1 : 1));
+  }
 }
 let listQueued = false;
 function renderList() {
@@ -2318,6 +2322,9 @@ function renderList() {
     const tree = sessionTree(all), out = [];
     let html = "";
     if (filtered()) {
+      if (isPureWorkFilter($("#q").value.trim())) {
+        tree.roots.sort((a, b) => (tree.fam.get(a.key)?.workSince ?? Infinity) - (tree.fam.get(b.key)?.workSince ?? Infinity) || (a.key < b.key ? -1 : 1));
+      }
       html = tree.roots.map((s) => nodeHtml(s, tree, out)).join("");
     } else {
       // Working families first, then the rest bucketed by the calendar day of their latest activity.
@@ -2329,8 +2336,10 @@ function renderList() {
         groups[f.work ? 0 : f.updated >= t0 ? 1 : f.updated >= y0 ? 2 : f.updated >= w0 ? 3 : 4][1].push(s);
       }
       html = groups.filter(([, g]) => g.length).map(([name, g]) => {
-        // 工作中 keeps launch order so rows stay put while sessions answer; the rest go by latest activity
-        g.sort(name === "工作中" ? byStart : (a, b) => tree.fam.get(b.key).updated - tree.fam.get(a.key).updated);
+        // 工作中 keeps stable queue order by current work entry; the rest go by latest activity
+        g.sort(name === "工作中"
+          ? (a, b) => tree.fam.get(a.key).workSince - tree.fam.get(b.key).workSince || (a.key < b.key ? -1 : 1)
+          : (a, b) => tree.fam.get(b.key).updated - tree.fam.get(a.key).updated || (a.key < b.key ? -1 : 1));
         return `<div class="group-h${name === "工作中" ? " live" : ""}">${name === "工作中" ? '<span class="dot work"></span>' : ""}<span>${name}</span><span class="n">${g.length}</span></div>` + g.map((s) => nodeHtml(s, tree, out)).join("");
       }).join("");
     }
@@ -2343,11 +2352,44 @@ function renderList() {
 }
 const usageCost = (u) => (!u || !u.steps ? "" : u.cost_usd != null ? money(u.cost_usd) : "未定价");
 const tile = (id, cls = "") => `<span class="htile ${cls}" style="--h:${hue(id)}">${hicon(id)}</span>`;
-const startOf = (s) => s.started_at ?? s.updated_at;
-const byStart = (a, b) => startOf(a) - startOf(b) || (a.key < b.key ? -1 : 1);
+const workEntered = new Map(); // session key -> stable epoch ms when current work stint started
+function workSince(s) {
+  if (!s || s.status !== "work") return Infinity;
+  if (s.status_since > 0) {
+    workEntered.set(s.key, s.status_since);
+    return s.status_since;
+  }
+  const cached = workEntered.get(s.key);
+  if (cached != null) return cached;
+  const t = (s.started_at > 0 ? s.started_at : 0) || (s.updated_at > 0 ? s.updated_at : Date.now());
+  workEntered.set(s.key, t);
+  return t;
+}
+const workSlotsKey = `uniflo.workSlots:${API}`;
+let famWorkSlot = new Map();
+try { famWorkSlot = new Map(JSON.parse(sessionStorage.getItem(workSlotsKey) || "[]")); } catch {}
+let savedWorkSlots = "";
+function saveWorkSlots() {
+  const raw = JSON.stringify([...famWorkSlot]);
+  if (raw === savedWorkSlots) return;
+  try { sessionStorage.setItem(workSlotsKey, raw); savedWorkSlots = raw; } catch {}
+}
+
+function isPureWorkFilter(q) {
+  const toks = q.trim().split(/\s+/).filter(Boolean);
+  if (!toks.length) return false;
+  let hasWork = false;
+  for (const t of toks) {
+    if (!/^!?(h|harness|s|status|is|in|cwd|since|after|before|until|id|parent):.+$/i.test(t)) return false;
+    if (/^!(s|status|is):(work|working|busy)$/i.test(t)) return false;
+    if (/^(s|status|is):(work|working|busy)$/i.test(t)) hasWork = true;
+  }
+  return hasWork;
+}
+
 // Sub-agents nest under their parent when the parent is in the list; a family groups by its most
 // active member, so a parent whose sub-agents are working sits in 工作中 with them. Working
-// sessions and sub-agents are ordered by when they started, never by when they last answered.
+// sessions and sub-agents are ordered by when they entered the current work state, never by when they last answered.
 // By default a family lists only its working sub-agents and stays folded while none works; the
 // rest load on demand, a page at a time. The open session always stays visible.
 const kidFold = new Map(); // parent key -> { mode: "closed" } | { mode: "all", limit }; unset = auto
@@ -2360,21 +2402,45 @@ function sessionTree(all) {
   }
   const walk = (s, path) => {
     if (fam.has(s.key)) return fam.get(s.key);
-    const f = { work: s.status === "work", updated: s.updated_at };
+    const f = {
+      work: s.status === "work",
+      updated: s.updated_at,
+      active: s.status === "work" ? [s] : [],
+    };
     fam.set(s.key, f);
     path.add(s.key);
     for (const k of kids.get(s.key) || []) {
       if (path.has(k.key)) continue;
       const g = walk(k, path);
-      f.work ||= g.work; f.updated = Math.max(f.updated, g.updated);
+      f.work ||= g.work;
+      f.updated = Math.max(f.updated, g.updated);
+      if (g.active.length) f.active.push(...g.active);
     }
     path.delete(s.key);
+    if (!f.work) {
+      famWorkSlot.delete(s.key);
+      f.workSince = Infinity;
+    } else {
+      const members = f.active.map((m) => [m.key, workSince(m)]).sort((a, b) => a[0] < b[0] ? -1 : 1);
+      const minActive = members.reduce((min, [, since]) => Math.min(min, since), Infinity);
+      const prev = famWorkSlot.get(s.key);
+      const continuous = Number.isFinite(prev?.since) && Array.isArray(prev?.members)
+        && prev.members.some((old) => Array.isArray(old) && members.some(([key, since]) => key === old[0] && since === old[1]));
+      f.workSince = continuous ? prev.since : minActive;
+      famWorkSlot.set(s.key, { since: f.workSince, members });
+    }
     return f;
   };
   for (const s of roots) walk(s, new Set());
   // a parent cycle leaves its members unreachable from any root: list them as roots instead
   for (const s of all) if (!fam.has(s.key)) { roots.push(s); walk(s, new Set()); }
-  for (const ks of kids.values()) ks.sort((a, b) => fam.get(b.key).work - fam.get(a.key).work || (fam.get(a.key).work ? byStart(a, b) : fam.get(b.key).updated - fam.get(a.key).updated));
+  for (const ks of kids.values()) {
+    ks.sort((a, b) => fam.get(b.key).work - fam.get(a.key).work
+      || (fam.get(a.key).work
+        ? (fam.get(a.key).workSince - fam.get(b.key).workSince || (a.key < b.key ? -1 : 1))
+        : (fam.get(b.key).updated - fam.get(a.key).updated || (a.key < b.key ? -1 : 1))));
+  }
+  saveWorkSlots();
   return { roots, kids, fam };
 }
 function nodeHtml(s, tree, out, seen = new Set()) {
@@ -2433,6 +2499,7 @@ async function runSearch() {
   sessions = new Map(r.body.map((s) => [s.key, s]));
   order = r.body.map((s) => s.key);
   for (const s of r.body) trackStatus(s);
+  sortOrder();
   $("#q-info").innerHTML = `<b>${r.body.length}</b> 条 · ${r.ms.toFixed(1)} ms`;
   syncFilters();
   renderList();
@@ -2447,11 +2514,12 @@ function upsertSession(s) {
     sessions.set(s.key, s);
     sortOrder();
     if (filtered()) queueSearch(800); // status / time filters may no longer hold
-  } else if (!filtered()) {
+  } else if (!filtered() || (isPureWorkFilter($("#q").value.trim()) && s.status === "work")) {
     sessions.set(s.key, s);
     order.unshift(s.key);
     sortOrder();
     if (order.length > LIST_LIMIT) sessions.delete(order.pop());
+    if (filtered()) queueSearch(800);
   } else {
     queueSearch(800); // changed outside the result set: let the server re-rank
   }
@@ -2459,6 +2527,10 @@ function upsertSession(s) {
   if (s.key === selected) { current = s; renderHead(s); refreshPendingTools(); }
 }
 function removeSession(key) {
+  workEntered.delete(key);
+  famWorkSlot.delete(key);
+  statusSeen.delete(key);
+  saveWorkSlots();
   if (sessions.delete(key)) { order = order.filter((k) => k !== key); renderList(); }
 }
 
@@ -2670,7 +2742,7 @@ function renderInspector(s) {
   const kv = [["Harness", `<span class="hchip">${tile(s.harness, "xs")}${esc(hname(s.harness))}</span>`],
     s.model && ["模型", `<span class="mono">${esc(s.model)}</span>`],
     s.cwd && ["目录", `<span class="mono txt">${esc(s.cwd)}</span>`],
-    ["状态", `${s.status === "work" ? "工作中" : "空闲"}${s.status_reason ? ` · ${esc(s.status_reason)}` : ""} · ${age(s.status_since)} 前`],
+    ["状态", `${s.status === "work" ? "工作中" : "空闲"}${s.status_reason ? ` · ${esc(s.status_reason)}` : ""} · ${age(s.status_since > 0 ? s.status_since : s.updated_at)} 前`],
     s.pid && ["进程", `<span class="live-pid"><span class="dot work"></span>${s.pid}</span>`],
     s.parent && ["父会话", `<button class="linkbtn mono" data-open="${esc(s.parent)}">${esc(short(s.parent))}</button>`],
     ["开始", esc(stamp(s.started_at))], ["更新", esc(stamp(s.updated_at))],
@@ -3295,6 +3367,9 @@ async function toggleNotify() {
 function trackStatus(s) {
   const prev = statusSeen.get(s.key);
   statusSeen.set(s.key, { status: s.status, since: s.status_since });
+  if (s.status !== "work") {
+    workEntered.delete(s.key);
+  }
   if (prev?.status === "work" && s.status === "idle") turnEnded(s, Math.max(0, (s.status_since || Date.now()) - (prev.since || 0)));
 }
 function turnEnded(s, took) {
@@ -3801,8 +3876,8 @@ function renderHome() {
   const home = $("#s-home");
   if (home.hidden) return;
   const all = homeSessions();
-  const running = all.filter((x) => x.status === "work").sort((a, b) => b.status_since - a.status_since);
-  const rows = (list, work) => `<div class="hrows">${list.map((x) => `<button type="button" class="hrow" data-open="${esc(x.key)}">${tile(x.harness, "sm")}<span class="t"><b class="txt">${esc(label(x))}</b><span class="txt">${esc(x.cwd || x.key)}</span></span><span class="age${work ? " work" : ""}" title="${esc(stamp(work ? x.status_since : x.updated_at))}">${work ? "运行 " : ""}${age(work ? x.status_since : x.updated_at)}</span></button>`).join("")}</div>`;
+  const running = all.filter((x) => x.status === "work").sort((a, b) => (workSince(b) || Infinity) - (workSince(a) || Infinity) || (a.key < b.key ? -1 : 1));
+  const rows = (list, work) => `<div class="hrows">${list.map((x) => `<button type="button" class="hrow" data-open="${esc(x.key)}">${tile(x.harness, "sm")}<span class="t"><b class="txt">${esc(label(x))}</b><span class="txt">${esc(x.cwd || x.key)}</span></span><span class="age${work ? " work" : ""}" title="${esc(stamp(work ? (x.status_since > 0 ? x.status_since : x.updated_at) : x.updated_at))}">${work ? "运行 " : ""}${age(work ? (x.status_since > 0 ? x.status_since : x.updated_at) : x.updated_at)}</span></button>`).join("")}</div>`;
   if (running.length) {
     $("#h-sessions").innerHTML = `<h2 id="h-sessions-t"><span class="live">正在运行</span><small>${running.length} 个会话</small></h2>${rows(running.slice(0, 8), true)}`;
   } else {
