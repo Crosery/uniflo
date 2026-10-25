@@ -8,6 +8,8 @@
 
 [开发者站](https://crosery.github.io/uniflo/) · [快速开始](#快速开始) · [网页控制台](docs/console.md) · [网关 API](docs/api.md) · [Rust SDK](docs/sdk.md) · [Agent 接入](docs/agents.md) · [llms.txt](https://crosery.github.io/uniflo/llms.txt)
 
+[0.2.3 发布说明](docs/releases/v0.2.3.md)：修复索引锁竞争与漏索引、工作队列排序，以及 Windows、Linux、macOS 的平台缺陷。
+
 ![会话视图](docs/assets/demo.png)
 
 ## 为什么
@@ -159,7 +161,7 @@ uniflo daemon --no-update-check           # 关闭后台检查
 - 接入过 agent 时刷新接入（只对新检测到的 harness 提问）；从没接入过时在终端里问一次。
 - cargo 的编译日志收成一行进度，失败时才打印最后 40 行。
 
-Windows 上 cargo 无法覆盖运行中的 exe：cargo 安装请先停掉 daemon 再执行 `uniflo update`。binary 安装会把运行中的 `uniflo.exe` 改名为 `uniflo.exe.old` 再放入新版本，`.old` 在下次启动 uniflo 时删除。
+Windows 上的 binary 和 cargo 升级会先把原可执行文件移到备份再安装；旧 `.old` 仍被进程占用时使用独立备份名，安装失败按本次备份恢复。后续启动只清理确认属于 Uniflo 的旧备份，不处理名称相近的其他文件。
 
 ## 价格目录
 

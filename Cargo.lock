@@ -1471,7 +1471,7 @@ checksum = "c6f5d3c3b1bf09027a88a6bc961fc00497d651009560b5463668dc81b0fa87a8"
 
 [[package]]
 name = "uniflo"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "axum",
@@ -1496,7 +1496,7 @@ dependencies = [
 
 [[package]]
 name = "uniflo-adapters"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "rusqlite",
@@ -1511,7 +1511,7 @@ dependencies = [
 
 [[package]]
 name = "uniflo-client"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "serde",
  "serde_json",
@@ -1525,7 +1525,7 @@ dependencies = [
 
 [[package]]
 name = "uniflo-core"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1547,7 +1547,7 @@ dependencies = [
 
 [[package]]
 name = "uniflo-gateway"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "axum",
@@ -1568,7 +1568,7 @@ dependencies = [
 
 [[package]]
 name = "uniflo-schema"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "serde",
  "serde_json",
@@ -1576,7 +1576,7 @@ dependencies = [
 
 [[package]]
 name = "uniflo-search"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "memchr",
