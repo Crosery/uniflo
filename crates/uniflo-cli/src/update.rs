@@ -5,6 +5,7 @@
 //! refreshes the agent setup.
 
 use crate::i18n::tr;
+use crate::ui;
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
 use std::io::{BufRead, IsTerminal, Write};
@@ -32,7 +33,14 @@ pub enum Mark {
 
 /// One indented step line: `  ✓ text`.
 pub fn step(m: Mark, text: &str) -> String {
-    format!("  {} {text}", MARKS[m as usize])
+    let mark = MARKS[m as usize];
+    let mark = match m {
+        Mark::Ok => ui::good(mark),
+        Mark::Info => ui::dim(mark),
+        Mark::Warn => ui::warn(mark),
+        Mark::Fail => ui::bad(mark),
+    };
+    format!("  {mark} {text}")
 }
 
 /// `uniflo update --check --json`: the check result plus how this executable was installed.
@@ -51,6 +59,9 @@ pub fn run(check: bool, prerelease: bool, json: bool) -> Result<()> {
     let record_file = InstallRecord::file();
     let record = InstallRecord::load(&record_file);
     let method = install::detect(&exe, record.as_ref(), &install::cargo_bin_dirs());
+    if !json && !check && std::io::stdout().is_terminal() {
+        println!("{}", ui::banner(uniflo_core::update::current_version()));
+    }
     let info = uniflo_core::update::check();
     if json {
         println!("{}", serde_json::to_string_pretty(&Report { info: &info, method })?);

@@ -6,8 +6,10 @@ mod client;
 mod grep;
 mod i18n;
 mod mcp;
+mod notice;
 mod render;
 mod setup;
+mod ui;
 mod update;
 mod usage;
 
@@ -222,6 +224,18 @@ fn run() -> Result<()> {
         uniflo_core::install::remove_aside(&exe);
     }
     let cli = Cli::parse();
+    // Commands that print for people get the "newer version" box afterwards; long-running and
+    // agent-facing ones (and `update` itself) never do.
+    let notice = notice::begin(!matches!(
+        cli.cmd,
+        Cmd::Daemon { .. } | Cmd::Mcp | Cmd::Setup(_) | Cmd::Skill { .. } | Cmd::Context(_) | Cmd::Update { .. }
+    ));
+    let res = dispatch(cli);
+    notice.show();
+    res
+}
+
+fn dispatch(cli: Cli) -> Result<()> {
     if !matches!(
         cli.cmd,
         Cmd::Daemon { .. } | Cmd::Mcp | Cmd::Setup(_) | Cmd::Skill { .. } | Cmd::Context(_) | Cmd::Update { .. }

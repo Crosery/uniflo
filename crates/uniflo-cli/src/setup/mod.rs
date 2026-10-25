@@ -14,6 +14,7 @@ mod edit;
 mod harness;
 
 use crate::i18n::tr;
+use crate::ui;
 use crate::update::{Mark, step};
 use anyhow::{Context, Result, bail};
 use clap::Args;
@@ -246,6 +247,9 @@ pub fn run(a: &SetupArgs) -> Result<()> {
         }
     }
     let ctx = Ctx::from_process()?;
+    if !a.after_update && !a.dry_run && tty() {
+        println!("{}", ui::banner(uniflo_core::update::current_version()));
+    }
     let mut input = std::io::stdin().lock();
     flow(&ctx, a, tty(), &mut input, &mut std::io::stdout())
 }
@@ -259,7 +263,7 @@ pub fn first_run() {
     }
     let mut input = std::io::stdin().lock();
     let mut out = std::io::stdout();
-    let _ = writeln!(out, "{}", intro());
+    let _ = writeln!(out, "{}\n{}", ui::banner(uniflo_core::update::current_version()), intro());
     let q = tr!(
         "现在接入吗？选 n 后不再询问，之后可随时运行 `uniflo setup`",
         "Connect them now? Answer n to never be asked again; run `uniflo setup` any time"
@@ -626,6 +630,14 @@ fn read_answer(input: &mut dyn BufRead) -> Option<String> {
 
 /// Yes/no with a default on Enter; end of input counts as "no".
 fn ask_yes(input: &mut dyn BufRead, out: &mut dyn Write, q: &str, default: bool) -> bool {
+    if ui::available() {
+        // a cancelled or undrivable picker falls through to the typed question
+        match ui::confirm(q, default) {
+            Ok(Some(a)) => return a,
+            Ok(None) => return false,
+            Err(_) => {}
+        }
+    }
     let _ = write!(out, "{q} {} ", if default { "[Y/n]" } else { "[y/N]" });
     let _ = out.flush();
     match read_answer(input) {
@@ -636,6 +648,35 @@ fn ask_yes(input: &mut dyn BufRead, out: &mut dyn Write, q: &str, default: bool)
 }
 
 fn ask_mode(input: &mut dyn BufRead, out: &mut dyn Write) -> Result<Mode> {
+    let options = [
+        (
+            tr!("MCP（推荐）", "MCP (recommended)"),
+            tr!(
+                "agent 直接调用 uniflo 工具查会话、检索、用量",
+                "agents call uniflo tools for sessions, search and usage"
+            ),
+            Mode::Mcp,
+        ),
+        (
+            "Skill".into(),
+            tr!("agent 按说明使用 uniflo 命令行 / REST", "agents follow instructions to use the uniflo CLI / REST"),
+            Mode::Skill,
+        ),
+        (tr!("两者", "both"), tr!("MCP 服务器和 Skill 都装", "the MCP server and the Skill"), Mode::Both),
+        (
+            tr!("跳过", "skip"),
+            tr!("现在不接入，之后可随时运行 uniflo setup", "not now; run uniflo setup any time"),
+            Mode::None,
+        ),
+    ];
+    if ui::available() {
+        let items = options.iter().map(|(l, h, _)| ui::Item::new(l.clone(), h.clone())).collect();
+        match ui::select(&tr!("接入方式", "How should agents connect?"), items, 0) {
+            Ok(Some(i)) => return Ok(options[i].2),
+            Ok(None) => return Ok(Mode::None),
+            Err(_) => {}
+        }
+    }
     writeln!(out, "{}", tr!("接入方式：", "How should agents connect?"))?;
     for (n, name, what) in [
         (
@@ -677,6 +718,15 @@ fn ask_mode(input: &mut dyn BufRead, out: &mut dyn Write) -> Result<Mode> {
 fn ask_agents<'a>(input: &mut dyn BufRead, out: &mut dyn Write, detected: &'a [Detected]) -> Result<Vec<&'a Detected>> {
     if detected.is_empty() {
         return Ok(Vec::new());
+    }
+    if ui::available() {
+        let items = detected.iter().map(|d| ui::Item::new(d.spec.id, d.spec.name)).collect();
+        let title = tr!("接入哪些 harness？（检测到 {} 个）", "Connect which harnesses? ({} found)", detected.len());
+        match ui::multiselect(&title, items, vec![true; detected.len()]) {
+            Ok(Some(on)) => return Ok(detected.iter().zip(on).filter(|(_, on)| *on).map(|(d, _)| d).collect()),
+            Ok(None) => return Ok(Vec::new()),
+            Err(_) => {}
+        }
     }
     writeln!(out, "\n{}", tr!("检测到 {} 个 harness：", "{} harnesses found:", detected.len()))?;
     for (i, d) in detected.iter().enumerate() {
@@ -927,10 +977,10 @@ fn uninstall_plan(ctx: &Ctx, st: &State) -> Plan {
 
 fn print_plan(ctx: &Ctx, p: &Plan, out: &mut dyn Write) -> Result<()> {
     if p.undo {
-        writeln!(out, "\n{}", tr!("撤销计划：", "Undo plan:"))?;
+        writeln!(out, "\n{}", ui::bold(&tr!("撤销计划：", "Undo plan:")))?;
     } else {
         let (label, bin) = (p.mode.label(), &ctx.bin);
-        writeln!(out, "\n{}", tr!("接入计划 · {label} · {bin}", "Plan · {label} · {bin}"))?;
+        writeln!(out, "\n{}", ui::bold(&tr!("接入计划 · {label} · {bin}", "Plan · {label} · {bin}")))?;
     }
     if let Some(f) = &p.skill {
         let f = ctx.env.show(f);

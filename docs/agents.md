@@ -86,7 +86,7 @@
 
 ### 流程与参数
 
-- **交互**（stdin、stdout 都是终端）：选接入方式（MCP 默认 / Skill / 两者 / 跳过）→ 多选检测到的 harness（默认全选）→ 检测到 Claude Code 时问是否装 SessionStart hook（默认否）→ 列出要改的文件和命令 → 确认后执行。
+- **交互**（stdin、stdout 都是终端）：选接入方式（MCP 默认 / Skill / 两者 / 跳过）→ 多选检测到的 harness（默认全选）→ 检测到 Claude Code 时问是否装 SessionStart hook（默认否）→ 列出要改的文件和命令 → 确认后执行。macOS / Linux 上是带颜色的方向键界面：`↑↓`（或 `j`/`k`）移动，空格勾选，`a` 全选/清空，回车确认，`Esc` 取消，数字键直接选单选项；Windows 和 `TERM=dumb` 回落到输入编号的文字提问，`NO_COLOR` 关闭颜色。`uniflo clean` 的确认同样用单键 `y`/`n`。
 - **非交互**：只打印计划，不写任何文件；要执行加 `--yes`。`--dry-run` 在任何环境下都只打印。
 - 参数：`--mcp` / `--skill` / `--both` / `--none`（互斥）、`--agents claude,codex`、`--hook`、`-y/--yes`、`--dry-run`、`--uninstall`、`--reload`。环境变量 `UNIFLO_SETUP=mcp|skill|both|none` 等同对应参数；`UNIFLO_NO_SETUP=1` 关掉自动询问。
 - **检测**：PATH 里有它的可执行文件，或它的配置目录存在，就算已安装；都没有就跳过，也不建目录。

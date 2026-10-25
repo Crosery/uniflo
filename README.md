@@ -138,7 +138,7 @@ for s in client.sessions("s:work", 20)? {
 
 ## 升级
 
-守护进程默认每小时向 crates.io 稀疏索引发一次 HTTPS GET（系统 `curl`）。**更新只指向正式版**；预发布版（`-rc`/`-beta`）仅被探测并提示，装不装由你决定。`uniflo update` 按安装方式升级：
+守护进程默认每小时向 crates.io 稀疏索引发一次 HTTPS GET（系统 `curl`）。**更新只指向正式版**；预发布版（`-rc`/`-beta`）仅被探测并提示，装不装由你决定。在终端里运行 uniflo 的命令，结束时如果已有新正式版，会在末尾弹出一个小框提醒（stdout、stderr 都是终端时才出现，管道、脚本、hook、agent 看不到；`UNIFLO_NO_UPDATE_CHECK=1` 关闭）。最新版本缓存在缓存目录的 `update-check.json`，后台线程最多每小时刷新一次，命令本身不等网络。`uniflo update` 按安装方式升级：
 
 ```sh
 uniflo update --check                     # 只查询有没有新正式版（退出码 10 = 有新版）

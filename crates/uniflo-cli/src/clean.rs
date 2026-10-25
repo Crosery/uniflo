@@ -82,17 +82,21 @@ pub fn clean(src: &Source, a: &CleanArgs) -> Result<()> {
                 "not a terminal: add --yes to execute this plan (or --dry-run to only look)"
             ));
         }
-        eprint!(
-            "{}",
-            tr!(
-                "归档后把 {eligible} 个会话移入回收站？[y/N] ",
-                "move {eligible} session(s) to the trash after archiving them? [y/N] "
-            )
+        let q = tr!(
+            "归档后把 {eligible} 个会话移入回收站？",
+            "move {eligible} session(s) to the trash after archiving them?"
         );
-        std::io::stderr().flush()?;
-        let mut line = String::new();
-        std::io::stdin().lock().read_line(&mut line)?;
-        if !matches!(line.trim(), "y" | "Y" | "yes") {
+        let yes = match crate::ui::available().then(|| crate::ui::confirm(&q, false)) {
+            Some(Ok(answer)) => answer.unwrap_or(false),
+            _ => {
+                eprint!("{q} [y/N] ");
+                std::io::stderr().flush()?;
+                let mut line = String::new();
+                std::io::stdin().lock().read_line(&mut line)?;
+                matches!(line.trim(), "y" | "Y" | "yes")
+            }
+        };
+        if !yes {
             bail!(tr!("已取消，没有改动", "cancelled; nothing changed"));
         }
     }
