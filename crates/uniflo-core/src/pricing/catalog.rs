@@ -144,6 +144,8 @@ pub fn parse_models_dev(v: &Value) -> Vec<CatalogEntry> {
                 context_limit: m.pointer("/limit/context").and_then(Value::as_u64).filter(|n| *n > 0),
                 output_limit: m.pointer("/limit/output").and_then(Value::as_u64).filter(|n| *n > 0),
                 source: MODELS_DEV.into(),
+                name: m.get("name").and_then(Value::as_str).map(str::to_owned),
+                consensus: false,
             });
         }
     }
@@ -250,6 +252,8 @@ fn parse_resellers(v: &Value, seen: &HashMap<String, ()>) -> Vec<CatalogEntry> {
                 context_limit,
                 output_limit,
                 source: MODELS_DEV.into(),
+                name: None,
+                consensus: true,
             }
         })
         .collect()
@@ -320,6 +324,8 @@ pub fn parse_litellm(v: &Value) -> Vec<CatalogEntry> {
                 context_limit: m.get("max_input_tokens").and_then(Value::as_u64).filter(|n| *n > 0),
                 output_limit: m.get("max_output_tokens").and_then(Value::as_u64).filter(|n| *n > 0),
                 source: LITELLM.into(),
+                name: None,
+                consensus: false,
             });
         }
     }
@@ -412,6 +418,18 @@ pub fn strip_date(s: &str) -> &str {
         return &s[..n - 11];
     }
     s
+}
+
+/// Comparison key for display names: ASCII letters and digits only, lowercase, with a trailing
+/// build or date tag of 4–8 digits dropped. `DeepSeek V4.1 Flash 1017` and `deepseek-v4.1-flash`
+/// both give `deepseekv41flash`.
+fn display_key(s: &str) -> String {
+    let mut k: String = s.chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_lowercase()).collect();
+    let tag = k.bytes().rev().take_while(u8::is_ascii_digit).count();
+    if (4..=8).contains(&tag) && tag < k.len() {
+        k.truncate(k.len() - tag);
+    }
+    k
 }
 
 /// `glm-5-2` → (`glm-#-#`, [5, 2]); names must start with a letter and carry a version.
@@ -541,6 +559,8 @@ fn name_windows(base: &str) -> Vec<&str> {
 pub struct Catalog {
     pub entries: Vec<CatalogEntry>,
     exact: HashMap<String, usize>,
+    /// [`display_key`] of a vendor's display name → its listings.
+    names: HashMap<String, Vec<usize>>,
     families: HashMap<String, Vec<(usize, Vec<u64>)>>,
 }
 
@@ -568,7 +588,13 @@ impl Catalog {
                 families.entry(sk).or_default().push((i, nums));
             }
         }
-        Catalog { entries, exact, families }
+        let mut names: HashMap<String, Vec<usize>> = HashMap::new();
+        for (i, e) in entries.iter().enumerate() {
+            if let Some(n) = e.name.as_deref().filter(|_| !e.consensus) {
+                names.entry(display_key(n)).or_default().push(i);
+            }
+        }
+        Catalog { entries, exact, names, families }
     }
 
     pub fn len(&self) -> usize {
@@ -579,21 +605,23 @@ impl Catalog {
         self.entries.is_empty()
     }
 
-    /// Exact (after normalization, incl. dateless) on the full name → exact on a trimmed name
-    /// window → nearest version of the same name skeleton (`approx`) on the full name →
-    /// nearest version on a window → none. A window hit is always `approx`: it already matched
-    /// by dropping harness/reseller prefixes or suffixes (see [`name_windows`]), so it is never
-    /// as certain as the full name matching outright.
+    /// Vendor id on the full name → vendor display name → reseller median on the full name
+    /// (all after normalization, incl. dateless) → the same on a trimmed name window → nearest
+    /// version of the same name skeleton (`approx`) on the full name → nearest version on a
+    /// window → none. Only a vendor id hit on the full name is `exact`. A display-name hit is
+    /// `approx` (the id differs, e.g. harnesses say `deepseek-v4.1-flash` where the vendor lists
+    /// `deepseek-flash`), and so is a window hit: it already matched by dropping harness/reseller
+    /// prefixes or suffixes (see [`name_windows`]).
     pub fn resolve(&self, model: &str) -> (MatchKind, Option<usize>) {
         let base = base_name(model);
         if base.is_empty() {
             return (MatchKind::None, None);
         }
-        if let Some(i) = self.exact_lookup(base) {
-            return (MatchKind::Exact, Some(i));
+        if let Some((i, by_id)) = self.lookup(base) {
+            return (if by_id { MatchKind::Exact } else { MatchKind::Approx }, Some(i));
         }
         for win in name_windows(base) {
-            if let Some(i) = self.exact_lookup(win) {
+            if let Some((i, _)) = self.lookup(win) {
                 return (MatchKind::Approx, Some(i));
             }
         }
@@ -606,6 +634,38 @@ impl Catalog {
             }
         }
         (MatchKind::None, None)
+    }
+
+    /// A vendor's own listing outranks a reseller median: the vendor id, then the vendor's
+    /// display name, and only then the median found by id. `true` = matched by id.
+    fn lookup(&self, name: &str) -> Option<(usize, bool)> {
+        let by_id = self.exact_lookup(name);
+        match by_id {
+            Some(i) if !self.entries[i].consensus => Some((i, true)),
+            _ => self.display_lookup(name).map(|i| (i, false)).or(by_id.map(|i| (i, true))),
+        }
+    }
+
+    /// The vendor listing whose display name equals `name` under [`display_key`]. When several
+    /// vendors list it, the one whose provider prefixes the name owns it (`deepseek…`); failing
+    /// that, they must agree on the price.
+    fn display_lookup(&self, name: &str) -> Option<usize> {
+        let key = display_key(name);
+        let found = self.names.get(&key)?;
+        if let [only] = found.as_slice() {
+            return Some(*only);
+        }
+        let owners: Vec<usize> =
+            found.iter().copied().filter(|&i| key.starts_with(&self.entries[i].provider)).collect();
+        if let [owner] = owners.as_slice() {
+            return Some(*owner);
+        }
+        let first = &self.entries[found[0]].prices;
+        let agree = found.iter().all(|&i| {
+            let (a, b) = (first.last(), self.entries[i].prices.last());
+            a.zip(b).is_some_and(|(a, b)| a.input == b.input && a.output == b.output && a.cache_read == b.cache_read)
+        });
+        agree.then_some(found[0])
     }
 
     /// `name`, normalized and with its date suffix also tried, looked up in the exact index.
@@ -780,6 +840,84 @@ mod tests {
         assert_eq!(e[0].prices[0].input, 3.0, "first-party price, not resellerA's 1.0");
         assert_eq!((e[1].prices[0].input, e[1].prices[0].output), (2.0, 4.0), "median of 1/2/3 and 2/4/6");
         assert_eq!(e[1].source, MODELS_DEV);
+    }
+
+    fn vendor(id: &str, provider: &str, name: &str, input: f64, output: f64) -> CatalogEntry {
+        CatalogEntry {
+            provider: provider.into(),
+            name: Some(name.into()),
+            prices: vec![PriceSegment { input, output, cache_read: input / 10.0, ..Default::default() }],
+            ..entry(id)
+        }
+    }
+
+    #[test]
+    fn vendor_display_name_beats_reseller_median() {
+        // models.dev lists the vendor's own V4.1 Flash as `deepseek-flash`; harnesses say `deepseek-v4.1-flash`
+        let reseller = CatalogEntry { consensus: true, ..entry("deepseek-v4.1-flash") };
+        let c = Catalog::new(vec![
+            reseller,
+            vendor("deepseek-flash", "deepseek", "DeepSeek V4.1 Flash 1017", 0.15, 0.6),
+            vendor("deepseek-v4-pro", "deepseek", "DeepSeek V4 Pro", 0.66, 1.98),
+        ]);
+        let id = |m: &str| {
+            let (k, i) = c.resolve(m);
+            (k, i.map(|i| c.entries[i].id.clone()))
+        };
+        let want = (MatchKind::Approx, Some("deepseek-flash".to_string()));
+        assert_eq!(id("deepseek-v4.1-flash"), want, "the vendor's price replaces the reseller median");
+        assert_eq!(id("deepseek-v4.1-flash-1017"), want, "a build tag does not matter");
+        assert_eq!(id("cline-deepseek-v4.1-flash"), want, "nor does a harness prefix");
+        assert_eq!(id("deepseek-v4-pro"), (MatchKind::Exact, Some("deepseek-v4-pro".into())));
+        // an override or a vendor id under the same name is never replaced by a display-name hit
+        let c = Catalog::new(vec![
+            entry("deepseek-v4.1-flash"),
+            vendor("deepseek-flash", "deepseek", "DeepSeek V4.1 Flash", 0.15, 0.6),
+        ]);
+        assert_eq!(c.resolve("deepseek-v4.1-flash").0, MatchKind::Exact);
+        assert_eq!(c.entries[c.resolve("deepseek-v4.1-flash").1.unwrap()].prices[0].input, 1.0);
+        // without a vendor listing the median still answers
+        let c = Catalog::new(vec![CatalogEntry { consensus: true, ..entry("hy4-preview") }]);
+        assert_eq!(c.resolve("hy4-preview").0, MatchKind::Exact);
+    }
+
+    #[test]
+    fn display_name_shared_by_vendors_needs_an_owner_or_one_price() {
+        let owned = Catalog::new(vec![
+            vendor("kimi-a", "alibaba", "Kimi K3", 9.0, 9.0),
+            vendor("kimi-k3", "moonshotai", "Kimi K3", 3.0, 15.0),
+        ]);
+        // neither provider prefixes `kimik3` and the prices differ: no guess
+        assert_eq!(owned.resolve("kimi k3").0, MatchKind::None);
+        let agree =
+            Catalog::new(vec![vendor("a", "x", "Same Name 1", 1.0, 2.0), vendor("b", "y", "Same Name 1", 1.0, 2.0)]);
+        assert_eq!(agree.resolve("same-name-1").0, MatchKind::Approx);
+        let owner = Catalog::new(vec![
+            vendor("flash-x", "alibaba", "DeepSeek Flash 9", 0.3, 1.2),
+            vendor("flash-9", "deepseek", "DeepSeek Flash 9", 0.15, 0.6),
+        ]);
+        let hit = owner.resolve("deepseek-flash-9").1.unwrap();
+        assert_eq!(owner.entries[hit].provider, "deepseek", "the vendor named in the model owns it");
+    }
+
+    #[test]
+    fn models_dev_keeps_vendor_display_names_and_flags_medians() {
+        let md = json!({
+            "deepseek": {"models": {"deepseek-flash": {"name": "DeepSeek V4.1 Flash 1017", "cost": {"input": 0.15, "output": 0.6}}}},
+            "resellerA": {"models": {"foo-1": {"name": "Foo 1", "cost": {"input": 1.0, "output": 2.0}}}}
+        });
+        let e = parse_models_dev(&md);
+        assert_eq!((e[0].name.as_deref(), e[0].consensus), (Some("DeepSeek V4.1 Flash 1017"), false));
+        assert_eq!((e[1].name.as_deref(), e[1].consensus), (None, true));
+    }
+
+    #[test]
+    fn display_keys_drop_punctuation_and_trailing_build_tags() {
+        assert_eq!(display_key("DeepSeek V4.1 Flash 1017"), "deepseekv41flash");
+        assert_eq!(display_key("deepseek-v4.1-flash-20251101"), "deepseekv41flash");
+        assert_eq!(display_key("GPT-5.6"), "gpt56");
+        assert_eq!(display_key("o3"), "o3");
+        assert_eq!(display_key("2025"), "2025", "a key that is only digits stays");
     }
 
     #[test]

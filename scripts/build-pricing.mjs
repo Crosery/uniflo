@@ -48,7 +48,7 @@ for (const provider of FIRST_PARTY) {
   const models = {}
   for (const [id, m] of Object.entries(md[provider]?.models ?? {})) {
     if (typeof m?.cost?.input !== 'number' || typeof m?.cost?.output !== 'number') continue
-    models[id] = { cost: pick(m.cost, COST_KEYS), limit: pick(m.limit, ['context', 'output']) }
+    models[id] = { ...(typeof m.name === 'string' ? { name: m.name } : {}), cost: pick(m.cost, COST_KEYS), limit: pick(m.limit, ['context', 'output']) }
     covered.add(matchKey(id))
   }
   if (Object.keys(models).length) modelsDev[provider] = { models: sortKeys(models) }

@@ -203,6 +203,11 @@ pub fn apply(
         let entry = &mut out.models[i];
         entry.context_limit = obs.context_limit.or(entry.context_limit);
         entry.output_limit = obs.output_limit.or(entry.output_limit);
+        if obs.source == entry.source {
+            // catalogs written before these fields existed pick them up here, price unchanged
+            entry.name = obs.name.or(entry.name.take());
+            entry.consensus = obs.consensus;
+        }
         entry.prices.sort_by_key(|s| s.from);
         let Some(cur) = entry.prices.last().cloned() else { continue };
         let next = overlay(&cur, &seg, now);
@@ -373,6 +378,17 @@ mod tests {
         let p = &a.models[0].prices;
         assert_eq!(p.len(), 2);
         assert_eq!((p[0].until, p[1].from, p[1].output), (Some(1_000), 1_000, 16.5));
+    }
+
+    #[test]
+    fn unchanged_prices_still_refresh_display_name_and_consensus() {
+        let mut old = entry("deepseek-flash", 0.15, 0.6);
+        old.consensus = true;
+        let mut seen = entry("deepseek-flash", 0.15, 0.6);
+        seen.name = Some("DeepSeek V4.1 Flash 1017".into());
+        let a = apply(vec![old], &mut SyncState::default(), Some(vec![seen]), None, 5);
+        assert_eq!((a.models[0].name.as_deref(), a.models[0].consensus), (Some("DeepSeek V4.1 Flash 1017"), false));
+        assert_eq!(a.models[0].prices.len(), 1, "same price: no new segment");
     }
 
     #[test]

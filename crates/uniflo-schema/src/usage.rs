@@ -202,6 +202,12 @@ pub struct CatalogEntry {
     /// `models.dev`, `litellm` or `override`.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub source: String,
+    /// The vendor's display name (`DeepSeek V4.1 Flash 1017`), kept only for vendor listings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// A median of reseller listings rather than a vendor's own price.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub consensus: bool,
 }
 
 /// One model name seen in sessions (`GET /v1/models`).
