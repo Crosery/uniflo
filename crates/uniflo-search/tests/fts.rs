@@ -1377,7 +1377,8 @@ fn pinned_content_is_retried_after_a_busy_transaction() {
             body: uniflo_schema::Body::UserMessage { text: "busyrollbackmarker".into(), synthetic: false },
         }],
     );
-    assert!(wait_for(|| fts.status().errors > 0, Duration::from_secs(8)), "the write really encountered contention");
+    // Include SQLite's 5 s busy wait, in-flight maintenance and runner scheduling, not just the write itself.
+    assert!(wait_for(|| fts.status().errors > 0, Duration::from_secs(20)), "the write really encountered contention");
     assert!(!fts.wait_idle(Duration::from_millis(100)), "an uncommitted request is not idle");
     blocker.execute_batch("ROLLBACK").unwrap();
     idle(&fts);
