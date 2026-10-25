@@ -443,6 +443,19 @@ async function runUsage() {
 
 // Sub-agents nest under their parent: a family lists only its working sub-agents and folds while
 // none works; the rest load on demand; the open sub-agent stays visible; headers link back.
+// The page reloads itself once the daemon answers as another version (after `uniflo update`), keeping its URL.
+async function runUpgrade() {
+  await load(`${api}/demo?token=${TOKEN}&view=usage`);
+  await waitFor("daemonVersion !== null", 8_000, "version noted");
+  await cdp.eval(`window.__upgradeMark = 1; sessionStorage.removeItem("uniflo.reloadedFor"); noteVersion("0.0.0-e2e")`);
+  const url1 = await waitFor(`window.__upgradeMark === undefined && document.readyState === "complete" && daemonVersion !== null ? location.search : null`, 8_000, "reload").catch(() => null);
+  const why = url1 ? url1 : JSON.stringify(await cdp.eval(`({ mark: window.__upgradeMark, v: daemonVersion, ss: sessionStorage.getItem("uniflo.reloadedFor"), href: location.href, api: API, origin: location.origin })`).catch((e) => String(e)));
+  report("[upgrade] a daemon of another version reloads the page with its URL intact", !!url1 && url1.includes("view=usage") && url1.includes("token="), why);
+  await cdp.eval(`window.__upgradeMark = 2; noteVersion("0.0.0-e2e")`);
+  await sleep(800);
+  report("[upgrade] the same version never reloads the page twice", (await cdp.eval("window.__upgradeMark")) === 2);
+}
+
 async function runTree() {
   const sub2 = join(home, ".claude/projects/-w-demo/sess-1/subagents/agent-sub2.jsonl");
   await load(`${api}/demo?token=${TOKEN}`);
@@ -1345,7 +1358,7 @@ try {
     for (const transport of ["sse", "ws", "ndjson"]) await runTransport(transport);
     await runCrossOrigin();
   }
-  for (const step of [runIdentity, runIcons, runUsage, runUsageControls, runTree, runDetail, runFts, runSearchHelp, runInsights, runNotify, runVisual, runDesign, runApi, runManage, runReadOnly, runRedact]) {
+  for (const step of [runIdentity, runIcons, runUsage, runUsageControls, runTree, runUpgrade, runDetail, runFts, runSearchHelp, runInsights, runNotify, runVisual, runDesign, runApi, runManage, runReadOnly, runRedact]) {
     if (only.length && !only.includes(step.name)) continue;
     try { await step(); } catch (e) { report(`${step.name}`, false, String(e.message || e)); }
   }

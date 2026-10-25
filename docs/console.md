@@ -50,5 +50,5 @@
 
 - harness 下拉等选择控件使用 [Tom Select](https://tom-select.js.org/) 2.6.2：脚本、样式及 Apache-2.0 许可证已内嵌，不请求 CDN，也不需要 npm 安装或前端构建。触发器、弹层、选中项和焦点沿用页面主题 token，弹层支持内部滚动及短视口向上展开。
 - `scripts/demo-e2e.mjs` 用无头 Chrome 对它做端到端验收（合成数据，不碰真实会话）：三种传输、全部接口、实时追加延迟、work/idle 切换、跨域接入与 token；全部 harness 的图标、用量与 `/v1/usage` 逐项一致、检索跳转、洞察与分组接口一致、通知节流、清理（临时 `UNIFLO_TRASH_DIR`）与只读模式、详情面板滑动、命令面板、诊断抽屉、主题切换、洞察筛选与明细卡、「接口」视图；再按 6 个视图 × 1480 / 390 px × 明暗主题截图，检查横向溢出、元素重叠和 WCAG AA 对比度。打开终端被页面内拦截，不会弹出真实窗口。
-- `/demo` 从 `crates/uniflo-gateway/src/index.html` 编译进守护进程；修改演示页时需同步该副本，再重新构建并重启守护进程、刷新浏览器。
+- `/demo` 从 `crates/uniflo-gateway/src/index.html` 编译进守护进程；修改演示页时需同步该副本，再重新构建并重启守护进程。页面每 5 秒读一次 `/v1/health`，重连时也看 `hello` 的 `server`：守护进程换了版本（如 `uniflo update` 之后）就自动刷新一次载入新页面，URL 里的视图、查询和选中会话保留；同一版本只刷新一次，从别的地址打开（`?api=`）时不刷新。
 - 本页截图（`assets/`）来自 `scripts/demo-e2e.mjs` 的合成数据截图，不含真实会话。

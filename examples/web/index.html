@@ -2556,6 +2556,23 @@ function refreshHarnessOptions() {
   syncCombo(harnessSelect, data, value);
 }
 
+// ---------------------------------------------------------------- daemon upgrades
+// The daemon serves this page: once it answers as another version (after `uniflo update`), load
+// the page that version ships. View, query and selection live in the URL, so they survive.
+let daemonVersion = null;
+function noteVersion(v) {
+  if (!v) return;
+  if (daemonVersion === null) { daemonVersion = v; return; }
+  if (v === daemonVersion) return;
+  daemonVersion = v;
+  if (new URL(API || location.href).origin !== location.origin) return; // a page served elsewhere (?api=)
+  try {
+    if (sessionStorage.getItem("uniflo.reloadedFor") === v) return;
+    sessionStorage.setItem("uniflo.reloadedFor", v);
+  } catch {}
+  location.reload();
+}
+
 // ---------------------------------------------------------------- harnesses + stats
 async function refreshMeta() {
   const [h, st, hl] = await Promise.allSettled([api("harnesses", "/v1/harnesses"), api("stats", "/v1/stats"), api("health", "/v1/health")]);
@@ -2575,6 +2592,7 @@ async function refreshMeta() {
     $("#m-sessions").textContent = b.sessions;
     $("#m-working").textContent = b.working;
     $("#m-api").textContent = `${API.replace(/^https?:\/\//, "")} · schema v${b.schema} · ${b.version}`;
+    noteVersion(b.version);
     if (READ_ONLY !== !!b.read_only) { READ_ONLY = !!b.read_only; applyReadOnly(); }
   }
   if (st.status === "fulfilled") {
@@ -3168,6 +3186,7 @@ function onEnv(env) {
   envTotal++;
   perSecond[perSecond.length - 1]++;
   if (env.type === "hello") {
+    noteVersion(String(env.server || "").split("/")[1]);
     if (env.seq < lastSeq) resync(); // daemon restarted: seq starts over
     return;
   }
