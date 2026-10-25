@@ -80,6 +80,8 @@ impl Home {
             .env_remove("UNIFLO_URL")
             .env_remove("UNIFLO_DATA_DIR")
             .env_remove("UNIFLO_TRASH_DIR")
+            .env_remove("UNIFLO_CACHE_DIR")
+            .env_remove("UNIFLO_CONFIG_DIR")
             .env("NO_COLOR", "1");
         c
     }
@@ -632,6 +634,35 @@ fn mcp_answers_in_process_without_a_daemon() {
     let r = m.call_structured("uniflo_search", json!({"q": "缓存击穿"}));
     assert!(ids(&r["structuredContent"], "results", "session").contains(&"claude:c1".to_owned()), "{r}");
     assert_eq!(m.call_structured("uniflo_status", json!({}))["structuredContent"]["health"]["sessions"], 9);
+}
+
+#[test]
+fn mcp_switches_back_to_a_daemon_started_after_local_fallback() {
+    let _lock = lock();
+    let h = home();
+    let url = closed_url();
+    let port: u16 = url.rsplit(':').next().unwrap().parse().unwrap();
+    let mut m = h.mcp(&url);
+    m.handshake();
+    let first = m.call_structured("uniflo_search", json!({"q": "缓存击穿"}));
+    assert!(ids(&first["structuredContent"], "results", "session").contains(&"claude:c1".to_owned()));
+    h.write(".claude/projects/-p/recovered.jsonl", user("recovered-u", now_ms(), "/synthetic", "daemonrecoverymarker"));
+    let child = h
+        .cmd()
+        .args(["daemon", "--bind", &format!("127.0.0.1:{port}"), "--no-cache", "--no-update-check", "--no-price-sync"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let d = Daemon { child, url, port };
+    wait("recovered daemon health", || d.get("/v1/health").0 == 200);
+    wait("MCP returns new daemon content", || {
+        let r = m.call_structured("uniflo_search", json!({"q": "daemonrecoverymarker"}));
+        r["structuredContent"]["results"]
+            .as_array()
+            .is_some_and(|a| a.iter().any(|s| s["session"] == "claude:recovered"))
+    });
+    assert_eq!(d.get("/v1/stats").1["fts"]["errors"], 0);
 }
 
 /// Scenario: 恢复命令与注入防护.

@@ -225,6 +225,22 @@ impl Shared {
             self.keys.remove(&r.sid);
         }
     }
+
+    fn sync_progress(&mut self, expected: &[Session]) {
+        let known: HashSet<&str> = expected.iter().map(|s| s.key.as_str()).collect();
+        let pinned = self.sessions.iter().filter(|(key, row)| row.pinned && !known.contains(key.as_str())).count();
+        let done = expected
+            .iter()
+            .filter(|s| {
+                self.sessions
+                    .get(&s.key)
+                    .is_some_and(|row| row.pinned || row.done_upd.is_some_and(|t| t >= s.updated_at))
+            })
+            .count();
+        self.progress.total = expected.len() + pinned;
+        self.progress.done = done + pinned;
+        self.indexing = self.progress.done < self.progress.total;
+    }
 }
 
 struct Inner {
@@ -234,6 +250,8 @@ struct Inner {
     shared: Mutex<Shared>,
     readers: Mutex<Vec<Connection>>,
     cmds: Mutex<Vec<Cmd>>,
+    pending_commands: AtomicUsize,
+    park_when_idle: AtomicBool,
     stop: AtomicBool,
     blocks: cache::BlockCache,
     cold_cache: cache::ColdCache,
@@ -275,6 +293,15 @@ impl Drop for Fts {
     }
 }
 
+fn open_writer(path: &Path, tag: &str) -> Result<(Connection, store::OpenState, bool)> {
+    let (conn, state) = store::open(path, tag)?;
+    let migrating = migrate::pending(path);
+    if state == store::OpenState::VersionChanged && !migrating {
+        store::clear_progress_non_pinned(&conn)?;
+    }
+    Ok((conn, state, migrating))
+}
+
 impl Fts {
     /// Open (or rebuild) the index and start its writer thread. Call after [`Engine::index`];
     /// returns once the backlog is known, so [`Fts::status`] is meaningful immediately.
@@ -284,15 +311,42 @@ impl Fts {
     /// session converted so far.
     pub fn start(engine: Arc<Engine>, opts: FtsOptions) -> Result<Fts> {
         let tag = format!("uniflo-fts/format{}/schema{}", opts.format, SCHEMA_VERSION);
-        let (conn, open_state) = store::open(&opts.path, &tag)?;
-        let migrating = migrate::pending(&opts.path);
-        // A migration refreshes every session once it is done anyway.
-        if open_state == store::OpenState::VersionChanged && !migrating {
-            store::clear_progress_non_pinned(&conn)?;
-        }
+        let lease = store::try_writer(&opts.path)?;
+        let (conn, open_state, migrating) = if lease.is_some() {
+            open_writer(&opts.path, &tag)?
+        } else {
+            let until = Instant::now() + Duration::from_secs(2);
+            loop {
+                let opened = store::open_reader(&opts.path).and_then(|c| {
+                    let current = store::meta_get(&c, "tag")?;
+                    if let Some(current) = current {
+                        anyhow::ensure!(current == tag, "active full-text index has another format");
+                        Ok(Some(c))
+                    } else {
+                        Ok(None)
+                    }
+                });
+                match opened {
+                    Ok(Some(c)) => break (c, store::OpenState::Unchanged, false),
+                    Ok(None) => {}
+                    Err(e) => {
+                        let initializing = matches!(e.downcast_ref::<rusqlite::Error>(),
+                            Some(rusqlite::Error::SqliteFailure(code, msg))
+                                if matches!(code.code, rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
+                                    || (code.code == rusqlite::ErrorCode::CannotOpen && !opts.path.exists())
+                                    || msg.as_deref() == Some("no such table: meta"));
+                        if !initializing {
+                            return Err(e);
+                        }
+                    }
+                }
+                anyhow::ensure!(Instant::now() < until, "full-text index writer is still initializing");
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        };
         let reclaimed_bytes = store::meta_get(&conn, "reclaimed_bytes")?.and_then(|v| v.parse().ok()).unwrap_or(0);
         let mut shared = Shared {
-            merging: true,
+            merging: lease.is_some(),
             warming: true,
             migrating,
             indexing: migrating,
@@ -301,6 +355,9 @@ impl Fts {
         };
         for (k, r) in store::load_sessions(&conn)? {
             shared.remember(&k, r);
+        }
+        if lease.is_none() {
+            shared.sync_progress(&engine.sessions());
         }
         let fresh = shared.sessions.is_empty();
         let rx = engine.subscribe(None).1;
@@ -311,6 +368,8 @@ impl Fts {
             shared: Mutex::new(shared),
             readers: Mutex::new(Vec::new()),
             cmds: Mutex::new(Vec::new()),
+            pending_commands: AtomicUsize::new(0),
+            park_when_idle: AtomicBool::new(false),
             stop: AtomicBool::new(false),
             blocks: cache::BlockCache::new(opts.block_cache_bytes),
             cold_cache: cache::ColdCache::default(),
@@ -320,10 +379,12 @@ impl Fts {
         let mut w = Writer {
             inner: inner.clone(),
             conn,
+            lease,
             rx,
             queue: VecDeque::new(),
             pass: None,
             next_reconcile: Instant::now(),
+            reader_version: 0,
             lagged: Cell::new(false),
             tx_since: Cell::new(None),
             build: None,
@@ -332,7 +393,7 @@ impl Fts {
             compact_check: true,
             vacuum_check: true,
         };
-        if !migrating {
+        if w.lease.is_some() && !migrating {
             w.reconcile();
             w.commit(true);
             if fresh && !w.queue.is_empty() {
@@ -396,11 +457,14 @@ impl Fts {
     pub fn wait_idle(&self, timeout: Duration) -> bool {
         let until = Instant::now() + timeout;
         loop {
-            let idle = !self.inner.shared.lock().unwrap().indexing && self.inner.cmds.lock().unwrap().is_empty();
+            let idle =
+                !self.inner.shared.lock().unwrap().indexing && self.inner.pending_commands.load(Ordering::Acquire) == 0;
             if idle {
                 // Let the writer finish the loop turn that drained the last command.
                 std::thread::sleep(IDLE * 2);
-                if !self.inner.shared.lock().unwrap().indexing {
+                if !self.inner.shared.lock().unwrap().indexing
+                    && self.inner.pending_commands.load(Ordering::Acquire) == 0
+                {
                     return true;
                 }
             }
@@ -415,13 +479,23 @@ impl Fts {
     /// Such a session is pinned: reconciliation and `removed` envelopes leave it alone; drop it
     /// with [`Fts::remove_session`]. Applied asynchronously by the writer.
     pub fn index_session(&self, session: Session, events: Vec<Event>) {
-        self.inner.cmds.lock().unwrap().push(Cmd::Index(Box::new(session), events));
+        let mut cmds = self.inner.cmds.lock().unwrap();
+        self.inner.pending_commands.fetch_add(1, Ordering::Release);
+        cmds.push(Cmd::Index(Box::new(session), events));
     }
 
     /// Delete a session's rows (pinned or not), from whichever tier(s) hold it. Applied
     /// asynchronously by the writer.
     pub fn remove_session(&self, key: &str) {
-        self.inner.cmds.lock().unwrap().push(Cmd::Remove(key.to_owned()));
+        let mut cmds = self.inner.cmds.lock().unwrap();
+        self.inner.pending_commands.fetch_add(1, Ordering::Release);
+        cmds.push(Cmd::Remove(key.to_owned()));
+    }
+
+    /// Release a one-shot build's writer lease once caught up, while still serving searches.
+    /// Explicit queued writes can acquire it again; a daemon should keep following instead.
+    pub fn release_writer_when_idle(&self) {
+        self.inner.park_when_idle.store(true, Ordering::Release);
     }
 
     /// Blocking: run a query (see `docs/search.md#全文检索`).
@@ -1323,10 +1397,12 @@ struct Pass {
 struct Writer {
     inner: Arc<Inner>,
     conn: Connection,
+    lease: Option<Connection>,
     rx: broadcast::Receiver<Arc<Envelope>>,
     queue: VecDeque<Session>,
     pass: Option<Pass>,
     next_reconcile: Instant,
+    reader_version: i64,
     /// Reconcile at the next turn: the broadcast lagged or a write was rolled back.
     lagged: Cell<bool>,
     /// Start of the open write transaction.
@@ -1344,7 +1420,7 @@ struct Writer {
 
 impl Writer {
     fn run(mut self) {
-        if self.inner.shared.lock().unwrap().migrating {
+        if self.lease.is_some() && self.inner.shared.lock().unwrap().migrating {
             self.migrate();
         }
         match store::count_docs(&self.conn) {
@@ -1352,7 +1428,31 @@ impl Writer {
             Err(e) => self.inner.note_error(format!("count: {e:#}")),
         }
         while !self.inner.stop.load(Ordering::Relaxed) {
+            if self.lease.is_none() {
+                let needs_writer = !self.inner.park_when_idle.load(Ordering::Acquire)
+                    || self.inner.pending_commands.load(Ordering::Acquire) != 0
+                    || self.inner.shared.lock().unwrap().indexing;
+                if needs_writer && Instant::now() >= self.next_reconcile {
+                    self.next_reconcile = Instant::now() + Duration::from_secs(1);
+                    if let Err(e) = self.claim_writer() {
+                        self.inner.note_error(format!("writer lease: {e:#}"));
+                    }
+                }
+                if self.lease.is_none() {
+                    if let Ok(version) = self.conn.pragma_query_value(None, "data_version", |r| r.get::<_, i64>(0))
+                        && version != self.reader_version
+                    {
+                        self.reload();
+                        self.reader_version = version;
+                    }
+                    self.nap(IDLE);
+                    continue;
+                }
+            }
             let busy = self.follow() | self.commands();
+            if self.lagged.get() {
+                self.pass = None;
+            }
             if self.lagged.get() || Instant::now() >= self.next_reconcile {
                 self.reconcile();
             }
@@ -1374,6 +1474,21 @@ impl Writer {
                 None => {
                     self.commit(true);
                     self.settle();
+                    if self.inner.park_when_idle.load(Ordering::Acquire)
+                        && self.inner.pending_commands.load(Ordering::Acquire) == 0
+                        && self.tx_since.get().is_none()
+                    {
+                        match store::open_reader(&self.inner.opts.path) {
+                            Ok(reader) => {
+                                self.conn = reader;
+                                self.lease = None;
+                                self.merge = None;
+                                self.inner.shared.lock().unwrap().merging = false;
+                                continue;
+                            }
+                            Err(e) => self.inner.note_error(format!("release writer: {e:#}")),
+                        }
+                    }
                     let did_idle_work = self.merge_step() || self.compact_step() || self.vacuum_step();
                     if !did_idle_work && !busy {
                         self.nap(IDLE);
@@ -1382,6 +1497,24 @@ impl Writer {
             }
         }
         self.commit(true);
+    }
+
+    fn claim_writer(&mut self) -> Result<bool> {
+        let Some(lease) = store::try_writer(&self.inner.opts.path)? else { return Ok(false) };
+        let tag = format!("uniflo-fts/format{}/schema{}", self.inner.opts.format, SCHEMA_VERSION);
+        let (conn, _, migrating) = open_writer(&self.inner.opts.path, &tag)?;
+        self.conn = conn;
+        self.lease = Some(lease);
+        self.inner.shared.lock().unwrap().migrating = migrating;
+        self.inner.shared.lock().unwrap().merging = true;
+        self.reload();
+        if migrating {
+            self.migrate();
+        } else {
+            self.reconcile();
+            self.commit(true);
+        }
+        Ok(true)
     }
 
     /// Convert a leftover `fts-v1.sqlite` ([`migrate`]); queries see each converted session at
@@ -1432,11 +1565,15 @@ impl Writer {
     /// Reload the in-memory session map and row count from the database.
     fn reload(&self) {
         if let Ok(rows) = store::load_sessions(&self.conn) {
+            let expected = self.lease.is_none().then(|| self.inner.engine.sessions());
             let mut sh = self.inner.shared.lock().unwrap();
             sh.sessions.clear();
             sh.keys.clear();
             for (k, r) in rows {
                 sh.remember(&k, r);
+            }
+            if let Some(expected) = expected {
+                sh.sync_progress(&expected);
             }
         }
         if let Ok(n) = store::count_docs(&self.conn) {
@@ -1810,7 +1947,11 @@ impl Writer {
             return false;
         }
         let cutoff = self.inner.cutoff();
-        let _ = self.transaction(|w, tx| {
+        if !self.commit(true) {
+            self.requeue_commands(cmds);
+            return true;
+        }
+        let result = self.transaction(|w, tx| {
             let mut delta = 0;
             for cmd in &cmds {
                 match cmd {
@@ -1861,7 +2002,20 @@ impl Writer {
             }
             Ok(delta)
         });
+        if result.is_ok() && self.commit(true) {
+            self.inner.pending_commands.fetch_sub(cmds.len(), Ordering::Release);
+        } else {
+            self.requeue_commands(cmds);
+        }
         true
+    }
+
+    fn requeue_commands(&self, mut cmds: Vec<Cmd>) {
+        let mut pending = self.inner.cmds.lock().unwrap();
+        cmds.append(&mut pending);
+        *pending = cmds;
+        drop(pending);
+        self.nap(Duration::from_secs(1));
     }
 
     /// Row id of a session, created on first sight.
@@ -1899,7 +2053,7 @@ impl Writer {
     fn transaction(&self, f: impl FnOnce(&Self, &Connection) -> Result<i64>) -> Result<()> {
         let res = (|| {
             if self.tx_since.get().is_none() {
-                self.conn.execute_batch("BEGIN")?;
+                self.conn.execute_batch("BEGIN IMMEDIATE")?;
                 self.tx_since.set(Some(Instant::now()));
             }
             f(self, &self.conn)
@@ -1917,14 +2071,20 @@ impl Writer {
         }
     }
 
-    fn commit(&self, force: bool) {
-        let Some(t0) = self.tx_since.get() else { return };
+    fn commit(&self, force: bool) -> bool {
+        let Some(t0) = self.tx_since.get() else { return true };
         if !force && t0.elapsed() < COMMIT_EVERY {
-            return;
+            return true;
         }
         match self.conn.execute_batch("COMMIT") {
-            Ok(()) => self.tx_since.set(None),
-            Err(err) => self.rollback(&err.into()),
+            Ok(()) => {
+                self.tx_since.set(None);
+                true
+            }
+            Err(err) => {
+                self.rollback(&err.into());
+                false
+            }
         }
     }
 

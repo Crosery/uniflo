@@ -2,7 +2,7 @@
 
 > 会话搜索：fd 式结构化过滤 + fzf 式模糊匹配，CLI（`uniflo ls/find`、`uniflo usage`）与网关（`/v1/sessions?q=`、`/v1/usage?q=`、`/v1/models?q=`）共用；全文检索：按事件正文查子串（`uniflo grep`、`/v1/search`）。实现都在 `crates/uniflo-search`。
 
-状态：`current` · 更新：2026-10-09
+状态：`current` · 更新：2026-10-26
 
 空格分隔，全部条件同时成立。`key:value` 形式且 key 可识别的是过滤器，其余词拼成模糊查询。
 
@@ -70,3 +70,5 @@ uniflo grep --json -- -rollback deploy      # 以 - 开头的参数放在 -- 之
 ```
 
 `uniflo grep` 优先问守护进程（`--url` / `UNIFLO_URL`）；连不上时在本进程打开同一份索引，先补齐增量（首次会全量构建，耗时见 ADR-0008；已超过 `--fts-hot-days` 的会话直接写入冷层，不会先占热层再压缩）再查询。`uniflo daemon --no-fts` 不建索引，此时 `/v1/search` 返回 503。
+
+同一缓存目录只允许一个新版进程写全文索引，其他进程读取已提交内容，写者退出后可自动接管。锁等待或缓存读取失败不会触发删除索引；不需要通过清空缓存修复锁竞争。升级后应让旧 MCP 连接重新启动，才能加载新版的跨进程协调与自动重连逻辑。

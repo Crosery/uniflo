@@ -46,7 +46,12 @@ impl Env {
             Arc::new(JsonlAdapter::new(Gemini::new(self.path("gemini"), self.path("projects.json"))))
                 as Arc<dyn Adapter>,
         ];
-        let opts = EngineOptions { cache_path: None, hot_poll: Duration::from_millis(50), ..Default::default() };
+        let opts = EngineOptions {
+            cache_path: None,
+            data_dir: None,
+            hot_poll: Duration::from_millis(50),
+            ..Default::default()
+        };
         let engine = Engine::new(adapters, opts);
         engine.index();
         engine
@@ -1312,4 +1317,100 @@ fn v1_index_migrates_in_the_background_then_refreshes_from_sources() {
     drop(fts);
     let fts = env.fts(&engine, FtsOptions::default());
     assert_eq!(fts.status().reclaimed_bytes, old_bytes, "kept across restarts");
+}
+
+#[test]
+fn shared_index_readers_follow_the_owner_and_take_over_without_losing_commands() {
+    let env = Env::new();
+    std::fs::write(env.path("claude/-w-demo/s.jsonl"), user("u1", now_ms(), "ownershipmarker")).unwrap();
+    let engine = env.engine();
+    let first = env.fts(&engine, FtsOptions::default());
+    idle(&first);
+    let second = env.fts(&engine, FtsOptions::default());
+    assert_eq!(search(&second, "ownershipmarker").total, 1);
+    let mut pinned = engine.session("claude:s").unwrap();
+    pinned.key = "claude:pinned".into();
+    pinned.id = "pinned".into();
+    let event = uniflo_schema::Event {
+        id: "p1".into(),
+        session: pinned.key.clone(),
+        ts: now_ms(),
+        pos: Some(1),
+        partial: false,
+        truncated: false,
+        body: uniflo_schema::Body::UserMessage { text: "handoffmarker".into(), synthetic: false },
+    };
+    second.index_session(pinned.clone(), vec![event.clone()]);
+    assert!(!second.wait_idle(Duration::from_millis(300)), "queued writes wait for ownership");
+    first.index_session(pinned.clone(), vec![event]);
+    idle(&first);
+    assert!(wait_for(|| search(&second, "handoffmarker").total == 1, Duration::from_secs(3)));
+    second.remove_session(&pinned.key);
+    drop(first);
+    idle(&second);
+    assert_eq!(search(&second, "handoffmarker").total, 0, "queued index then removal keep their order");
+    assert_eq!(search(&second, "ownershipmarker").total, 1);
+    assert_eq!(second.status().errors, 0);
+}
+
+#[test]
+fn pinned_content_is_retried_after_a_busy_transaction() {
+    let env = Env::new();
+    std::fs::write(env.path("claude/-w-demo/s.jsonl"), user("u1", now_ms(), "ordinary text")).unwrap();
+    let engine = env.engine();
+    let fts = env.fts(&engine, FtsOptions::default());
+    idle(&fts);
+    let blocker = rusqlite::Connection::open(env.fts_path()).unwrap();
+    blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let mut pinned = engine.session("claude:s").unwrap();
+    pinned.key = "claude:pinned".into();
+    pinned.id = "pinned".into();
+    fts.index_session(
+        pinned.clone(),
+        vec![uniflo_schema::Event {
+            id: "p1".into(),
+            session: pinned.key,
+            ts: now_ms(),
+            pos: Some(1),
+            partial: false,
+            truncated: false,
+            body: uniflo_schema::Body::UserMessage { text: "busyrollbackmarker".into(), synthetic: false },
+        }],
+    );
+    assert!(wait_for(|| fts.status().errors > 0, Duration::from_secs(8)), "the write really encountered contention");
+    assert!(!fts.wait_idle(Duration::from_millis(100)), "an uncommitted request is not idle");
+    blocker.execute_batch("ROLLBACK").unwrap();
+    idle(&fts);
+    assert_eq!(events(&search(&fts, "busyrollbackmarker")), [("claude:pinned", "p1")]);
+    assert_eq!(search(&fts, "ordinary").total, 1);
+}
+
+#[test]
+fn completed_snapshot_yields_the_writer_lease_but_keeps_searching() {
+    let env = Env::new();
+    std::fs::write(env.path("claude/-w-demo/s.jsonl"), user("u1", now_ms(), "snapshotmarker")).unwrap();
+    let engine = env.engine();
+    let snapshot = env.fts(&engine, FtsOptions::default());
+    snapshot.release_writer_when_idle();
+    idle(&snapshot);
+    let writer = env.fts(&engine, FtsOptions::default());
+    let mut pinned = engine.session("claude:s").unwrap();
+    pinned.key = "claude:later".into();
+    pinned.id = "later".into();
+    writer.index_session(
+        pinned.clone(),
+        vec![uniflo_schema::Event {
+            id: "later-u".into(),
+            session: pinned.key,
+            ts: now_ms(),
+            pos: Some(1),
+            partial: false,
+            truncated: false,
+            body: uniflo_schema::Body::UserMessage { text: "laterwritermarker".into(), synthetic: false },
+        }],
+    );
+    idle(&writer);
+    assert_eq!(search(&writer, "snapshotmarker").total, 1);
+    assert!(wait_for(|| search(&snapshot, "laterwritermarker").total == 1, Duration::from_secs(3)));
+    assert_eq!((snapshot.status().errors, writer.status().errors), (0, 0));
 }

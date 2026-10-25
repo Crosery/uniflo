@@ -222,6 +222,36 @@ fn tag_of(c: &Connection) -> Result<Option<String>> {
     meta_get(c, "tag")
 }
 
+/// A process-scoped write lease, separate from the WAL so other processes can still search.
+/// SQLite releases the reservation even after an unclean process exit; no stale PID cleanup.
+pub(super) fn try_writer(path: &Path) -> Result<Option<Connection>> {
+    if let Some(dir) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+    }
+    let mut lock_path = path.as_os_str().to_owned();
+    lock_path.push(".writer");
+    let c = Connection::open(Path::new(&lock_path)).context("open full-text writer lease")?;
+    c.busy_timeout(Duration::ZERO)?;
+    match c.execute_batch("BEGIN IMMEDIATE") {
+        Ok(()) => Ok(Some(c)),
+        Err(rusqlite::Error::SqliteFailure(e, _))
+            if matches!(e.code, rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked) =>
+        {
+            Ok(None)
+        }
+        Err(e) => Err(e).context("claim full-text writer lease"),
+    }
+}
+
+fn invalid_database(err: &anyhow::Error) -> bool {
+    matches!(
+        err.downcast_ref::<rusqlite::Error>(),
+        Some(rusqlite::Error::SqliteFailure(e, msg))
+            if matches!(e.code, rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase)
+                || msg.as_deref() == Some("no such table: meta")
+    )
+}
+
 /// How [`open`] found the file: built from scratch (`discarded` tells apart "there was no file"
 /// from "an existing one was thrown away", for [`OpenState::rebuilt`]'s pre-ADR-0011 meaning), the
 /// same format but a different Uniflo version (the index is kept; see [`crate::fts::Fts`]'s
@@ -246,17 +276,25 @@ impl OpenState {
     }
 }
 
-/// Open the writer connection. A file with another tag (format or schema version changed) or one
-/// that cannot be read is discarded and recreated. The Uniflo version lives outside the tag
+/// Open the writer connection. A file with another tag or verified invalid SQLite data is
+/// discarded and recreated; busy, permission and I/O errors never justify deleting an index.
 /// (`meta.version`): a version-only change keeps the index (see [`OpenState::VersionChanged`]).
 pub fn open(path: &Path, tag: &str) -> Result<(Connection, OpenState)> {
-    if let Some(dir) = path.parent() {
+    if let Some(dir) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
     }
     let existed = path.exists();
     let mut discarded = false;
     if existed {
-        let keep = Connection::open(path).ok().and_then(|c| tag_of(&c).ok().flatten()).is_some_and(|t| t == tag);
+        let keep = {
+            let c = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .with_context(|| format!("inspect {}", path.display()))?;
+            match tag_of(&c) {
+                Ok(t) => t.as_deref() == Some(tag),
+                Err(e) if invalid_database(&e) => false,
+                Err(e) => return Err(e).with_context(|| format!("inspect {}", path.display())),
+            }
+        };
         if !keep {
             remove_files(path);
             discarded = true;
@@ -743,5 +781,21 @@ mod tests {
         let (_, state) = open(&path, "uniflo-fts/format3/schema1").unwrap();
         assert_eq!(state, OpenState::Fresh { discarded: true }, "format change discards the old file");
         assert!(state.rebuilt());
+    }
+
+    #[test]
+    fn busy_index_is_not_discarded() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fts-v2.sqlite");
+        let (c, _) = open(&path, "probe").unwrap();
+        meta_set(&c, "sentinel", "preserved").unwrap();
+        c.execute_batch("PRAGMA locking_mode=EXCLUSIVE; BEGIN EXCLUSIVE").unwrap();
+        assert!(open(&path, "probe").is_err(), "a busy cache must be preserved, not rebuilt");
+        c.execute_batch("ROLLBACK").unwrap();
+        assert_eq!(meta_get(&c, "sentinel").unwrap().as_deref(), Some("preserved"));
+        drop(c);
+        let (c, state) = open(&path, "probe").unwrap();
+        assert_eq!(state, OpenState::Unchanged);
+        assert_eq!(meta_get(&c, "sentinel").unwrap().as_deref(), Some("preserved"));
     }
 }

@@ -2,7 +2,7 @@
 
 > 守护进程如何从各 harness 的会话存储得到统一、实时的会话与事件流。
 
-状态：`current` · 更新：2026-10-10
+状态：`current` · 更新：2026-10-26
 
 ## 数据流
 
@@ -45,10 +45,11 @@ Gateway（axum）                       ← uniflo-gateway
 
 决策与取舍见 `docs/decisions/ADR-0008-全文检索索引.md`（基础设计）与 `docs/decisions/ADR-0011-全文索引紧凑格式.md`（按会话年龄分热/冷两层存储），这里只写运行时结构。
 
-- **单写者**：`Fts::start` 起一个 `uniflo-fts` 线程，独占 `fts-v2.sqlite` 的写连接；查询走只读连接池，WAL 下读写互不阻塞。守护进程启动时先就绪 REST，索引在后台追赶。
+- **跨进程单写者**：`Fts::start` 用索引旁的 `.writer` SQLite 连接保留写租约，再起 `uniflo-fts` 线程。其他进程只读同一 WAL，按 `data_version` 刷新会话映射；租约释放后自动接管。进程退出（包括崩溃）由 SQLite 释放租约，不依赖 PID 文件或删锁文件。查询仍走只读连接池，守护进程先就绪 REST、索引在后台追赶。
 - **数据只来自引擎**：正文通过 `Engine::history`（与 `GET …/events` 同一条读取路径）分页读取，新事件来自引擎广播；不直接打开 harness 文件。
 - **一次 pass**：一个会话从最新一页往回读，读完记下 `done_upd` / `done_pos`；会话按 `updated_at` 倒序排队。广播丢失（lagged）、摘要读取不广播的事件、被删除的会话，由每 30 s 一次的对账补齐。
 - **pinned 会话**：`Fts::index_session` 写入的会话不在引擎里，对账和 `removed` 不删除它们，只有 `remove_session` 删除。
+- **写入失败**：写事务用 `BEGIN IMMEDIATE`，避免读快照在另一个连接提交后无法升级。显式索引和删除命令提交成功才算完成；回滚后按原顺序保留并重试，不会因队列已取出而漏内容。读取缓存标签遇到忙碌、权限或 I/O 错误不删除缓存；只对已确认的格式不匹配或 SQLite 损坏重建。
 - 依赖：`uniflo-search` 因此依赖 `uniflo-core`（读 `Engine`）和 bundled `rusqlite`；网关只持有 `Option<Arc<Fts>>`，为 `None` 时 `/v1/search` 返回 503。
 
 ## 用量与费用

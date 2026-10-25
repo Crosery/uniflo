@@ -2,7 +2,7 @@
 
 > 让 agent 直接查询本机所有会话：stdio MCP 服务器 `uniflo mcp`、随二进制分发的 Skill、一条命令全局接入的 `uniflo setup`，以及恢复会话、记忆与指令文件、接力上下文。
 
-状态：`current` · 更新：2026-10-10
+状态：`current` · 更新：2026-10-26
 
 同一能力有三个入口：REST（`docs/api.md`）、CLI `--json`、MCP `structuredContent`（工具参数传 `structured: true` 才带）。MCP 工具内部就是对网关 REST 路由的 `GET`，所以三者的数值与 id 一致（`crates/uniflo-cli/tests/agent.rs` 的 `mcp_cli_and_rest_agree` 逐项比对）。浮点也逐位一致：`serde_json` 开启了 `float_roundtrip`，响应解析后再输出不会改动最后一位。唯一会随时间变的是全文检索的 `score`：它带最近活动加权，隔一段时间再查会略有变化，比对时去掉它。
 
@@ -11,6 +11,7 @@
 - **协议**：stdio，每行一条 JSON-RPC 2.0 消息，也接受批量数组。支持 `initialize`、`ping`、`tools/list`、`tools/call`，通知（`notifications/initialized` 等）不回复。协议版本按 `2025-11-25`、`2025-06-18`、`2025-03-26`、`2024-11-05` 协商，客户端给的不在列表里时回最新的。只声明 `tools` 能力。协议层手写在 `crates/uniflo-cli/src/mcp.rs`，没有引入 `rmcp`。
 - **stdout 只有协议消息**：诊断写 stderr；服务器从不提问，也不触发 `uniflo setup` 的首次询问。
 - **数据来源**：先连 `UNIFLO_URL`（默认 `http://127.0.0.1:7311`，带 `UNIFLO_TOKEN`）。连不上时在进程内建一次索引，用网关自己的路由回答（`uniflo_gateway::agent::get_in_process`，与守护进程同一段代码）；用量账本、全文索引在第一次需要时才建（全文索引最多等 20 s，未建完时结果带 `indexing: true`）。此时第一个结果的文本以"守护进程未运行，结果来自一次性索引"开头。`--local` 直接走进程内索引。
+- **守护进程恢复**：未指定 `--local` 时，后续请求仍优先探测守护进程；连通后释放进程内索引并切回守护进程，不会长期留在旧快照。进程内全文索引追平后即释放写租约、保留只读查询，不会因为 MCP 长期驻留而挡住后来启动的守护进程。多个新版进程共享全文索引时只有租约持有者写入，其余进程只读，持有者释放后可接管。
 - **错误**：JSON 无效 `-32700`；不是请求对象 `-32600`；未知方法 `-32601`；未知工具、`arguments` 不是对象、参数类型不对（如 `limit: "many"`、`limit: 2.5`、布尔参数给字符串）、缺必填参数 `-32602`。数值越界不报错，夹到边界。会话不存在、守护进程返回错误时是正常结果，`isError: true`，`structuredContent`（开启时）为 `{error}`。
 - **结果**：每个工具返回 `content`（紧凑文本，见下）和 `isError`，都标注 `readOnlyHint: true`。每个工具的 `inputSchema` 都多一个可选布尔 `structured`（默认 `false`）：为 `true` 时结果再带上 `structuredContent`（REST 原始 JSON，数组包一层对象，数值精确）；默认省略它以省 token。
 

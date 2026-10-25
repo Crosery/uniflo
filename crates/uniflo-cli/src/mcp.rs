@@ -186,10 +186,14 @@ impl Server {
     }
 
     fn raw(&mut self, path: &str) -> Result<(u16, Vec<u8>)> {
-        if !self.local_only && self.local.is_none() {
+        if !self.local_only {
             let c = Client::new(&self.url, self.token.clone())?;
             if let Ok(mut r) = c.get(path) {
-                return Ok((r.status, r.body()?));
+                let status = r.status;
+                let body = r.body()?;
+                self.local = None;
+                self.noted = false;
+                return Ok((status, body));
             }
         }
         let local = self.local()?;
@@ -223,6 +227,7 @@ impl Server {
         l.fts = true;
         match Fts::start(l.engine.clone(), FtsOptions { pause: 0.0, ..Default::default() }) {
             Ok(f) => {
+                f.release_writer_when_idle();
                 let t0 = Instant::now();
                 while !f.wait_idle(Duration::from_secs(1)) && t0.elapsed() < Duration::from_secs(20) {}
                 l.router =
@@ -234,9 +239,11 @@ impl Server {
 
     /// Route through the backend once to learn whether it is local, then run `f`.
     fn prepare(&mut self, usage: bool, fts: bool) {
-        if self.local.is_none() && !self.local_only {
+        if !self.local_only {
             let alive = Client::new(&self.url, self.token.clone()).is_ok_and(|c| c.alive());
             if alive {
+                self.local = None;
+                self.noted = false;
                 return;
             }
         }
