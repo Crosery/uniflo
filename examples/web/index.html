@@ -2329,7 +2329,8 @@ function renderList() {
         groups[f.work ? 0 : f.updated >= t0 ? 1 : f.updated >= y0 ? 2 : f.updated >= w0 ? 3 : 4][1].push(s);
       }
       html = groups.filter(([, g]) => g.length).map(([name, g]) => {
-        g.sort((a, b) => tree.fam.get(b.key).updated - tree.fam.get(a.key).updated);
+        // 工作中 keeps launch order so rows stay put while sessions answer; the rest go by latest activity
+        g.sort(name === "工作中" ? byStart : (a, b) => tree.fam.get(b.key).updated - tree.fam.get(a.key).updated);
         return `<div class="group-h${name === "工作中" ? " live" : ""}">${name === "工作中" ? '<span class="dot work"></span>' : ""}<span>${name}</span><span class="n">${g.length}</span></div>` + g.map((s) => nodeHtml(s, tree, out)).join("");
       }).join("");
     }
@@ -2342,8 +2343,11 @@ function renderList() {
 }
 const usageCost = (u) => (!u || !u.steps ? "" : u.cost_usd != null ? money(u.cost_usd) : "未定价");
 const tile = (id, cls = "") => `<span class="htile ${cls}" style="--h:${hue(id)}">${hicon(id)}</span>`;
-// Sub-agents nest under their parent when the parent is in the list; a family sorts and groups by
-// its most active member, so a parent whose sub-agents are working sits in 工作中 with them.
+const startOf = (s) => s.started_at ?? s.updated_at;
+const byStart = (a, b) => startOf(a) - startOf(b) || (a.key < b.key ? -1 : 1);
+// Sub-agents nest under their parent when the parent is in the list; a family groups by its most
+// active member, so a parent whose sub-agents are working sits in 工作中 with them. Working
+// sessions and sub-agents are ordered by when they started, never by when they last answered.
 // By default a family lists only its working sub-agents and stays folded while none works; the
 // rest load on demand, a page at a time. The open session always stays visible.
 const kidFold = new Map(); // parent key -> { mode: "closed" } | { mode: "all", limit }; unset = auto
@@ -2370,13 +2374,13 @@ function sessionTree(all) {
   for (const s of roots) walk(s, new Set());
   // a parent cycle leaves its members unreachable from any root: list them as roots instead
   for (const s of all) if (!fam.has(s.key)) { roots.push(s); walk(s, new Set()); }
-  for (const ks of kids.values()) ks.sort((a, b) => fam.get(b.key).work - fam.get(a.key).work || fam.get(b.key).updated - fam.get(a.key).updated);
+  for (const ks of kids.values()) ks.sort((a, b) => fam.get(b.key).work - fam.get(a.key).work || (fam.get(a.key).work ? byStart(a, b) : fam.get(b.key).updated - fam.get(a.key).updated));
   return { roots, kids, fam };
 }
 function nodeHtml(s, tree, out, seen = new Set()) {
   seen.add(s.key);
   out.push(s.key);
-  const ks = (tree.kids.get(s.key) || []).filter((k) => !seen.has(k.key)); // working first, then latest
+  const ks = (tree.kids.get(s.key) || []).filter((k) => !seen.has(k.key)); // working first by start, then idle by latest
   if (!ks.length) return `<div class="node">${rowHtml(s)}</div>`;
   const st = kidFold.get(s.key) || { mode: "auto" }, busy = ks.filter((k) => tree.fam.get(k.key).work).length;
   const open = st.mode === "all" || (st.mode === "auto" && busy > 0);

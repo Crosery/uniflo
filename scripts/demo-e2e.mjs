@@ -474,6 +474,36 @@ async function runTree() {
   const geo = await cdp.eval(`(() => { const fam = ${famOf}, pr = fam.querySelector(':scope > .row .ricon').getBoundingClientRect(), kr = fam.querySelector('.kids .ricon').getBoundingClientRect();
     const line = getComputedStyle(fam.querySelector('.kids > .node > .row'), '::after'); return { indent: Math.round(kr.left - pr.left), elbow: line.borderLeftWidth !== '0px' && line.borderBottomWidth !== '0px' }; })()`);
   report("[tree] children are indented under the parent with tree lines", geo.indent >= 20 && geo.elbow, JSON.stringify(geo));
+
+  // 工作中 keeps launch order: whoever answers last does not move up, for sessions and sub-agents alike.
+  // Needs an unfolded family and a bump on a root, so the page is reloaded once the daemon has seen the answers.
+  const sub1 = join(home, ".claude/projects/-w-demo/sess-1/subagents/agent-sub1.jsonl");
+  const busyKey = "claude:busy";
+  appendFileSync(sub1, cu("t5", Date.now(), "Re-check the diff", "/w/demo"));
+  await waitFor(`(() => { const s = ${state}; return s && s.kids.length === 2 ? s : null; })()`, 8_000, "two working kids").catch(() => null);
+  appendFileSync(sub2, cu("t6", Date.now(), "Add the 500 path", "/w/demo"));
+  await sleep(30);
+  const bump = Date.now();
+  appendFileSync(join(home, ".claude/projects/-w-clean/busy.jsonl"), cu("busy-u3", bump, "迁移到第二批", "/w/clean"));
+  let all = [];
+  for (let i = 0; i < 40; i++) {
+    all = await apiJson(api, "/v1/sessions?limit=500");
+    if (all.find((x) => x.key === busyKey)?.updated_at >= bump) break;
+    await sleep(200);
+  }
+  await load(`${api}/demo?token=${TOKEN}`);
+  await waitFor(`(() => { const s = ${state}; return s && s.kids.length === 2 ? s : null; })()`, 8_000, "two working kids after reload").catch(() => null);
+  const startedAt = new Map(all.map((x) => [x.key, x.started_at]));
+  const byLaunch = (keys) => [...keys].sort((a, b) => startedAt.get(a) - startedAt.get(b));
+  const live = await cdp.eval(`(() => { const out = []; let on = false;
+    for (const n of document.querySelector('#list').children) { if (n.classList.contains('group-h')) on = n.textContent.trim().startsWith('工作中'); else if (on) out.push(n.querySelector(':scope > .row')?.dataset.key); }
+    return { roots: out, kids: ${state}.kids }; })()`);
+  const answered = [...all.filter((x) => live.roots.includes(x.key) || live.kids.includes(x.key))].sort((a, b) => b.updated_at - a.updated_at)[0]?.key;
+  report("[tree] working sessions and sub-agents stay in launch order, not in the order they answered",
+    all.find((x) => x.key === busyKey)?.updated_at >= bump && answered === busyKey && JSON.stringify(live.roots) === JSON.stringify(byLaunch(live.roots)) && live.roots[0] === "claude:sess-1" && live.roots.at(-1) === busyKey
+      && JSON.stringify(live.kids) === JSON.stringify(byLaunch(live.kids)) && live.kids[0] === "claude:agent-sub1", JSON.stringify({ live, answered }));
+  appendFileSync(sub1, ca("t7", Date.now(), [{ type: "text", text: "Diff re-checked." }], "end_turn"));
+  await waitFor(`(() => { const s = ${state}; return s && s.kids.length === 1 ? s : null; })()`, 8_000, "sub1 idle again").catch(() => null);
   await scheme("dark");
   await sleep(300);
   await shot("tree-dark.png");
