@@ -200,23 +200,24 @@ pub fn width(s: &str) -> usize {
 
 fn cargo_install(#[cfg_attr(not(windows), allow(unused_variables))] exe: &Path, version: &str) -> Result<()> {
     #[cfg(windows)]
-    let moved_aside = if exe.is_file() {
-        let old = install::aside_path(exe);
-        let _ = std::fs::remove_file(&old);
-        std::fs::rename(exe, &old).is_ok()
+    let backup = if exe.is_file() {
+        install::remove_aside(exe);
+        install::move_aside(exe).ok()
     } else {
-        false
+        None
     };
 
     let res = run_cargo(version);
 
     #[cfg(windows)]
-    if moved_aside {
-        let old = install::aside_path(exe);
+    if let Some(backup) = backup {
         if res.is_ok() {
-            let _ = std::fs::remove_file(&old);
-        } else if !exe.is_file() {
-            let _ = std::fs::rename(&old, exe);
+            install::remove_aside(exe);
+        } else {
+            if exe.is_file() {
+                let _ = std::fs::remove_file(exe);
+            }
+            let _ = std::fs::rename(&backup, exe);
         }
     }
     res

@@ -16,10 +16,17 @@ pub struct Watcher {
 }
 
 pub fn watch(roots: &[PathBuf], on_change: impl Fn(Change) + Send + 'static) -> Result<Watcher> {
-    let roots = dedupe_roots(roots);
-    // FSEvents reports canonical paths; map them back onto the configured (possibly symlinked) roots.
-    let aliases: Vec<(PathBuf, PathBuf)> =
-        roots.iter().filter_map(|r| std::fs::canonicalize(r).ok().filter(|c| c != r).map(|c| (c, r.clone()))).collect();
+    // Dedupe raw roots to avoid redundant OS watches.
+    let watched_roots = dedupe_roots(roots);
+    // FSEvents reports canonical paths; map them back onto ALL configured roots (both canonical
+    // and symlinked aliases).
+    let mappings: Vec<(PathBuf, PathBuf)> = roots
+        .iter()
+        .filter_map(|r| {
+            let canon = std::fs::canonicalize(r).ok()?;
+            Some((canon, r.clone()))
+        })
+        .collect();
     let mut w = notify::recommended_watcher(move |res: notify::Result<notify::Event>| match res {
         Ok(ev) => {
             if ev.need_rescan() {
@@ -29,12 +36,14 @@ pub fn watch(roots: &[PathBuf], on_change: impl Fn(Change) + Send + 'static) -> 
                 return;
             }
             for p in ev.paths {
-                on_change(Change::Path(unalias(&aliases, p)));
+                map_canonical_path(&mappings, p, |mapped| {
+                    on_change(Change::Path(mapped));
+                });
             }
         }
         Err(_) => on_change(Change::Rescan),
     })?;
-    for r in &roots {
+    for r in &watched_roots {
         if !r.exists() {
             continue;
         }
@@ -45,13 +54,22 @@ pub fn watch(roots: &[PathBuf], on_change: impl Fn(Change) + Send + 'static) -> 
     Ok(Watcher { _inner: w })
 }
 
-fn unalias(aliases: &[(PathBuf, PathBuf)], p: PathBuf) -> PathBuf {
-    for (canon, orig) in aliases {
+/// Maps an incoming notification path `p` (typically canonicalized by FSEvents/OS) back
+/// to every matching configured root prefix in `mappings`.
+///
+/// If one or more mappings match `p` (by `canon`), `emit` is invoked for each mapped path.
+/// If no mappings match, `p` is emitted unchanged.
+fn map_canonical_path(mappings: &[(PathBuf, PathBuf)], p: PathBuf, mut emit: impl FnMut(PathBuf)) {
+    let mut matched = false;
+    for (canon, orig) in mappings {
         if let Ok(rest) = p.strip_prefix(canon) {
-            return orig.join(rest);
+            matched = true;
+            emit(orig.join(rest));
         }
     }
-    p
+    if !matched {
+        emit(p);
+    }
 }
 
 /// Drop roots nested inside other roots (a recursive watch already covers them).
@@ -73,10 +91,46 @@ mod tests {
     use super::*;
 
     #[test]
-    fn canonical_paths_map_back() {
-        let a = vec![(PathBuf::from("/private/var/x"), PathBuf::from("/var/x"))];
-        assert_eq!(unalias(&a, "/private/var/x/s/1.jsonl".into()), PathBuf::from("/var/x/s/1.jsonl"));
-        assert_eq!(unalias(&a, "/other/1.jsonl".into()), PathBuf::from("/other/1.jsonl"));
+    fn map_canonical_path_emits_both_alias_and_canonical_roots() {
+        let mappings = vec![
+            (PathBuf::from("/real/root"), PathBuf::from("/symlink/alias")),
+            (PathBuf::from("/real/root"), PathBuf::from("/real/root")),
+            (PathBuf::from("/real/root/nested"), PathBuf::from("/real/root/nested")),
+        ];
+
+        // Physical change in /real/root/nested/1.jsonl matches all 3 configured roots
+        let mut emitted = Vec::new();
+        map_canonical_path(&mappings, PathBuf::from("/real/root/nested/1.jsonl"), |p| {
+            emitted.push(p);
+        });
+        assert_eq!(
+            emitted,
+            vec![
+                PathBuf::from("/symlink/alias/nested/1.jsonl"),
+                PathBuf::from("/real/root/nested/1.jsonl"),
+                PathBuf::from("/real/root/nested/1.jsonl"),
+            ]
+        );
+
+        // Physical change only under /real/root/other.jsonl matches the first two
+        let mut emitted2 = Vec::new();
+        map_canonical_path(&mappings, PathBuf::from("/real/root/other.jsonl"), |p| {
+            emitted2.push(p);
+        });
+        assert_eq!(
+            emitted2,
+            vec![PathBuf::from("/symlink/alias/other.jsonl"), PathBuf::from("/real/root/other.jsonl"),]
+        );
+    }
+
+    #[test]
+    fn map_canonical_path_fallback_when_no_match() {
+        let mappings = vec![(PathBuf::from("/real/root"), PathBuf::from("/symlink/alias"))];
+        let mut emitted = Vec::new();
+        map_canonical_path(&mappings, PathBuf::from("/unrelated/path/1.jsonl"), |p| {
+            emitted.push(p);
+        });
+        assert_eq!(emitted, vec![PathBuf::from("/unrelated/path/1.jsonl")]);
     }
 
     #[test]

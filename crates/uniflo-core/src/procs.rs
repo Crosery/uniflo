@@ -14,26 +14,36 @@ pub struct Proc {
     pub pid: u32,
     /// Process start, epoch ms.
     pub start_ms: i64,
+    /// Display/predicate text from ps (or the Windows executable name).
     pub args: String,
+    /// Kernel argument boundaries when available; empty keeps the legacy text fallback.
+    pub argv: Vec<String>,
     pub cwd: Option<PathBuf>,
     /// Open files accepted by the cache's file filter (empty without one).
     pub files: Vec<PathBuf>,
 }
 
 impl Proc {
-    /// Value following `flag` in argv (`--resume <path>`).
+    /// Value following `flag`, using kernel argument boundaries when available.
     pub fn arg_after(&self, flag: &str) -> Option<&str> {
-        let mut it = self.args.split_whitespace();
-        while let Some(a) = it.next() {
-            if a == flag {
-                return it.next();
-            }
-            if let Some(v) = a.strip_prefix(flag).and_then(|r| r.strip_prefix('=')) {
-                return Some(v);
-            }
+        if self.argv.is_empty() {
+            value_after(self.args.split_whitespace(), flag)
+        } else {
+            value_after(self.argv.iter().map(String::as_str), flag)
         }
-        None
     }
+}
+
+fn value_after<'a>(mut args: impl Iterator<Item = &'a str>, flag: &str) -> Option<&'a str> {
+    while let Some(arg) = args.next() {
+        if arg == flag {
+            return args.next();
+        }
+        if let Some(value) = arg.strip_prefix(flag).and_then(|r| r.strip_prefix('=')) {
+            return Some(value);
+        }
+    }
+    None
 }
 
 /// Memoized process listing filtered by an argv predicate.
@@ -86,6 +96,10 @@ pub fn list(keep: fn(&str) -> bool, files: Option<fn(&Path) -> bool>) -> Vec<Pro
             p.cwd = cwd;
             p.files = files;
         }
+        #[cfg(target_os = "linux")]
+        if let Some(argv) = read_linux_cmdline(p.pid) {
+            p.argv = argv;
+        }
     }
     procs
 }
@@ -136,7 +150,9 @@ pub fn list(keep: fn(&str) -> bool, _files: Option<fn(&Path) -> bool>) -> Vec<Pr
     let now = crate::util::now_ms();
     let mut procs: Vec<Proc> = raw_procs()
         .into_iter()
-        .filter_map(|(pid, args)| keep(&args).then(|| Proc { pid, start_ms: now, args, cwd: None, files: Vec::new() }))
+        .filter_map(|(pid, args)| {
+            keep(&args).then(|| Proc { pid, start_ms: now, args, argv: Vec::new(), cwd: None, files: Vec::new() })
+        })
         .collect();
     // `lsof` has no Windows equivalent worth shelling out to; the CWD comes from the PEB.
     // Open-file mapping (minimax's precise pid pick, pi step 2) degrades to argv heuristics.
@@ -164,7 +180,30 @@ fn parse_ps_line(line: &str) -> Option<Proc> {
     let start = chrono::NaiveDateTime::parse_from_str(&stamp, "%b %d %H:%M:%S %Y").ok()?;
     let start_ms = chrono::TimeZone::from_local_datetime(&chrono::Local, &start).single()?.timestamp_millis();
     let args = it.collect::<Vec<_>>().join(" ");
-    Some(Proc { pid, start_ms, args, cwd: None, files: Vec::new() })
+    Some(Proc { pid, start_ms, args, argv: Vec::new(), cwd: None, files: Vec::new() })
+}
+
+/// Parse NUL-delimited command-line bytes (as from `/proc/<pid>/cmdline`).
+///
+/// Linux `/proc/<pid>/cmdline` represents argv as NUL-terminated strings.
+/// Preserves empty arguments while stripping the trailing NUL terminator.
+#[cfg(any(target_os = "linux", test))]
+fn parse_cmdline(bytes: &[u8]) -> Vec<String> {
+    if bytes.is_empty() {
+        return Vec::new();
+    }
+    let trimmed = bytes.strip_suffix(b"\0").unwrap_or(bytes);
+    if trimmed.is_empty() {
+        return vec![String::new()];
+    }
+    trimmed.split(|&b| b == 0).map(|slice| String::from_utf8_lossy(slice).into_owned()).collect()
+}
+
+#[cfg(target_os = "linux")]
+fn read_linux_cmdline(pid: u32) -> Option<Vec<String>> {
+    let bytes = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+    let argv = parse_cmdline(&bytes);
+    (!argv.is_empty()).then_some(argv)
 }
 
 #[allow(dead_code)]
@@ -294,5 +333,94 @@ mod tests {
         assert_eq!(m[&10], (Some(PathBuf::from("/work/a")), vec![PathBuf::from("/s/x.jsonl")]));
         assert_eq!(m[&11], (Some(PathBuf::from("/work/b")), vec![]));
         assert!(parse_lsof(out, None)[&10].1.is_empty());
+    }
+
+    #[test]
+    fn arg_after_variants() {
+        let p = Proc {
+            pid: 100,
+            start_ms: 1000,
+            args: "omp --resume /tmp/work space/session.jsonl --model=gpt4".into(),
+            argv: vec![
+                "omp".into(),
+                "--resume".into(),
+                "/tmp/work space/session.jsonl".into(),
+                "--model=gpt4".into(),
+                "--empty-eq=".into(),
+                "--empty-plain".into(),
+                "".into(),
+                "--trailing".into(),
+            ],
+            cwd: None,
+            files: vec![],
+        };
+        assert_eq!(p.arg_after("--resume"), Some("/tmp/work space/session.jsonl"));
+        assert_eq!(p.arg_after("--model"), Some("gpt4"));
+        assert_eq!(p.arg_after("--empty-eq"), Some(""));
+        assert_eq!(p.arg_after("--empty-plain"), Some(""));
+        assert_eq!(p.arg_after("--missing"), None);
+        assert_eq!(p.arg_after("--trailing"), None);
+        assert_eq!(p.arg_after("--res"), None);
+
+        let p_fallback = Proc {
+            pid: 101,
+            start_ms: 1000,
+            args: "omp --resume /tmp/simple.jsonl --other=val".into(),
+            argv: vec![],
+            cwd: None,
+            files: vec![],
+        };
+        assert_eq!(p_fallback.arg_after("--resume"), Some("/tmp/simple.jsonl"));
+        assert_eq!(p_fallback.arg_after("--other"), Some("val"));
+        assert_eq!(p_fallback.arg_after("--missing"), None);
+    }
+
+    #[test]
+    fn parses_proc_cmdline_nul_boundaries() {
+        let bytes = b"bun\0/bin/omp\0--resume\0/tmp/work space/session.jsonl\0--flag=with space\0";
+        let argv = parse_cmdline(bytes);
+        assert_eq!(argv, vec!["bun", "/bin/omp", "--resume", "/tmp/work space/session.jsonl", "--flag=with space"]);
+
+        let empty_args = b"cmd\0\0--opt\0\0";
+        assert_eq!(parse_cmdline(empty_args), vec!["cmd", "", "--opt", ""]);
+
+        assert_eq!(parse_cmdline(b"\0"), vec![""]);
+        assert_eq!(parse_cmdline(b"foo\0bar"), vec!["foo", "bar"]);
+        assert_eq!(parse_cmdline(b""), Vec::<String>::new());
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn linux_discovers_child_with_spaced_resume_arg() {
+        let space_val = "/tmp/uniflo test space/session.jsonl";
+        let child = std::process::Command::new("sh")
+            .args(["-c", "read -r line", "sh", "--resume", space_val, &format!("--resume-eq={space_val}")])
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn synthetic child");
+        struct KillOnDrop(std::process::Child);
+        impl Drop for KillOnDrop {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let mut guard = KillOnDrop(child);
+        let pid = guard.0.id();
+
+        std::thread::sleep(Duration::from_millis(50));
+
+        fn matches_test_proc(args: &str) -> bool {
+            args.contains("uniflo test space")
+        }
+        let found = list(matches_test_proc, None);
+        let child_proc = found.iter().find(|p| p.pid == pid).expect("child process discovered by list");
+
+        assert_eq!(child_proc.arg_after("--resume"), Some(space_val));
+        assert_eq!(child_proc.arg_after("--resume-eq"), Some(space_val));
+        assert_eq!(child_proc.arg_after("--missing-flag"), None);
+
+        let _ = guard.0.kill();
+        let _ = guard.0.wait();
     }
 }

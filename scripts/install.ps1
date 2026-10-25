@@ -110,19 +110,42 @@
         New-Item -ItemType Directory -Force -Path $dir | Out-Null
         $dir = (Resolve-Path -LiteralPath $dir).ProviderPath
         $dest = Join-Path $dir 'uniflo.exe'
+        # Remove unlocked past backups for uniflo.exe: exact .old and recognized generated names only.
+        $destLeaf = Split-Path -Leaf -Path $dest
+        if (Test-Path -LiteralPath "$dest.old" -PathType Leaf) { Remove-Item -LiteralPath "$dest.old" -Force -ErrorAction SilentlyContinue }
+        $backupPattern = '^' + [regex]::Escape($destLeaf) + '\.old-[0-9a-fA-F]+(-[0-9a-fA-F]+){2}$'
+        Get-ChildItem -LiteralPath $dir -ErrorAction SilentlyContinue | Where-Object { -not $_.PSIsContainer -and ($_.Name -match $backupPattern) } | ForEach-Object {
+            Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue
+        }
+
         # A running uniflo.exe cannot be overwritten but can be renamed; uniflo deletes the .old on its next start.
         $staged = Join-Path $dir ".uniflo-new-$PID.exe"
         Copy-Item -LiteralPath $new -Destination $staged -Force
+        $backup = $null
         try {
             if (Test-Path -LiteralPath $dest) {
-                Remove-Item -LiteralPath "$dest.old" -Force -ErrorAction SilentlyContinue
-                Move-Item -LiteralPath $dest -Destination "$dest.old" -Force
+                $legacyOld = "$dest.old"
+                if (Test-Path -LiteralPath $legacyOld -PathType Leaf) { Remove-Item -LiteralPath $legacyOld -Force -ErrorAction SilentlyContinue }
+                if (-not (Test-Path -LiteralPath $legacyOld)) {
+                    try {
+                        Move-Item -LiteralPath $dest -Destination $legacyOld -Force
+                        $backup = $legacyOld
+                    } catch {
+                        $backup = $null
+                    }
+                }
+                if (-not $backup) {
+                    $ticks = [DateTime]::UtcNow.Ticks.ToString('x')
+                    $nonce = [Guid]::NewGuid().ToString('N')
+                    $backup = "$dest.old-$PID-$ticks-$nonce"
+                    Move-Item -LiteralPath $dest -Destination $backup -Force
+                }
             }
             Move-Item -LiteralPath $staged -Destination $dest -Force
         } catch {
             Remove-Item -LiteralPath $staged -Force -ErrorAction SilentlyContinue
-            if (-not (Test-Path -LiteralPath $dest) -and (Test-Path -LiteralPath "$dest.old")) {
-                Move-Item -LiteralPath "$dest.old" -Destination $dest -Force
+            if ($backup -and (Test-Path -LiteralPath $backup) -and -not (Test-Path -LiteralPath $dest)) {
+                Move-Item -LiteralPath $backup -Destination $dest -Force -ErrorAction SilentlyContinue
             }
             Fail ((Pick '\u65e0\u6cd5\u5199\u5165 {0}\uff1a{1}' 'could not write {0}: {1}') -f $dest, $_.Exception.Message)
         }

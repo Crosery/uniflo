@@ -564,12 +564,9 @@ mod tests {
         // Newest file, but held open by pid 6: the cwd fallback must not hand it to pid 2.
         let held = fx.write("-p/2026-09-02T00-00-00-000Z_held.jsonl", &hdr);
         let now = uniflo_core::util::now_ms();
-        let proc_ = |pid, start_ms, args: String, files: Vec<PathBuf>| Proc {
-            pid,
-            start_ms,
-            args,
-            cwd: Some(PathBuf::from("/proj")),
-            files,
+        let proc_ = |pid, start_ms, args: String, files: Vec<PathBuf>| {
+            let argv = args.split_whitespace().map(String::from).collect();
+            Proc { pid, start_ms, args, argv, cwd: Some(PathBuf::from("/proj")), files }
         };
         let procs = vec![
             proc_(1, now - 60_000, "bun /b/omp".into(), vec![]),

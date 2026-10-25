@@ -662,12 +662,27 @@ mod tests {
 
         let now = uniflo_core::util::now_ms();
         let procs = vec![
-            Proc { pid: 10, start_ms: now - 5_000, args: "agy --conversation=c-arg".into(), cwd: None, files: vec![] },
-            Proc { pid: 11, start_ms: now - 5_000, args: "agy".into(), cwd: None, files: vec![db] },
+            Proc {
+                pid: 10,
+                start_ms: now - 5_000,
+                args: "agy --conversation=c-arg".into(),
+                argv: vec!["agy".into(), "--conversation=c-arg".into()],
+                cwd: None,
+                files: vec![],
+            },
+            Proc {
+                pid: 11,
+                start_ms: now - 5_000,
+                args: "agy".into(),
+                argv: vec!["agy".into()],
+                cwd: None,
+                files: vec![db],
+            },
             Proc {
                 pid: 12,
                 start_ms: now - 5_000,
                 args: "agy".into(),
+                argv: vec!["agy".into()],
                 cwd: Some(PathBuf::from("/work/p")),
                 files: vec![],
             },

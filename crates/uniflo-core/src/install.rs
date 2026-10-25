@@ -11,6 +11,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// GitHub Releases of the repository; `UNIFLO_RELEASE_BASE_URL` replaces it (tests, mirrors).
 /// Assets live at `<base>/download/v<version>/<file>`, the newest stable at `<base>/latest/download/<file>`.
@@ -257,8 +258,9 @@ fn unpack(pkg: &Path, into: &Path) -> Result<()> {
 pub enum Swap {
     /// Rename over it; a running process keeps the old inode (Unix).
     Replace,
-    /// Windows cannot replace a running exe but can rename it: the old one moves to `<exe>.old`,
-    /// which [`remove_aside`] deletes on the next start.
+    /// Windows cannot replace a running exe but can rename it: the old one moves to `<exe>.old`
+    /// (or a collision-free backup if `<exe>.old` cannot be removed), which [`remove_aside`]
+    /// deletes on the next start.
     Aside,
 }
 
@@ -268,9 +270,79 @@ pub fn aside_path(exe: &Path) -> PathBuf {
     exe.with_file_name(name)
 }
 
+static BACKUP_SEQ: AtomicU64 = AtomicU64::new(1);
+
+/// Only the legacy name or three-component generated names belong to this updater.
+fn is_recognized_backup(exe: &Path, file_name: &str) -> bool {
+    let Some(exe_name) = exe.file_name().and_then(|n| n.to_str()) else { return false };
+    let Some((name, suffix)) = file_name.split_at_checked(exe_name.len()) else { return false };
+    if !name.eq_ignore_ascii_case(exe_name) {
+        return false;
+    }
+    if suffix.eq_ignore_ascii_case(".old") {
+        return true;
+    }
+    let Some((marker, rest)) = suffix.split_at_checked(5) else { return false };
+    if !marker.eq_ignore_ascii_case(".old-") {
+        return false;
+    }
+    let mut count = 0;
+    for part in rest.split('-') {
+        if part.is_empty() || !part.bytes().all(|c| c.is_ascii_hexdigit()) {
+            return false;
+        }
+        count += 1;
+    }
+    count == 3
+}
+
+/// A collision-free backup path for `exe` when `<exe>.old` cannot be removed.
+fn unique_backup_path(exe: &Path) -> Result<PathBuf> {
+    let dir = exe.parent().context("executable has no parent directory")?;
+    let exe_name = exe.file_name().context("executable has no file name")?.to_string_lossy();
+    let pid = std::process::id();
+    for _ in 0..1000 {
+        let now = crate::util::now_ms().max(0) as u64;
+        let seq = BACKUP_SEQ.fetch_add(1, Ordering::Relaxed);
+        let candidate = dir.join(format!("{exe_name}.old-{now:x}-{pid:x}-{seq:x}"));
+        if !candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+    bail!("could not generate a unique backup path for {}", exe.display());
+}
+
+/// Move `exe` aside for replacement, trying `<exe>.old` first and falling back to a
+/// collision-free generated backup if the legacy path cannot be removed.
+/// Returns the path to which `exe` was moved.
+pub fn move_aside(exe: &Path) -> Result<PathBuf> {
+    let legacy = aside_path(exe);
+    let _ = std::fs::remove_file(&legacy);
+    if !legacy.exists() && std::fs::rename(exe, &legacy).is_ok() {
+        return Ok(legacy);
+    }
+    let backup = unique_backup_path(exe)?;
+    std::fs::rename(exe, &backup).with_context(|| format!("move {} aside to {}", exe.display(), backup.display()))?;
+    Ok(backup)
+}
+
 /// Delete what an [`Swap::Aside`] upgrade left behind; still-running leftovers stay until next time.
+/// Only removes the exact owned legacy `.old` and strictly recognized generated backup names
+/// for `exe`.
 pub fn remove_aside(exe: &Path) {
     let _ = std::fs::remove_file(aside_path(exe));
+    if let Some(dir) = exe.parent()
+        && let Ok(entries) = std::fs::read_dir(dir)
+    {
+        for entry in entries.flatten() {
+            if entry.file_type().is_ok_and(|ft| ft.is_dir()) {
+                continue;
+            }
+            if entry.file_name().to_str().is_some_and(|name| is_recognized_backup(exe, name)) {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
 }
 
 /// Stage `new` next to `exe` (same filesystem, so the final rename is atomic) and swap it in.
@@ -287,13 +359,12 @@ pub fn swap(new: &Path, exe: &Path, how: Swap) -> Result<()> {
     let done = match how {
         Swap::Replace => std::fs::rename(&staged, exe).with_context(|| format!("replace {}", exe.display())),
         Swap::Aside => {
-            let old = aside_path(exe);
-            let _ = std::fs::remove_file(&old);
-            std::fs::rename(exe, &old).with_context(|| format!("move {} aside", exe.display())).and_then(|_| {
+            remove_aside(exe);
+            move_aside(exe).and_then(|backup| {
                 std::fs::rename(&staged, exe)
                     .with_context(|| format!("put the new {} in place", exe.display()))
                     .inspect_err(|_| {
-                        let _ = std::fs::rename(&old, exe);
+                        let _ = std::fs::rename(&backup, exe);
                     })
             })
         }
@@ -417,6 +488,103 @@ mod tests {
         assert!(swap(&new, &missing, Swap::Aside).is_err());
         let left: Vec<_> = std::fs::read_dir(&d).unwrap().flatten().map(|e| e.file_name()).collect();
         assert_eq!(left.len(), 2, "{left:?}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn remove_aside_preserves_unrelated_names_and_unicode() {
+        let d = tempfile::tempdir().unwrap();
+        let exe = d.path().join("uniflo.exe");
+        let owned = ["uniflo.exe.old", "uniflo.exe.old-172990-1234-1"];
+        let unrelated = ["uniflo.exe.old.bak", "uniflo.exe.old-dead", "other.exe.old-1-2-3", "甲甲甲甲甲甲甲甲"];
+        for name in owned.iter().chain(&unrelated) {
+            std::fs::write(d.path().join(name), name).unwrap();
+        }
+        remove_aside(&exe);
+        for name in owned {
+            assert!(!d.path().join(name).exists());
+        }
+        for name in unrelated {
+            assert_eq!(std::fs::read_to_string(d.path().join(name)).unwrap(), name);
+        }
+    }
+
+    #[test]
+    fn swap_aside_repeated_when_legacy_backup_cannot_be_removed() {
+        let d = tmp("swap-held");
+        let exe = d.join("uniflo-bin");
+        let new1 = d.join("new1");
+        let new2 = d.join("new2");
+        std::fs::write(&exe, "v1").unwrap();
+        std::fs::write(&new1, "v2").unwrap();
+        std::fs::write(&new2, "v3").unwrap();
+
+        // Swap 1: creates legacy .old
+        swap(&new1, &exe, Swap::Aside).unwrap();
+        assert_eq!(std::fs::read_to_string(&exe).unwrap(), "v2");
+        let legacy = aside_path(&exe);
+        assert_eq!(std::fs::read_to_string(&legacy).unwrap(), "v1");
+
+        // Simulate legacy .old being locked / cannot be removed.
+        // std::fs::remove_file fails on directories across platforms.
+        std::fs::remove_file(&legacy).unwrap();
+        std::fs::create_dir(&legacy).unwrap();
+        std::fs::write(legacy.join("locked_indicator"), "held").unwrap();
+
+        // Swap 2: legacy cannot be removed, should fallback to unique generated backup
+        swap(&new2, &exe, Swap::Aside).unwrap();
+        assert_eq!(std::fs::read_to_string(&exe).unwrap(), "v3");
+
+        // The directory simulating held legacy is still intact
+        assert!(legacy.join("locked_indicator").exists());
+
+        // Find the generated backup that received v2
+        let entries: Vec<_> = std::fs::read_dir(&d)
+            .unwrap()
+            .flatten()
+            .filter(|e| is_recognized_backup(&exe, &e.file_name().to_string_lossy()))
+            .filter(|e| e.path() != legacy)
+            .collect();
+        assert_eq!(entries.len(), 1, "expected one generated backup: {entries:?}");
+        assert_eq!(std::fs::read_to_string(entries[0].path()).unwrap(), "v2");
+
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn swap_aside_windows_file_locking() {
+        let d = tmp("win-lock");
+        let exe = d.join("uniflo.exe");
+        let new1 = d.join("new1.exe");
+        let new2 = d.join("new2.exe");
+        std::fs::write(&exe, "v1").unwrap();
+        std::fs::write(&new1, "v2").unwrap();
+        std::fs::write(&new2, "v3").unwrap();
+
+        // First swap: creates uniflo.exe.old
+        swap(&new1, &exe, Swap::Aside).unwrap();
+        assert_eq!(std::fs::read_to_string(&exe).unwrap(), "v2");
+        let legacy = aside_path(&exe);
+        assert_eq!(std::fs::read_to_string(&legacy).unwrap(), "v1");
+
+        use std::os::windows::fs::OpenOptionsExt;
+        let held = std::fs::OpenOptions::new().read(true).share_mode(3).open(&legacy).unwrap();
+        swap(&new2, &exe, Swap::Aside).unwrap();
+        assert_eq!(std::fs::read_to_string(&exe).unwrap(), "v3");
+        assert_eq!(std::fs::read_to_string(&legacy).unwrap(), "v1");
+
+        // Allow copying into the staged file, but deny its final rename to force a real rollback.
+        let staged = d.join(format!(".uniflo-new-{}", std::process::id()));
+        std::fs::write(&staged, "staged").unwrap();
+        let held_staged = std::fs::OpenOptions::new().read(true).share_mode(3).open(&staged).unwrap();
+        assert!(swap(&new1, &exe, Swap::Aside).is_err());
+        assert_eq!(std::fs::read_to_string(&exe).unwrap(), "v3");
+        assert_eq!(std::fs::read_to_string(&legacy).unwrap(), "v1");
+        drop(held_staged);
+        drop(held);
+        remove_aside(&exe);
+        assert!(!legacy.exists());
         let _ = std::fs::remove_dir_all(&d);
     }
 

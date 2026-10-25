@@ -260,3 +260,64 @@ async fn filesystem_watcher_alone_delivers() {
     next_matching(&mut rx, Duration::from_secs(3), |e| matches!(e, Envelope::Event { .. })).await;
     eprintln!("watcher-only latency: {:?}", t0.elapsed());
 }
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn filesystem_watcher_notifies_both_symlinked_alias_and_canonical_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let canonical_root = dir.path().join("real_root");
+    std::fs::create_dir_all(&canonical_root).unwrap();
+
+    let alias_root = dir.path().join("symlink_root");
+    std::os::unix::fs::symlink(&canonical_root, &alias_root).unwrap();
+
+    struct MultiToy {
+        roots: Vec<PathBuf>,
+        live: Arc<Mutex<Option<Vec<LiveSession>>>>,
+    }
+    impl LineDecoder for MultiToy {
+        type State = ();
+        fn info(&self) -> HarnessInfo {
+            HarnessInfo { id: "multitoy", name: "MultiToy" }
+        }
+        fn roots(&self) -> Vec<PathBuf> {
+            self.roots.clone()
+        }
+        fn is_source(&self, p: &Path) -> bool {
+            self.roots.iter().any(|r| p.starts_with(r)) && p.extension().is_some_and(|e| e == "jsonl")
+        }
+        fn identify(&self, p: &Path) -> Option<SourceId> {
+            Some(SourceId { id: p.file_stem()?.to_str()?.to_owned(), parent: None })
+        }
+        fn decode(&self, v: &Value, cx: &mut Cx<'_, ()>) {
+            let ts = v["ts"].as_i64().unwrap_or(0);
+            let x = v["x"].as_str().unwrap_or("").to_owned();
+            let body = match v["t"].as_str() {
+                Some("u") => Body::UserMessage { text: x, synthetic: false },
+                _ => return,
+            };
+            cx.emit_at(ts, body);
+        }
+        fn live(&self) -> Option<Vec<LiveSession>> {
+            self.live.lock().unwrap().clone()
+        }
+    }
+
+    let live = Arc::new(Mutex::new(None));
+    // Both canonical and symlinked alias are configured roots
+    let adapter: Arc<dyn Adapter> = Arc::new(JsonlAdapter::new(MultiToy {
+        roots: vec![canonical_root.clone(), alias_root.clone()],
+        live: live.clone(),
+    }));
+    let hour = Duration::from_secs(3600);
+    let opts = EngineOptions { cache_path: None, hot_poll: hour, live_poll: hour, rescan: hour, ..Default::default() };
+    let engine = Engine::new(vec![adapter], opts);
+    engine.index();
+    let (_, mut rx, _) = engine.subscribe(None);
+    tokio::spawn(engine.clone().run());
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // Write directly into physical/canonical path
+    std::fs::write(canonical_root.join("w.jsonl"), line("u", "via canonical")).unwrap();
+    next_matching(&mut rx, Duration::from_secs(3), |e| matches!(e, Envelope::Event { .. })).await;
+}
