@@ -94,7 +94,9 @@ pub fn note(icon: &str, headline: &str, detail: &str) -> String {
 
 // ---------------------------------------------------------------- pickers
 
+/// Only the unix terminal reader produces keys; elsewhere the pickers are never offered.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(not(unix), allow(dead_code))]
 pub enum Key {
     Up,
     Down,
@@ -105,6 +107,7 @@ pub enum Key {
 }
 
 /// Keys in one `read()` chunk: arrows arrive as `ESC [ A`, a lone `ESC` is the Escape key.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub fn parse_keys(buf: &[u8]) -> Vec<Key> {
     let mut keys = Vec::new();
     let mut i = 0;
