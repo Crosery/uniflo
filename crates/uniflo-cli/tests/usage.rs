@@ -102,6 +102,7 @@ impl Home {
             .env("UNIFLO_DATA_DIR", self.pricing_dir().parent().unwrap())
             .env("UNIFLO_PRICING_URL", &self.mock.url)
             .env("UNIFLO_PRICING_FALLBACK_URL", "")
+            .env("UNIFLO_LANG", "en")
             .env_remove("UNIFLO_TOKEN")
             .env_remove("UNIFLO_URL")
             .env_remove("UNIFLO_TRASH_DIR")

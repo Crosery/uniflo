@@ -16,6 +16,7 @@ fn uniflo(dir: &Path) -> Command {
         .env("UNIFLO_CACHE_DIR", dir.join("cache"))
         .env("UNIFLO_DATA_DIR", dir.join("data"))
         .env("UNIFLO_CONFIG_DIR", dir.join("config"))
+        .env("UNIFLO_LANG", "en")
         .stdin(Stdio::null());
     c
 }

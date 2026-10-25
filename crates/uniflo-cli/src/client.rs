@@ -1,5 +1,6 @@
 //! Minimal HTTP/1.1 client for the local daemon (GET, plus JSON writes; Content-Length or chunked).
 
+use crate::i18n::tr;
 use anyhow::{Context, Result, anyhow, bail};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
@@ -20,10 +21,12 @@ pub struct Resp<R> {
 
 impl Client {
     pub fn new(url: &str, token: Option<String>) -> Result<Client> {
-        let rest = url.strip_prefix("http://").ok_or_else(|| anyhow!("only http:// URLs are supported: {url}"))?;
+        let rest = url.strip_prefix("http://").ok_or_else(|| {
+            anyhow!(tr!("只支持 http:// 协议的地址：{url}", "only http:// URLs are supported: {url}"))
+        })?;
         let hostport = rest.split('/').next().unwrap_or(rest);
         let (host, port) = match hostport.rsplit_once(':') {
-            Some((h, p)) => (h.to_owned(), p.parse().context("port")?),
+            Some((h, p)) => (h.to_owned(), p.parse().context(tr!("端口", "port"))?),
             None => (hostport.to_owned(), 80),
         };
         Ok(Client { host, port, token })
@@ -39,7 +42,9 @@ impl Client {
 
     fn request(&self, method: &str, path: &str, body: Option<&[u8]>) -> Result<Resp<TcpStream>> {
         let addr = format!("{}:{}", self.host, self.port);
-        let sock = std::net::ToSocketAddrs::to_socket_addrs(&addr)?.next().ok_or_else(|| anyhow!("resolve {addr}"))?;
+        let sock = std::net::ToSocketAddrs::to_socket_addrs(&addr)?
+            .next()
+            .ok_or_else(|| anyhow!(tr!("无法解析 {addr}", "resolve {addr}")))?;
         let mut s = TcpStream::connect_timeout(&sock, Duration::from_millis(300))?;
         s.set_nodelay(true)?;
         s.set_read_timeout(Some(Duration::from_secs(10)))?;
@@ -98,7 +103,7 @@ impl Client {
                 .ok()
                 .and_then(|v| v["error"].as_str().map(str::to_owned))
                 .unwrap_or_else(|| String::from_utf8_lossy(&raw).into_owned());
-            bail!("HTTP {}: {msg}", r.status);
+            bail!(tr!("HTTP {}：{msg}", "HTTP {}: {msg}", r.status));
         }
         Ok(serde_json::from_slice(&raw)?)
     }
@@ -107,7 +112,8 @@ impl Client {
         let mut r = self.get(path)?;
         let body = r.body()?;
         if r.status != 200 {
-            bail!("HTTP {}: {}", r.status, String::from_utf8_lossy(&body));
+            let msg = String::from_utf8_lossy(&body);
+            bail!(tr!("HTTP {}：{msg}", "HTTP {}: {msg}", r.status));
         }
         Ok(serde_json::from_slice(&body)?)
     }

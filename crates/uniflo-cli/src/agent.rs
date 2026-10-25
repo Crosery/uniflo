@@ -1,6 +1,7 @@
 //! Agent-facing commands: `uniflo resume`, `uniflo context` and `uniflo skill`.
 
 use crate::client::Client;
+use crate::i18n::tr;
 use crate::{Cli, Source, enc};
 use anyhow::{Context as _, Result, anyhow, bail};
 use clap::{Args, Subcommand};
@@ -49,7 +50,9 @@ pub fn resume(src: &Source, key: &str, print: bool) -> Result<()> {
         Source::Local(_) => uniflo_core::resume::resume(&s),
     };
     if !info.supported {
-        eprintln!("uniflo: cannot resume {}: {}", s.key, info.reason.as_deref().unwrap_or("unsupported"));
+        let unsupported = tr!("不支持", "unsupported");
+        let reason = info.reason.as_deref().unwrap_or(&unsupported);
+        eprintln!("{}", tr!("uniflo：无法恢复 {}：{reason}", "uniflo: cannot resume {}: {reason}", s.key));
         std::process::exit(2);
     }
     if print {
@@ -63,9 +66,15 @@ fn run(s: &Session, info: &ResumeInfo) -> Result<()> {
     let needs_cwd = uniflo_core::resume::argv(&s.harness, &s.id).is_some_and(|(_, c)| c);
     let dir = info.cwd.as_deref().filter(|c| Path::new(c).is_dir());
     if needs_cwd && dir.is_none() {
-        bail!("{} resumes per directory, and {} no longer exists", s.harness, info.cwd.as_deref().unwrap_or("?"));
+        bail!(tr!(
+            "{} 按目录恢复，而 {} 已不存在",
+            "{} resumes per directory, and {} no longer exists",
+            s.harness,
+            info.cwd.as_deref().unwrap_or("?")
+        ));
     }
-    let (program, args) = info.argv.split_first().ok_or_else(|| anyhow!("empty resume command"))?;
+    let (program, args) =
+        info.argv.split_first().ok_or_else(|| anyhow!(tr!("恢复命令为空", "empty resume command")))?;
     let mut cmd = std::process::Command::new(program);
     cmd.args(args);
     if let Some(d) = dir {
@@ -75,11 +84,11 @@ fn run(s: &Session, info: &ResumeInfo) -> Result<()> {
     {
         use std::os::unix::process::CommandExt;
         let err = cmd.exec();
-        Err(err).with_context(|| format!("run {program}"))
+        Err(err).with_context(|| tr!("运行 {program}", "run {program}"))
     }
     #[cfg(not(unix))]
     {
-        let st = cmd.status().with_context(|| format!("run {program}"))?;
+        let st = cmd.status().with_context(|| tr!("运行 {program}", "run {program}"))?;
         std::process::exit(st.code().unwrap_or(1));
     }
 }
@@ -93,7 +102,7 @@ pub fn context(cli: &Cli, a: &ContextArgs) -> Result<()> {
         Ok(r) => r,
         Err(e) => {
             if e.downcast_ref::<std::io::Error>().is_none() {
-                eprintln!("uniflo context: {e:#}");
+                eprintln!("{}", tr!("uniflo context：{e:#}", "uniflo context: {e:#}"));
             }
             return Ok(());
         }

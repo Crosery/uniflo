@@ -4,6 +4,7 @@ mod agent;
 mod clean;
 mod client;
 mod grep;
+mod i18n;
 mod mcp;
 mod render;
 mod setup;
@@ -13,6 +14,7 @@ mod usage;
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use client::Client;
+use i18n::tr;
 use render::Style;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -24,7 +26,7 @@ use uniflo_schema::{Envelope, Event, Harness, Session, Status};
 use uniflo_search::fts::{Fts, FtsOptions};
 use uniflo_search::{Query, search};
 
-const DEFAULT_URL: &str = "http://127.0.0.1:7311";
+pub(crate) const DEFAULT_URL: &str = "http://127.0.0.1:7311";
 
 #[derive(Parser)]
 #[command(name = "uniflo", version, about = "Unified live view of every local agent harness session")]
@@ -204,7 +206,17 @@ enum Cmd {
     Context(agent::ContextArgs),
 }
 
-fn main() -> Result<()> {
+fn main() -> std::process::ExitCode {
+    match run() {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("uniflo: {}{e:#}", tr!("错误：", "error: "));
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+fn run() -> Result<()> {
     #[cfg(windows)]
     if let Ok(exe) = std::env::current_exe() {
         uniflo_core::install::remove_aside(&exe);
@@ -240,7 +252,10 @@ fn main() -> Result<()> {
                 read_only,
             };
             if !allow_hosts.is_empty() && guard.token.is_none() {
-                bail!("--allow-host exposes transcripts beyond loopback; set --token as well");
+                bail!(tr!(
+                    "--allow-host 会把会话内容暴露到回环地址以外，必须同时设置 --token",
+                    "--allow-host exposes transcripts beyond loopback; set --token as well"
+                ));
             }
             if stop {
                 stop_daemon(false)?;
@@ -289,17 +304,88 @@ fn log_file() -> std::path::PathBuf {
     uniflo_core::paths::cache_dir().join("daemon.log")
 }
 
-fn read_daemon_pid() -> Option<u32> {
+pub(crate) fn read_daemon_pid() -> Option<u32> {
     let raw = std::fs::read_to_string(pid_file()).ok()?;
     let pid: u32 = raw.trim().parse().ok()?;
     uniflo_core::util::pid_alive(pid).then_some(pid)
+}
+
+fn launch_file() -> std::path::PathBuf {
+    uniflo_core::paths::cache_dir().join("daemon.json")
+}
+
+/// How a background daemon was started, kept next to its pid file so `uniflo update` can start
+/// the new version the same way. Never holds a token value.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) struct Launch {
+    pub pid: u32,
+    pub exe: String,
+    /// Arguments after the executable, without `--foreground` and `--token`.
+    pub args: Vec<String>,
+    /// A token was in effect (`--token` or `UNIFLO_TOKEN`).
+    #[serde(default)]
+    pub token: bool,
+}
+
+impl Launch {
+    fn new(pid: u32, exe: String, argv: impl IntoIterator<Item = String>, token: bool) -> Launch {
+        let mut args = Vec::new();
+        let mut token = token;
+        let mut it = argv.into_iter();
+        while let Some(a) = it.next() {
+            match a.as_str() {
+                "--token" => {
+                    it.next();
+                    token = true;
+                }
+                t if t.starts_with("--token=") => token = true,
+                "--foreground" | "-f" => {}
+                _ => args.push(a),
+            }
+        }
+        Launch { pid, exe, args, token }
+    }
+
+    /// The recorded launch of the daemon `pid`; for daemons that predate the record, what `ps`
+    /// reports (an executable path with spaces then fails to match and nothing is restarted).
+    pub fn find(pid: u32) -> Option<Launch> {
+        let rec: Option<Launch> = std::fs::read(launch_file()).ok().and_then(|b| serde_json::from_slice(&b).ok());
+        if let Some(l) = rec.filter(|l| l.pid == pid) {
+            return Some(l);
+        }
+        #[cfg(unix)]
+        {
+            let out =
+                std::process::Command::new("ps").args(["-ww", "-o", "args=", "-p", &pid.to_string()]).output().ok()?;
+            let line = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+            let mut words = line.split_whitespace().map(str::to_owned);
+            let exe = words.next()?;
+            Some(Launch::new(pid, exe, words, false))
+        }
+        #[cfg(not(unix))]
+        None
+    }
+
+    /// `--bind` of the recorded arguments, else the default.
+    pub fn bind(&self) -> String {
+        let mut it = self.args.iter();
+        while let Some(a) = it.next() {
+            if a == "--bind" {
+                return it.next().cloned().unwrap_or_default();
+            }
+            if let Some(b) = a.strip_prefix("--bind=") {
+                return b.to_owned();
+            }
+        }
+        DEFAULT_URL.trim_start_matches("http://").to_owned()
+    }
 }
 
 pub(crate) fn stop_daemon(quiet: bool) -> Result<bool> {
     let Some(pid) = read_daemon_pid() else {
         let _ = std::fs::remove_file(pid_file());
         if !quiet {
-            eprintln!("uniflo: no background daemon is running");
+            eprintln!("uniflo: {}", tr!("没有在运行的后台守护进程", "no background daemon is running"));
         }
         return Ok(false);
     };
@@ -309,20 +395,97 @@ pub(crate) fn stop_daemon(quiet: bool) -> Result<bool> {
         std::thread::sleep(Duration::from_millis(50));
     }
     if !quiet {
-        eprintln!("uniflo: stopped background daemon (pid {pid})");
+        eprintln!("uniflo: {}", tr!("已停止后台守护进程（pid {pid}）", "stopped background daemon (pid {pid})"));
     }
     Ok(true)
 }
 
+/// `uniflo daemon` in a terminal: start this executable in the background with this command's
+/// arguments.
 pub(crate) fn spawn_detached(bind: &str, token: Option<String>) -> Result<()> {
+    let url = format!("http://{bind}");
+    let exe = std::env::current_exe().context("locate current executable")?;
+    let args: Vec<_> = std::env::args_os().skip(1).collect();
+    let args: Vec<std::ffi::OsString> = if args.iter().any(|a| a == "daemon") {
+        args.into_iter().filter(|a| a != "--restart").collect()
+    } else {
+        vec!["daemon".into()]
+    };
+    let log_path = log_file();
+    match start_background(&exe, &args, bind, token)? {
+        Started::Already(pid) => {
+            let pid_note = pid.map(|p| format!(" (pid {p})")).unwrap_or_default();
+            eprintln!(
+                "uniflo: {}",
+                tr!(
+                    "守护进程已在运行{pid_note}：{url}（重启：`uniflo daemon --restart`，停止：`uniflo daemon --stop`）",
+                    "daemon is already running{pid_note} on {url} (use `uniflo daemon --restart` or `uniflo daemon --stop`)"
+                )
+            );
+        }
+        Started::Up { pid, sessions } => {
+            eprintln!(
+                "uniflo: {}",
+                tr!(
+                    "守护进程已在后台启动（pid {pid}）· {sessions} 个会话 · 监听 {url}",
+                    "daemon started in background (pid {pid}) · {sessions} sessions · listening on {url}"
+                )
+            );
+            eprintln!(
+                "uniflo: {}",
+                tr!(
+                    "日志 {}（停止：`uniflo daemon --stop`，前台运行：`uniflo daemon -f`）",
+                    "log at {} (stop: `uniflo daemon --stop`, foreground: `uniflo daemon -f`)",
+                    log_path.display()
+                )
+            );
+        }
+        Started::Slow { pid } => {
+            eprintln!(
+                "uniflo: {}",
+                tr!(
+                    "守护进程正在后台启动（pid {pid}）· 监听 {url}",
+                    "daemon starting in background (pid {pid}) · listening on {url}"
+                )
+            );
+            eprintln!(
+                "uniflo: {}",
+                tr!(
+                    "日志 {}（停止：`uniflo daemon --stop`）",
+                    "log at {} (stop: `uniflo daemon --stop`)",
+                    log_path.display()
+                )
+            );
+        }
+    }
+    Ok(())
+}
+
+pub(crate) enum Started {
+    /// Something already answers on the address (the pid when it is our background daemon).
+    Already(Option<u32>),
+    Up {
+        pid: u32,
+        sessions: u64,
+    },
+    /// Still indexing after 15 s.
+    Slow {
+        pid: u32,
+    },
+}
+
+/// Start `exe <args> --foreground` detached from this terminal, logging to the daemon log, and
+/// wait until it answers on `bind`.
+pub(crate) fn start_background(
+    exe: &std::path::Path,
+    args: &[std::ffi::OsString],
+    bind: &str,
+    token: Option<String>,
+) -> Result<Started> {
     let url = format!("http://{bind}");
     let client = Client::new(&url, token)?;
     if client.alive() {
-        let pid_note = read_daemon_pid().map(|p| format!(" (pid {p})")).unwrap_or_default();
-        eprintln!(
-            "uniflo: daemon is already running{pid_note} on {url} (use `uniflo daemon --restart` or `uniflo daemon --stop`)"
-        );
-        return Ok(());
+        return Ok(Started::Already(read_daemon_pid()));
     }
     let log_path = log_file();
     if let Some(dir) = log_path.parent() {
@@ -331,19 +494,13 @@ pub(crate) fn spawn_detached(bind: &str, token: Option<String>) -> Result<()> {
     let out = std::fs::OpenOptions::new().create(true).append(true).open(&log_path)?;
     let err = out.try_clone()?;
 
-    let exe = std::env::current_exe().context("locate current executable")?;
-    let mut cmd = std::process::Command::new(&exe);
-    let args: Vec<_> = std::env::args_os().skip(1).collect();
-    if args.iter().any(|a| a == "daemon") {
-        for arg in args {
-            if arg != "--restart" {
-                cmd.arg(arg);
-            }
-        }
-    } else {
-        cmd.arg("daemon");
-    }
-    cmd.arg("--foreground").env("UNIFLO_DETACHED", "1").stdin(std::process::Stdio::null()).stdout(out).stderr(err);
+    let mut cmd = std::process::Command::new(exe);
+    cmd.args(args)
+        .arg("--foreground")
+        .env("UNIFLO_DETACHED", "1")
+        .stdin(std::process::Stdio::null())
+        .stdout(out)
+        .stderr(err);
 
     #[cfg(windows)]
     {
@@ -360,7 +517,7 @@ pub(crate) fn spawn_detached(bind: &str, token: Option<String>) -> Result<()> {
         cmd.process_group(0);
     }
 
-    let mut child = cmd.spawn().context("spawn background daemon")?;
+    let mut child = cmd.spawn().context(tr!("启动后台守护进程", "spawn background daemon"))?;
     let pid = child.id();
 
     let t0 = Instant::now();
@@ -369,22 +526,18 @@ pub(crate) fn spawn_detached(bind: &str, token: Option<String>) -> Result<()> {
             && r.status == 200
         {
             let v: serde_json::Value = serde_json::from_slice(&r.body().unwrap_or_default()).unwrap_or_default();
-            let sessions = v["sessions"].as_u64().unwrap_or(0);
-            eprintln!("uniflo: daemon started in background (pid {pid}) · {sessions} sessions · listening on {url}");
-            eprintln!(
-                "uniflo: log at {} (stop: `uniflo daemon --stop`, foreground: `uniflo daemon -f`)",
-                log_path.display()
-            );
-            return Ok(());
+            return Ok(Started::Up { pid, sessions: v["sessions"].as_u64().unwrap_or(0) });
         }
         if let Ok(Some(status)) = child.try_wait() {
             let _ = std::fs::remove_file(pid_file());
-            bail!("daemon exited early ({status}); see {}", log_path.display());
+            bail!(tr!(
+                "守护进程提前退出（{status}）；见 {}",
+                "daemon exited early ({status}); see {}",
+                log_path.display()
+            ));
         }
         if t0.elapsed() > Duration::from_secs(15) {
-            eprintln!("uniflo: daemon starting in background (pid {pid}) · listening on {url}");
-            eprintln!("uniflo: log at {} (stop: `uniflo daemon --stop`)", log_path.display());
-            return Ok(());
+            return Ok(Started::Slow { pid });
         }
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -401,6 +554,7 @@ fn daemon(
     fts: bool,
     fts_hot_days: u32,
 ) -> Result<()> {
+    let token = guard.token.is_some();
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "uniflo=info,warn".into()),
@@ -435,6 +589,10 @@ fn daemon(
                 let _ = std::fs::create_dir_all(dir);
             }
             let _ = std::fs::write(pid_file(), format!("{my_pid}\n"));
+            let exe = std::env::current_exe().map(|e| e.display().to_string()).unwrap_or_default();
+            let argv = std::env::args_os().skip(1).map(|a| a.to_string_lossy().into_owned());
+            let launch = Launch::new(my_pid, exe, argv, token);
+            let _ = std::fs::write(launch_file(), serde_json::to_vec(&launch).unwrap_or_default());
         }
         uniflo_gateway::serve(listener, router, async move {
             tokio::select! {
@@ -458,6 +616,13 @@ fn daemon(
         engine.save_usage_cache()?;
         if read_daemon_pid() == Some(std::process::id()) {
             let _ = std::fs::remove_file(pid_file());
+        }
+        let ours = std::fs::read(launch_file())
+            .ok()
+            .and_then(|b| serde_json::from_slice::<Launch>(&b).ok())
+            .is_some_and(|l| l.pid == my_pid);
+        if ours {
+            let _ = std::fs::remove_file(launch_file());
         }
         eprintln!("uniflo: index cache saved, bye");
         Ok(())
@@ -501,19 +666,25 @@ fn scan(json: bool, no_cache: bool) -> Result<()> {
     for h in engine.harnesses() {
         println!("{:<14} {:>8} {:>8}  {}", h.id, h.sessions, h.working, h.roots.join(", "));
     }
+    let (mb, ms) = (stats.bytes / 1_000_000, t0.elapsed().as_millis());
     println!(
-        "\n{} sessions · {} sources ({} read, {} from cache) · {} MB parsed · {} bad lines · {} read errors · {} ms",
-        report.sessions,
-        report.files,
-        report.read,
-        report.restored,
-        stats.bytes / 1_000_000,
-        stats.bad_lines,
-        stats.read_errors,
-        t0.elapsed().as_millis()
+        "\n{}",
+        tr!(
+            "{} 个会话 · {} 个数据源（读取 {}，缓存 {}）· 解析 {mb} MB · 坏行 {} · 读错 {} · {ms} ms",
+            "{} sessions · {} sources ({} read, {} from cache) · {mb} MB parsed · {} bad lines · {} read errors · {ms} ms",
+            report.sessions,
+            report.files,
+            report.read,
+            report.restored,
+            stats.bad_lines,
+            stats.read_errors
+        )
     );
     if !stats.unknown.is_empty() {
-        println!("\nunmapped record kinds (harness:kind → count):");
+        println!(
+            "\n{}",
+            tr!("未映射的记录类型（harness:kind → 次数）：", "unmapped record kinds (harness:kind → count):")
+        );
         let mut u: Vec<_> = stats.unknown.iter().collect();
         u.sort_by(|a, b| b.1.cmp(a.1));
         for (k, n) in u.iter().take(40) {
@@ -521,7 +692,7 @@ fn scan(json: bool, no_cache: bool) -> Result<()> {
         }
     }
     if let Some(e) = stats.last_error {
-        println!("\nlast read error: {e}");
+        println!("\n{}", tr!("最近一次读取错误：{e}", "last read error: {e}"));
     }
     Ok(())
 }
@@ -540,9 +711,16 @@ impl Source {
                 return Ok(Source::Daemon(c));
             }
             if matches!(cli.cmd, Cmd::Watch { .. }) || matches!(cli.cmd, Cmd::Tail { follow: true, .. }) {
-                bail!("no daemon at {} (start one with `uniflo daemon`)", cli.url);
+                bail!(tr!(
+                    "{} 上没有守护进程（启动：`uniflo daemon`）",
+                    "no daemon at {} (start one with `uniflo daemon`)",
+                    cli.url
+                ));
             }
-            eprintln!("uniflo: no daemon at {}, indexing in-process", cli.url);
+            eprintln!(
+                "uniflo: {}",
+                tr!("{} 上没有守护进程，改为在进程内建索引", "no daemon at {}, indexing in-process", cli.url)
+            );
         }
         let engine = Engine::new(uniflo_adapters::all(), EngineOptions::default());
         engine.index();
@@ -563,7 +741,7 @@ impl Source {
     fn session(&self, key: &str) -> Result<Session> {
         match self {
             Source::Daemon(c) => c.get_json(&format!("/v1/sessions/{}", enc(key))),
-            Source::Local(e) => e.session(key).with_context(|| format!("unknown session {key}")),
+            Source::Local(e) => e.session(key).with_context(|| tr!("没有会话 {key}", "unknown session {key}")),
         }
     }
 
@@ -575,8 +753,8 @@ impl Source {
         let hits = self.sessions(&format!("id:{key}"), 2)?;
         match hits.as_slice() {
             [one] => Ok(one.clone()),
-            [] => bail!("no session matches {key}"),
-            _ => bail!("{key} is ambiguous; use the full key"),
+            [] => bail!(tr!("没有匹配 {key} 的会话", "no session matches {key}")),
+            _ => bail!(tr!("{key} 匹配多个会话，请用完整的 key", "{key} is ambiguous; use the full key")),
         }
     }
 
@@ -623,7 +801,9 @@ impl Source {
                     print_event(&st, &e, *json)?;
                 }
                 if *follow {
-                    let Source::Daemon(c) = self else { bail!("--follow needs a running daemon") };
+                    let Source::Daemon(c) = self else {
+                        bail!(tr!("--follow 需要在运行的守护进程", "--follow needs a running daemon"))
+                    };
                     let since = c.get(&format!("/v1/sessions/{}", enc(&s.key)))?;
                     drop(since);
                     stream(c, &format!("/v1/stream.ndjson?types=event&session={}", enc(&s.key)), |env| {
@@ -636,7 +816,9 @@ impl Source {
                 Ok(())
             }
             Cmd::Watch { session, harness, kinds, since } => {
-                let Source::Daemon(c) = self else { bail!("watch needs a running daemon") };
+                let Source::Daemon(c) = self else {
+                    bail!(tr!("watch 需要在运行的守护进程", "watch needs a running daemon"))
+                };
                 let mut path = "/v1/stream.ndjson?max_text=0".to_owned();
                 for (k, v) in [("session", session), ("harness", harness), ("kinds", kinds)] {
                     if let Some(v) = v {
@@ -660,7 +842,11 @@ impl Source {
                     println!("{}", serde_json::to_string_pretty(&hs)?);
                 } else {
                     for h in hs {
-                        let roots = if h.roots.is_empty() { "(not installed)".to_owned() } else { h.roots.join(", ") };
+                        let roots = if h.roots.is_empty() {
+                            tr!("（未安装）", "(not installed)")
+                        } else {
+                            h.roots.join(", ")
+                        };
                         println!(
                             "{:<12} {:<16} {:>6} sessions {:>4} working  {roots}",
                             h.id, h.name, h.sessions, h.working
@@ -723,7 +909,7 @@ fn print_sessions(st: &Style, list: &[Session], json: bool, tsv: bool) -> Result
             println!("{}", render::session_line(st, s));
         }
         let working = list.iter().filter(|s| s.status == Status::Work).count();
-        eprintln!("{} sessions, {working} working", list.len());
+        eprintln!("{}", tr!("{} 个会话，{working} 个工作中", "{} sessions, {working} working", list.len()));
     }
     Ok(())
 }
@@ -738,4 +924,27 @@ pub(crate) fn enc(s: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Launch;
+
+    #[test]
+    fn launch_record_drops_token_values_and_foreground() {
+        let argv = ["daemon", "--token", "s3cret", "--bind=127.0.0.1:7400", "-f", "--read-only", "--foreground"];
+        let l = Launch::new(7, "/x/uniflo".into(), argv.map(String::from), false);
+        assert_eq!(l.args, ["daemon", "--bind=127.0.0.1:7400", "--read-only"]);
+        assert!(l.token && !serde_json::to_string(&l).unwrap().contains("s3cret"));
+        assert_eq!(l.bind(), "127.0.0.1:7400");
+        let l = Launch::new(
+            7,
+            "/x/uniflo".into(),
+            ["daemon", "--token=abc", "--bind", "127.0.0.1:7401"].map(String::from),
+            false,
+        );
+        assert_eq!((l.args.len(), l.token, l.bind().as_str()), (3, true, "127.0.0.1:7401"));
+        let l = Launch::new(7, "/x/uniflo".into(), ["daemon".to_owned()], true);
+        assert_eq!((l.token, l.bind().as_str()), (true, "127.0.0.1:7311"));
+    }
 }

@@ -70,6 +70,7 @@ impl Home {
         c.args(args)
             .env("UNIFLO_HOME", self.path())
             .env("UNIFLO_TRASH_DIR", self.trash())
+            .env("UNIFLO_LANG", "en")
             .env_remove("UNIFLO_TOKEN")
             .env_remove("UNIFLO_DATA_DIR")
             .env_remove("UNIFLO_CACHE_DIR")
@@ -161,6 +162,11 @@ fn clean_and_archive_through_the_daemon() {
     assert!(!refused.status.success(), "no terminal and no --yes");
     assert!(String::from_utf8_lossy(&refused.stderr).contains("--yes"));
     assert!(home.src().is_file());
+
+    // `UNIFLO_LANG=zh` switches the same refusal to Chinese.
+    let refused_zh = home.cmd(&["--url", &url, "clean", KEY]).env("UNIFLO_LANG", "zh").output().unwrap();
+    assert!(!refused_zh.status.success());
+    assert!(String::from_utf8_lossy(&refused_zh.stderr).contains("当前不是终端"));
 
     let report: Value = serde_json::from_str(&home.ok(&["--url", &url, "clean", KEY, "--yes", "--json"])).unwrap();
     let r = &report["results"][0];

@@ -59,6 +59,7 @@ fn daemon(home: &Path, extra: &[&str]) -> Daemon {
         .args(["daemon", "--bind", &format!("127.0.0.1:{port}"), "--no-update-check"])
         .args(extra)
         .env("UNIFLO_HOME", home)
+        .env("UNIFLO_LANG", "en")
         .env_remove("UNIFLO_TOKEN")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -85,7 +86,13 @@ fn get(port: u16, path: &str) -> Option<(u16, Value)> {
 }
 
 fn uniflo(home: &Path, args: &[&str]) -> (String, String) {
-    let out = Command::new(BIN).args(args).env("UNIFLO_HOME", home).env_remove("UNIFLO_TOKEN").output().unwrap();
+    let out = Command::new(BIN)
+        .args(args)
+        .env("UNIFLO_HOME", home)
+        .env("UNIFLO_LANG", "en")
+        .env_remove("UNIFLO_TOKEN")
+        .output()
+        .unwrap();
     assert!(out.status.success(), "{args:?}: {}", String::from_utf8_lossy(&out.stderr));
     (String::from_utf8(out.stdout).unwrap(), String::from_utf8(out.stderr).unwrap())
 }

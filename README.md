@@ -108,6 +108,8 @@ uniflo clean claude:4f1c                  # 确认后归档并移入回收站（
 uniflo archive ls                         # 已清理的会话与归档大小；archive rm <key> 永久删除归档
 ```
 
+提示和报错按系统语言显示：中文系统用中文，其他用英文。依次看 `UNIFLO_LANG`（`zh` / `en`）、`LC_ALL`、`LC_MESSAGES`、桌面语言（macOS「首选语言」、Windows 显示语言）、`LANG`，取第一个有值的；JSON、TSV 等机器输出不翻译。
+
 ## 接入自己的应用
 
 任何语言都可以直接请求本地网关：
@@ -141,7 +143,7 @@ for s in client.sessions("s:work", 20)? {
 ```sh
 uniflo update --check                     # 只查询有没有新正式版（退出码 10 = 有新版）
 uniflo update --check --json              # 同上，JSON 另含 method：cargo | binary | unknown
-uniflo update                             # 升级到最新正式版；macOS 上 launchd 服务若运行的就是这个可执行文件，则 kickstart 重启
+uniflo update                             # 升级到最新正式版，并让守护进程换上新版本（见下）
 uniflo update --pre                       # 显式选择：安装探测到的最新预发布版（不保证稳定）
 uniflo daemon --no-update-check           # 关闭后台检查
 ```
@@ -151,6 +153,11 @@ uniflo daemon --no-update-check           # 关闭后台检查
 | `cargo` | 可执行文件在 `$CARGO_HOME/bin` 或 `~/.cargo/bin` | `cargo install uniflo --force --version <新版本>` |
 | `binary` | `install.json` 记录的路径就是当前可执行文件（安装脚本写入） | 下载新版本的包和 `SHA256SUMS`，校验后原子替换，并更新 `install.json`；任何一步失败，原可执行文件都不变 |
 | `unknown` | 其他（源码构建、拷贝的文件等） | 只打印上面两种升级方式，不做改动 |
+
+装好之后由新版本收尾，每步一行：
+- 守护进程还是旧版本时重启它：`uniflo daemon` 起的后台守护进程按原来的参数重启（启用了 token 时要先设置 `UNIFLO_TOKEN`）；macOS 上 launchd 服务运行的就是这个可执行文件时 `kickstart`；前台运行的只提示。已打开的 `/demo` 页面发现守护进程换了版本会自动刷新一次，视图和选中的会话保留（0.2.1 之前打开的页面需要手动刷新一次）。
+- 接入过 agent 时刷新接入（只对新检测到的 harness 提问）；从没接入过时在终端里问一次。
+- cargo 的编译日志收成一行进度，失败时才打印最后 40 行。
 
 Windows 上 cargo 无法覆盖运行中的 exe：cargo 安装请先停掉 daemon 再执行 `uniflo update`。binary 安装会把运行中的 `uniflo.exe` 改名为 `uniflo.exe.old` 再放入新版本，`.old` 在下次启动 uniflo 时删除。
 

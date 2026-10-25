@@ -2,6 +2,7 @@
 //! `/v1/sessions/{key}/usage` and `/v1/pricing`, or the same library calls in-process.
 
 use crate::client::Client;
+use crate::i18n::tr;
 use crate::{Cli, Source, enc};
 use anyhow::{Result, anyhow, bail};
 use clap::{Args, Subcommand};
@@ -124,17 +125,24 @@ pub fn pricing(cli: &Cli, a: &PricingArgs) -> Result<()> {
             match (&r.fetched_at, &r.error) {
                 (Some(_), err) => {
                     println!(
-                        "synced {} models: {} price changes, {} added, {} waiting for a second read",
-                        r.models,
-                        r.changed.len(),
-                        r.added,
-                        r.pending.len()
+                        "{}",
+                        tr!(
+                            "已同步 {} 个模型：{} 个涨跌价，新增 {} 个，{} 个待二次确认",
+                            "synced {} models: {} price changes, {} added, {} waiting for a second read",
+                            r.models,
+                            r.changed.len(),
+                            r.added,
+                            r.pending.len()
+                        )
                     );
                     if let Some(e) = err {
-                        println!("partial failure: {e}");
+                        println!("{}", tr!("部分失败：{e}", "partial failure: {e}"));
                     }
                 }
-                (None, err) => println!("sync failed, previous catalog kept: {}", err.as_deref().unwrap_or("?")),
+                (None, err) => {
+                    let e = err.as_deref().unwrap_or("?");
+                    println!("{}", tr!("同步失败，保留原有价目表：{e}", "sync failed, previous catalog kept: {e}"));
+                }
             }
         }
         if r.fetched_at.is_none() {
@@ -150,13 +158,26 @@ pub fn pricing(cli: &Cli, a: &PricingArgs) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&st)?);
         return Ok(());
     }
-    let when = st.fetched_at.map_or_else(|| "never (embedded snapshot)".to_owned(), date_time);
-    println!("source     {}", st.source);
-    println!("fetched    {when}{}", if st.stale { "  (stale)" } else { "" });
-    println!("models     {}  ·  overrides {}  ·  pending {}", st.models, st.overrides, st.pending);
-    println!("sync       {}", if st.sync_enabled { "on" } else { "off" });
+    let when = st.fetched_at.map_or_else(|| tr!("从未同步（内置快照）", "never (embedded snapshot)"), date_time);
+    let stale = if st.stale { tr!("（已过期）", "  (stale)") } else { String::new() };
+    println!("{}", tr!("来源       {}", "source     {}", st.source));
+    println!("{}", tr!("同步时间   {when}{stale}", "fetched    {when}{stale}"));
+    println!(
+        "{}",
+        tr!(
+            "模型       {}  ·  覆盖 {}  ·  待确认 {}",
+            "models     {}  ·  overrides {}  ·  pending {}",
+            st.models,
+            st.overrides,
+            st.pending
+        )
+    );
+    println!(
+        "{}",
+        tr!("同步       {}", "sync       {}", if st.sync_enabled { tr!("开", "on") } else { tr!("关", "off") })
+    );
     if let Some(e) = &st.error {
-        println!("error      {e}");
+        println!("{}", tr!("错误       {e}", "error      {e}"));
     }
     Ok(())
 }
@@ -166,7 +187,8 @@ fn fetch(c: &Client, path: &str) -> Result<Vec<u8>> {
     let mut r = c.get(path)?;
     let body = r.body()?;
     if r.status != 200 {
-        bail!("HTTP {}: {}", r.status, String::from_utf8_lossy(&body));
+        let msg = String::from_utf8_lossy(&body);
+        bail!(tr!("HTTP {}：{msg}", "HTTP {}: {msg}", r.status));
     }
     Ok(body)
 }
@@ -210,15 +232,25 @@ fn print_report(r: &UsageReport) {
     println!("{}", row("total", &r.totals, w));
     let mut notes = Vec::new();
     if !r.indexing.ready {
-        notes.push(format!("still indexing {}/{} sources: totals will grow", r.indexing.done, r.indexing.total));
+        notes.push(tr!(
+            "仍在索引 {}/{} 个来源：合计还会增加",
+            "still indexing {}/{} sources: totals will grow",
+            r.indexing.done,
+            r.indexing.total
+        ));
     }
     if r.totals.unpriced_steps > 0 {
-        notes.push(format!("{} steps have no price (unknown model): not counted as $0", r.totals.unpriced_steps));
+        notes.push(tr!(
+            "{} 个步骤没有价格（未知模型）：不按 $0 计入",
+            "{} steps have no price (unknown model): not counted as $0",
+            r.totals.unpriced_steps
+        ));
     }
-    let prices = r.pricing.fetched_at.map_or_else(|| "embedded snapshot".to_owned(), date_time);
-    notes.push(format!(
-        "prices: {prices}{} · API-equivalent cost, not a bill",
-        if r.pricing.stale { " (stale)" } else { "" }
+    let prices = r.pricing.fetched_at.map_or_else(|| tr!("内置快照", "embedded snapshot"), date_time);
+    let stale = if r.pricing.stale { tr!("（已过期）", " (stale)") } else { String::new() };
+    notes.push(tr!(
+        "价格来源：{prices}{stale} · 等价 API 费用，不是账单",
+        "prices: {prices}{stale} · API-equivalent cost, not a bill"
     ));
     for n in notes {
         eprintln!("{n}");
@@ -284,11 +316,15 @@ fn print_detail(d: &SessionUsageDetail) {
     let u = &d.totals;
     let limit = u.context_limit.map_or_else(|| "?".to_owned(), tokens);
     eprintln!(
-        "{} steps · {} · {} unpriced · last context {} / {limit}",
-        u.steps,
-        money(u.cost_usd),
-        u.unpriced_steps,
-        tokens(u.last_context_tokens)
+        "{}",
+        tr!(
+            "{} 步 · {} · {} 个未定价 · 最近上下文 {} / {limit}",
+            "{} steps · {} · {} unpriced · last context {} / {limit}",
+            u.steps,
+            money(u.cost_usd),
+            u.unpriced_steps,
+            tokens(u.last_context_tokens)
+        )
     );
 }
 

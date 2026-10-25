@@ -134,7 +134,8 @@ agent（Claude Code、Codex…）──stdio JSON-RPC──► uniflo mcp（unif
   - 发布包命名（`asset_name`、`TARGETS`）；
   - 自升级 `upgrade_binary`：系统 `curl` 下载 → `sha2` 校验 → 系统 `tar` / PowerShell `Expand-Archive` 解包 → `--version` 自检 → `swap` 改名替换（Windows 为 `.old` 改名）。
 - `uniflo-core::update`：crates.io 版本检查（ADR-0005）。
-- `uniflo-cli::update`：`uniflo update` 的接线：按安装方式分派、unknown 时的提示、launchd 重启判断，最后调用 `setup::after_update`。
+- `uniflo-cli::update`：`uniflo update` 的接线：按安装方式分派、unknown 时的提示，装好后运行新版本的 `setup --after-update`；新版本在那里调用 `update::refresh_daemon`：后台守护进程按 `daemon.json` 记录的参数重启（缺记录时取 `ps`），launchd 服务只在运行的就是这个可执行文件时 kickstart。
+- `uniflo-cli::i18n`：提示语言（中文系统用中文，其他用英文）与 `tr!` 宏；机器输出不翻译。
 - 脚本：
   - `scripts/package.sh`：打包，CI 与测试共用；
   - `scripts/install.sh` / `install.ps1`：安装；

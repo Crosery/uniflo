@@ -136,7 +136,10 @@ fn both_edits_files_links_skill_and_uninstalls_symmetrically() {
     assert_eq!(h.read(".qwen/settings.json"), QWEN);
     assert!(out.lines().any(|l| l.contains("qwen") && l.contains("解析失败")), "{out}");
     assert_eq!(h.read(".kiro/settings/mcp.json"), KIRO);
-    assert!(out.lines().any(|l| l.contains("kiro") && l.contains("occupied") && l.contains("未覆盖")), "{out}");
+    assert!(
+        out.lines().any(|l| l.contains("kiro") && l.contains(crate::update::MARKS[2]) && l.contains("未覆盖")),
+        "{out}"
+    );
     assert!(!h.path(".qwen/settings.json.bak-uniflo-20261009-120000").exists());
 
     // The Skill: one real file, relative links only where the harness does not read ~/.agents/skills.
@@ -172,7 +175,7 @@ fn both_edits_files_links_skill_and_uninstalls_symmetrically() {
     let snap = harness_files(&h);
     let out = h.setup(args(|a| (a.both, a.yes) = (true, true)), false, "");
     assert_eq!(harness_files(&h), snap, "second run changes nothing:\n{out}");
-    assert!(out.contains("未变化"));
+    assert!(out.contains("已就绪"), "{out}");
 
     // Uninstall: only Uniflo's entries and links go; backups stay; everything else as before.
     h.setup(args(|a| (a.uninstall, a.yes) = (true, true)), false, "");
@@ -238,7 +241,17 @@ fn interactive_questions_and_confirmation() {
     let h = fixture();
     // Skill only, harnesses 1 and claude by id, no hook, then decline the plan.
     let out = h.setup(args(|_| {}), true, "2\n1,cursor\nn\nn\n");
-    assert!(out.contains("选择 agent 接入方式") && out.contains("检测到") && out.contains("已取消"), "{out}");
+    assert!(out.contains("接入方式") && out.contains("检测到") && out.contains("已取消"), "{out}");
+    assert!(!h.path(".agents").exists());
+    // The same questions in English.
+    crate::i18n::set_zh(false);
+    let out = h.setup(args(|_| {}), true, "2\n1,cursor\nn\nn\n");
+    crate::i18n::set_zh(true);
+    assert!(
+        out.contains("How should agents connect?") && out.contains("harnesses found") && out.contains("Apply?"),
+        "{out}"
+    );
+    assert!(out.contains("cancelled, nothing written") && !out.contains("接入"), "{out}");
     assert!(!h.path(".agents").exists());
     // MCP for claude + cursor with the SessionStart hook, confirmed.
     let out = h.setup(args(|_| {}), true, "\nclaude,cursor\ny\n\n");

@@ -1,5 +1,6 @@
 //! `uniflo grep`: full-text search over event bodies, one block per session.
 
+use crate::i18n::tr;
 use crate::render::{self, Style};
 use crate::{Source, enc};
 use anyhow::{Result, anyhow};
@@ -46,14 +47,20 @@ pub fn run(src: &Source, terms: &[String], filter: Option<&str>, limit: usize, j
 /// notice when a short-term scan ran out of time.
 fn footer(r: &SearchResponse) -> Vec<String> {
     let more = if r.scanned_until.is_some() { "+" } else { "" };
-    let mut tail = format!("{} of {}{more} matching sessions", r.results.len(), r.total);
+    let mut tail = tr!("{} / {}{more} 个匹配的会话", "{} of {}{more} matching sessions", r.results.len(), r.total);
     if r.indexing {
-        tail.push_str(&format!(" · index still building ({}/{} sessions)", r.progress.done, r.progress.total));
+        tail.push_str(&tr!(
+            " · 索引仍在构建中（{}/{} 个会话）",
+            " · index still building ({}/{} sessions)",
+            r.progress.done,
+            r.progress.total
+        ));
     }
     let mut out = vec![tail];
     if r.partial {
         let until = r.scanned_until.map_or_else(|| "?".to_owned(), render::date_time);
-        out.push(format!(
+        out.push(tr!(
+            "搜索已到达时间预算：{until} 之前最后活跃的会话未被搜索（加一个 3 个字以上的词可以搜索全部）",
             "search stopped at its time budget: sessions last active before {until} were not searched \
              (add a term of 3+ characters to search everything)"
         ));
@@ -67,15 +74,28 @@ fn local(engine: &Arc<Engine>, p: &SearchParams) -> Result<SearchResponse> {
     let st = fts.status();
     if st.indexing {
         eprintln!(
-            "uniflo: updating the full-text index {} ({} of {} sessions to read)…",
-            st.path,
-            st.progress.total - st.progress.done,
-            st.progress.total
+            "{}",
+            tr!(
+                "uniflo：正在更新全文索引 {}（还有 {}/{} 个会话待读取）…",
+                "uniflo: updating the full-text index {} ({} of {} sessions to read)…",
+                st.path,
+                st.progress.total - st.progress.done,
+                st.progress.total
+            )
         );
     }
     while !fts.wait_idle(Duration::from_secs(5)) {
         let st = fts.status();
-        eprintln!("  {}/{} sessions, {} events", st.progress.done, st.progress.total, st.progress.events);
+        eprintln!(
+            "{}",
+            tr!(
+                "  {}/{} 个会话，{} 个事件",
+                "  {}/{} sessions, {} events",
+                st.progress.done,
+                st.progress.total,
+                st.progress.events
+            )
+        );
     }
     fts.search(p).map_err(|e| anyhow!("{e}"))
 }
@@ -103,11 +123,13 @@ mod tests {
 
     #[test]
     fn footer_flags_lower_bounds_and_partial_scans() {
+        crate::i18n::set_zh(false);
         assert_eq!(footer(&response(3, false, None)), vec!["0 of 3 matching sessions"]);
         assert_eq!(footer(&response(21, false, Some(1_790_000_000_000))), vec!["0 of 21+ matching sessions"]);
         let lines = footer(&response(2, true, Some(1_790_000_000_000)));
         assert_eq!(lines.len(), 2);
         assert!(lines[0].ends_with("2+ matching sessions"));
         assert!(lines[1].starts_with("search stopped at its time budget") && lines[1].contains("3+ characters"));
+        crate::i18n::set_zh(true);
     }
 }

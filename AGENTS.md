@@ -42,6 +42,7 @@ Uniflo：本机常驻守护进程，持续读取所有 agent harness（Claude Co
 ## 非显然的环境事实
 
 - 默认端口 `127.0.0.1:7311`；CLI 读 `UNIFLO_URL`、`UNIFLO_TOKEN`；`UNIFLO_HOME` 覆盖家目录（测试用）。
+- CLI 和安装脚本的提示按系统语言出中文或英文（`uniflo-cli::i18n`，`UNIFLO_LANG=zh|en` 覆盖）。断言提示文字的集成测试和脚本要固定 `UNIFLO_LANG`；单元测试默认中文，用 `i18n::set_zh(false)` 切到英文。
 - Uniflo 自己的数据目录走 `uniflo_core::paths`（macOS `~/Library/Application Support/uniflo`，价格在 `pricing/`）；`UNIFLO_DATA_DIR` 直接指定。缓存目录 `cache_dir()` 也随 `UNIFLO_HOME` 重定位（`paths::rerooted()`）。对真实数据起测试守护进程必须同时设 `HOME=<tmp>`、`UNIFLO_HOME=<真实家目录>`、`UNIFLO_DATA_DIR=<tmp>`、`UNIFLO_CACHE_DIR=<tmp>`，并绑 `127.0.0.1:74xx`；漏设 `UNIFLO_CACHE_DIR` 会读写真实的索引、用量账本和价格文件，全文索引的迁移还会删掉真实的 `fts-v1.sqlite`。
 - 价格同步测试用 `UNIFLO_PRICING_URL` 指本地 HTTP 服务、`UNIFLO_PRICING_FALLBACK_URL=` 置空关闭 LiteLLM；守护进程隐藏参数 `--price-sync-delay <秒>` 控制首次同步时间。用量账本缓存 `usage-v1.json` 与索引缓存同目录，排查用量问题时删它或加 `--no-cache`。
 - 索引缓存 `~/Library/Caches/uniflo/index-v1.json`（macOS），标签含版本、schema 版本和适配器列表，任一变化自动失效；排查索引问题时加 `--no-cache`。

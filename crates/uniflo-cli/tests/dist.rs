@@ -152,8 +152,12 @@ impl Machine {
         let mut c = Command::new(program);
         // A UTF-8 locale like a real terminal: under it macOS /bin/sh (bash 3.2) reads the
         // multibyte text right after an unbraced `$var` as part of the variable name.
+        // UNIFLO_LANG=zh pins message language regardless of this machine's desktop language, so
+        // the assertions below can rely on fixed Chinese text; the English path is exercised
+        // separately by overriding UNIFLO_LANG per call.
         c.env_clear()
             .env("LANG", "en_US.UTF-8")
+            .env("UNIFLO_LANG", "zh")
             .env("PATH", std::env::var_os("PATH").unwrap_or_default())
             .env("HOME", self.path("home"))
             .env("UNIFLO_HOME", self.path("home"))
@@ -241,6 +245,9 @@ fn install_script_installs_records_and_skips_setup_off_a_terminal() {
     assert_eq!(j["method"], "binary", "{j}");
 
     // --no-setup and UNIFLO_NO_SETUP=1 are accepted; unknown flags are refused
+    let en = m.install(&rel, "bin", &[("UNIFLO_LANG", "en")], &["--no-setup"]);
+    assert!(en.status.success(), "{}", text(&en.stderr));
+    assert!(text(&en.stdout).contains("skipping uniflo setup"), "{}", text(&en.stdout));
     assert!(m.install(&rel, "bin", &[], &["--no-setup"]).status.success());
     assert!(m.install(&rel, "bin", &[("UNIFLO_NO_SETUP", "1")], &[]).status.success());
     let bad = m.install(&rel, "bin", &[], &["--yes"]);
@@ -359,7 +366,7 @@ fn binary_install_upgrades_itself_and_failures_change_nothing() {
     let o = m.uniflo(&exe, &rel, &["update"]);
     let out = text(&o.stdout);
     assert!(o.status.success(), "{out}\n{}", text(&o.stderr));
-    assert!(out.contains(&format!("已安装 uniflo {NEXT}")), "{out}");
+    assert!(out.contains(&format!("已安装 {NEXT}（")), "{out}");
     assert!(!out.contains("已重启"), "launchd must not be restarted for a temporary install: {out}");
     assert_eq!(version_of(&exe), format!("uniflo {NEXT}"));
     assert_eq!(m.record().unwrap()["version"], NEXT);

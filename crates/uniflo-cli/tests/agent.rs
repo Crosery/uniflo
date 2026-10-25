@@ -75,6 +75,7 @@ impl Home {
         c.env("HOME", self.root())
             .env("USERPROFILE", self.root())
             .env("UNIFLO_HOME", self.root())
+            .env("UNIFLO_LANG", "en")
             .env_remove("UNIFLO_TOKEN")
             .env_remove("UNIFLO_URL")
             .env_remove("UNIFLO_DATA_DIR")
@@ -775,7 +776,7 @@ fn setup_outside_a_terminal_writes_nothing_and_nothing_prompts() {
         let text = String::from_utf8_lossy(&out.stdout);
         if args.get(1) != Some(&"--uninstall") {
             assert!(text.contains("cursor") && text.contains("~/.cursor/mcp.json"), "{args:?}: {text}");
-            assert!(text.contains("未写入任何文件"), "{args:?}: {text}");
+            assert!(text.contains("nothing written"), "{args:?}: {text}");
         }
     }
     // Ordinary commands never ask outside a terminal; neither does the MCP server.

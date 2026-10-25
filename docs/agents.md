@@ -141,7 +141,7 @@ Pi、Grok 没有可用的 MCP 客户端，只装 Skill（选了 MCP 也会装）
 ### 自动触发
 
 - 第一次在终端里运行任意查询类命令（不含 `daemon`、`mcp`、`setup`、`skill`、`context`、`update`）且从未问过时，提示一次；回答"否"会记进 `setup.json`，不再追问。
-- `uniflo update` 安装成功后（仅终端里）：从未配置过 → 完整询问一次；已配置 → 静默 `--reload`，只对新检测到的 harness 询问；选过"跳过"→ 什么都不做。
+- `uniflo update` 安装成功后由新版本运行隐藏的 `uniflo setup --after-update`：先让守护进程换上新版本（任何环境都做），再处理接入（仅终端里）：从未配置过 → 完整询问一次；已配置 → 静默 `--reload` 并打印一行汇总，只对新检测到的 harness 询问；选过"跳过"→ 什么都不做。
 - 安装脚本（`install.sh` / `install.ps1`）结尾：在终端里运行 `uniflo setup`；`--no-setup`、`UNIFLO_NO_SETUP=1` 或非终端时跳过。
 - `CI` 有值、`UNIFLO_NO_SETUP=1`、非终端、守护进程、MCP 服务器：从不提问。
 

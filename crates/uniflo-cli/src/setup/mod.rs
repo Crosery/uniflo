@@ -13,6 +13,8 @@
 mod edit;
 mod harness;
 
+use crate::i18n::tr;
+use crate::update::{Mark, step};
 use anyhow::{Context, Result, bail};
 use clap::Args;
 use edit::Outcome;
@@ -21,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 #[derive(Args, Default)]
@@ -89,12 +91,12 @@ impl Mode {
         matches!(self, Mode::Skill | Mode::Both)
     }
 
-    fn label(self) -> &'static str {
+    fn label(self) -> String {
         match self {
-            Mode::Mcp => "MCP",
-            Mode::Skill => "Skill",
-            Mode::Both => "MCP + Skill",
-            Mode::None => "跳过",
+            Mode::Mcp => "MCP".into(),
+            Mode::Skill => "Skill".into(),
+            Mode::Both => "MCP + Skill".into(),
+            Mode::None => tr!("跳过", "skip"),
         }
     }
 }
@@ -237,6 +239,12 @@ fn prompts_allowed(tty: bool, var: fn(&str) -> Option<String>) -> bool {
 }
 
 pub fn run(a: &SetupArgs) -> Result<()> {
+    if a.after_update {
+        crate::update::refresh_daemon();
+        if !prompts_allowed(tty(), |k| std::env::var(k).ok().filter(|v| !v.is_empty())) {
+            return Ok(());
+        }
+    }
     let ctx = Ctx::from_process()?;
     let mut input = std::io::stdin().lock();
     flow(&ctx, a, tty(), &mut input, &mut std::io::stdout())
@@ -251,11 +259,12 @@ pub fn first_run() {
     }
     let mut input = std::io::stdin().lock();
     let mut out = std::io::stdout();
-    let _ = writeln!(
-        out,
-        "uniflo 可以让本机的 agent（Claude Code、Codex 等）直接查询所有会话：注册 MCP 服务器和/或安装 Skill。"
+    let _ = writeln!(out, "{}", intro());
+    let q = tr!(
+        "现在接入吗？选 n 后不再询问，之后可随时运行 `uniflo setup`",
+        "Connect them now? Answer n to never be asked again; run `uniflo setup` any time"
     );
-    let yes = ask_yes(&mut input, &mut out, "现在设置吗？选 n 后不再询问，之后可随时运行 `uniflo setup`", true);
+    let yes = ask_yes(&mut input, &mut out, &q, true);
     let res = if yes {
         flow(&ctx, &SetupArgs::default(), true, &mut input, &mut out)
     } else {
@@ -269,17 +278,15 @@ pub fn first_run() {
     let _ = writeln!(out);
 }
 
-pub fn should_ask_first_run(tty: bool, var: fn(&str) -> Option<String>, state: Option<&State>) -> bool {
-    prompts_allowed(tty, var) && state.is_none_or(|s| !s.asked && s.mode.is_none())
+fn intro() -> String {
+    tr!(
+        "接入 agent：让本机的 Claude Code、Codex 等通过 MCP 服务器或 Skill 直接查询所有会话",
+        "Connect your agents: let Claude Code, Codex and others on this machine query every session through the MCP server or a Skill"
+    )
 }
 
-/// End of a successful `uniflo update`: let the newly installed binary at `exe` run the setup
-/// step (`current_exe()` of a replaced executable is no longer valid on Linux).
-pub fn after_update(exe: &Path) {
-    if !prompts_allowed(tty(), |k| std::env::var(k).ok().filter(|v| !v.is_empty())) {
-        return;
-    }
-    let _ = Command::new(exe).args(["setup", "--after-update"]).status();
+pub fn should_ask_first_run(tty: bool, var: fn(&str) -> Option<String>, state: Option<&State>) -> bool {
+    prompts_allowed(tty, var) && state.is_none_or(|s| !s.asked && s.mode.is_none())
 }
 
 #[derive(Debug, PartialEq)]
@@ -372,11 +379,19 @@ fn flow(ctx: &Ctx, a: &SetupArgs, tty: bool, input: &mut dyn BufRead, out: &mut 
     if a.uninstall {
         let Some(st) = state.as_mut().filter(|s| !s.harnesses.is_empty() || s.skill.is_some() || s.hook.is_some())
         else {
-            writeln!(out, "uniflo setup：没有可撤销的记录（{}）。", ctx.state_path.display())?;
+            writeln!(
+                out,
+                "{}",
+                tr!(
+                    "uniflo setup：没有可撤销的记录（{}）",
+                    "uniflo setup: nothing recorded to undo ({})",
+                    ctx.state_path.display()
+                )
+            )?;
             return Ok(());
         };
         let plan = uninstall_plan(ctx, st);
-        print_plan(ctx, &plan, out, "撤销")?;
+        print_plan(ctx, &plan, out)?;
         if !confirmed(a, tty, input, out)? {
             return Ok(());
         }
@@ -387,7 +402,11 @@ fn flow(ctx: &Ctx, a: &SetupArgs, tty: bool, input: &mut dyn BufRead, out: &mut 
         st.mode = None;
         st.asked = true;
         st.save(&ctx.state_path)?;
-        writeln!(out, "已撤销；备份文件保留。记录：{}", ctx.state_path.display())?;
+        writeln!(
+            out,
+            "{}",
+            tr!("已撤销，备份文件保留。记录：{}", "undone; backups kept. Record: {}", ctx.state_path.display())
+        )?;
         return Ok(());
     }
     let detected = harness::detect(&ctx.env);
@@ -407,15 +426,20 @@ fn flow(ctx: &Ctx, a: &SetupArgs, tty: bool, input: &mut dyn BufRead, out: &mut 
                 let refresh = plan(ctx, mode, &known, hook);
                 apply(ctx, &refresh, st, &mut std::io::sink())?;
                 st.save(&ctx.state_path)?;
+                refreshed(st, &known, mode, out)?;
                 if new.is_empty() || !tty {
                     return Ok(());
                 }
                 let names: Vec<&str> = new.iter().filter_map(|id| harness::lookup(id)).map(|s| s.name).collect();
-                let q = format!("检测到新的 harness：{}。为它们接入 {}？", names.join("、"), mode.label());
+                let (names, label) = (names.join(", "), mode.label());
+                let q = tr!(
+                    "检测到新的 harness：{names}。为它们接入 {label}？",
+                    "New harnesses found: {names}. Connect them with {label}?"
+                );
                 let fresh: Vec<&Detected> = detected.iter().filter(|d| new.contains(&d.spec.id)).collect();
                 if ask_yes(input, out, &q, true) {
                     let add = plan(ctx, mode, &fresh, false);
-                    print_plan(ctx, &add, out, "接入")?;
+                    print_plan(ctx, &add, out)?;
                     apply(ctx, &add, st, out)?;
                 } else {
                     for d in fresh {
@@ -434,7 +458,14 @@ fn flow(ctx: &Ctx, a: &SetupArgs, tty: bool, input: &mut dyn BufRead, out: &mut 
         .or(env_mode);
     let recorded = state.as_ref().and_then(|s| s.mode);
     if a.reload && flag_mode.is_none() && recorded.is_none() {
-        writeln!(out, "uniflo setup --reload：还没有配置过，先运行 `uniflo setup`。")?;
+        writeln!(
+            out,
+            "{}",
+            tr!(
+                "uniflo setup --reload：还没有配置过，先运行 `uniflo setup`",
+                "uniflo setup --reload: not set up yet, run `uniflo setup` first"
+            )
+        )?;
         return Ok(());
     }
     let mode = match flag_mode.or(if a.reload { recorded } else { None }) {
@@ -443,7 +474,14 @@ fn flow(ctx: &Ctx, a: &SetupArgs, tty: bool, input: &mut dyn BufRead, out: &mut 
         None => Mode::Mcp,
     };
     if mode == Mode::None {
-        writeln!(out, "uniflo setup：跳过，不接入任何 harness。之后可随时运行 `uniflo setup`。")?;
+        writeln!(
+            out,
+            "{}",
+            tr!(
+                "uniflo setup：跳过，不接入任何 harness；之后可随时运行 `uniflo setup`",
+                "uniflo setup: skipped, no harness connected; run `uniflo setup` any time"
+            )
+        )?;
         if a.yes || interactive {
             let mut s = state.unwrap_or_default();
             s.asked = true;
@@ -456,18 +494,22 @@ fn flow(ctx: &Ctx, a: &SetupArgs, tty: bool, input: &mut dyn BufRead, out: &mut 
         let mut v = Vec::new();
         for id in &a.agents {
             let Some(spec) = harness::lookup(id) else {
-                bail!(
+                bail!(tr!(
+                    "不认识 harness `{id}`；可选：{}",
                     "unknown harness `{id}`; known: {}",
                     harness::SPECS.iter().map(|s| s.id).collect::<Vec<_>>().join(", ")
-                )
+                ))
             };
             match detected.iter().find(|d| d.spec.id == spec.id) {
                 Some(d) => v.push(d),
-                None => writeln!(
-                    out,
-                    "  {:<10} 未检测到（PATH 中没有 {}，也没有 ~/{}），跳过",
-                    spec.id, spec.bins[0], spec.dirs[0]
-                )?,
+                None => {
+                    let (bin, dir) = (spec.bins[0], spec.dirs[0]);
+                    let why = tr!(
+                        "未检测到（PATH 中没有 {bin}，也没有 ~/{dir}），跳过",
+                        "not found (no {bin} on PATH, no ~/{dir}), skipped"
+                    );
+                    writeln!(out, "{}", step(Mark::Info, &format!("{:<10} {why}", spec.id)))?
+                }
             }
         }
         v
@@ -485,7 +527,7 @@ fn flow(ctx: &Ctx, a: &SetupArgs, tty: bool, input: &mut dyn BufRead, out: &mut 
     let mut seen = std::collections::HashSet::new();
     picked.retain(|d| seen.insert(d.spec.id));
     if picked.is_empty() {
-        writeln!(out, "uniflo setup：没有可接入的 harness。")?;
+        writeln!(out, "{}", tr!("uniflo setup：没有可接入的 harness", "uniflo setup: no harness to connect"))?;
         return Ok(());
     }
     let claude = picked.iter().any(|d| d.spec.id == "claude");
@@ -496,11 +538,14 @@ fn flow(ctx: &Ctx, a: &SetupArgs, tty: bool, input: &mut dyn BufRead, out: &mut 
                 && ask_yes(
                     input,
                     out,
-                    "为 Claude Code 安装 SessionStart hook（新会话开头附上本项目最近的会话列表）？",
+                    &tr!(
+                        "为 Claude Code 加 SessionStart hook（新会话开头附上本项目最近的会话列表）？",
+                        "Add a Claude Code SessionStart hook (new sessions start with this project's recent sessions)?"
+                    ),
                     false,
                 )));
     let todo = plan(ctx, mode, &picked, hook);
-    print_plan(ctx, &todo, out, "接入")?;
+    print_plan(ctx, &todo, out)?;
     if !confirmed(a, tty, input, out)? {
         return Ok(());
     }
@@ -510,26 +555,63 @@ fn flow(ctx: &Ctx, a: &SetupArgs, tty: bool, input: &mut dyn BufRead, out: &mut 
     st.mode = Some(mode);
     st.binary = Some(ctx.bin.clone());
     st.save(&ctx.state_path)?;
-    writeln!(out, "完成。记录：{}；撤销：`uniflo setup --uninstall`。", ctx.state_path.display())?;
+    let n = todo.items.len();
+    writeln!(
+        out,
+        "{}",
+        tr!(
+            "完成：{n} 个 harness。记录 {}；撤销 `uniflo setup --uninstall`",
+            "Done: {n} harnesses. Record {}; undo with `uniflo setup --uninstall`",
+            ctx.state_path.display()
+        )
+    )?;
+    Ok(())
+}
+
+/// The one line `uniflo update` prints for a silent refresh, plus one per harness that failed.
+fn refreshed(st: &State, known: &[&Detected], mode: Mode, out: &mut dyn Write) -> Result<()> {
+    if known.is_empty() {
+        return Ok(());
+    }
+    let ids: Vec<&str> = known.iter().map(|d| d.spec.id).collect();
+    let (list, label) = (ids.join(", "), mode.label());
+    writeln!(
+        out,
+        "{}",
+        step(Mark::Ok, &tr!("agent 接入已刷新：{list}（{label}）", "agent setup refreshed: {list} ({label})"))
+    )?;
+    for id in ids {
+        if let Some(r) = st.harnesses.get(id).filter(|r| matches!(r.result.as_str(), "failed" | "occupied")) {
+            let detail = r.detail.as_deref().unwrap_or("");
+            writeln!(out, "{}", step(Mark::Warn, &format!("{id:<10} {detail}")))?;
+        }
+    }
     Ok(())
 }
 
 /// Whether to write: `--yes`, or a confirmed prompt in a terminal. Prints why not otherwise.
 fn confirmed(a: &SetupArgs, tty: bool, input: &mut dyn BufRead, out: &mut dyn Write) -> Result<bool> {
     if a.dry_run {
-        writeln!(out, "（预演：未写入任何文件）")?;
+        writeln!(out, "{}", tr!("（预演：未写入任何文件）", "(dry run: nothing written)"))?;
         return Ok(false);
     }
     if a.yes {
         return Ok(true);
     }
     if !tty {
-        writeln!(out, "（非交互环境：只打印计划，未写入任何文件；确认无误后加 --yes 执行）")?;
+        writeln!(
+            out,
+            "{}",
+            tr!(
+                "（非交互环境：只打印计划，未写入任何文件；确认无误后加 --yes 执行）",
+                "(not a terminal: plan only, nothing written; add --yes to apply it)"
+            )
+        )?;
         return Ok(false);
     }
-    let yes = ask_yes(input, out, "确认执行？", true);
+    let yes = ask_yes(input, out, &tr!("确认执行？", "Apply?"), true);
     if !yes {
-        writeln!(out, "已取消，未写入任何文件。")?;
+        writeln!(out, "{}", tr!("已取消，未写入任何文件", "cancelled, nothing written"))?;
     }
     Ok(yes)
 }
@@ -554,13 +636,29 @@ fn ask_yes(input: &mut dyn BufRead, out: &mut dyn Write, q: &str, default: bool)
 }
 
 fn ask_mode(input: &mut dyn BufRead, out: &mut dyn Write) -> Result<Mode> {
-    writeln!(out, "选择 agent 接入方式：")?;
-    writeln!(out, "  1) MCP（默认）：agent 直接调用 uniflo 工具查会话、检索、用量")?;
-    writeln!(out, "  2) Skill：agent 按说明使用 uniflo 命令行 / REST")?;
-    writeln!(out, "  3) 两者")?;
-    writeln!(out, "  4) 跳过")?;
+    writeln!(out, "{}", tr!("接入方式：", "How should agents connect?"))?;
+    for (n, name, what) in [
+        (
+            1,
+            tr!("MCP（推荐）", "MCP (recommended)"),
+            tr!(
+                "agent 直接调用 uniflo 工具查会话、检索、用量",
+                "agents call uniflo tools for sessions, search and usage"
+            ),
+        ),
+        (
+            2,
+            "Skill".into(),
+            tr!("agent 按说明使用 uniflo 命令行 / REST", "agents follow instructions to use the uniflo CLI / REST"),
+        ),
+        (3, tr!("两者", "both"), String::new()),
+        (4, tr!("跳过", "skip"), String::new()),
+    ] {
+        let pad = if what.is_empty() { 0 } else { 18usize.saturating_sub(crate::update::width(&name)) };
+        writeln!(out, "  {n}) {name}{}{what}", " ".repeat(pad))?;
+    }
     loop {
-        write!(out, "请选择 [1]: ")?;
+        write!(out, "{}", tr!("选择 [1]：", "Choose [1]: "))?;
         out.flush()?;
         let Some(a) = read_answer(input) else { return Ok(Mode::None) };
         match a.as_str() {
@@ -570,7 +668,7 @@ fn ask_mode(input: &mut dyn BufRead, out: &mut dyn Write) -> Result<Mode> {
             "4" => return Ok(Mode::None),
             other => match Mode::parse(other) {
                 Some(m) => return Ok(m),
-                None => writeln!(out, "请输入 1–4。")?,
+                None => writeln!(out, "{}", tr!("请输入 1–4", "enter 1–4"))?,
             },
         }
     }
@@ -580,12 +678,19 @@ fn ask_agents<'a>(input: &mut dyn BufRead, out: &mut dyn Write, detected: &'a [D
     if detected.is_empty() {
         return Ok(Vec::new());
     }
-    writeln!(out, "检测到 {} 个 harness（默认全部接入）：", detected.len())?;
+    writeln!(out, "\n{}", tr!("检测到 {} 个 harness：", "{} harnesses found:", detected.len()))?;
     for (i, d) in detected.iter().enumerate() {
         writeln!(out, "  {:>2}) {:<10} {}", i + 1, d.spec.id, d.spec.name)?;
     }
     loop {
-        write!(out, "输入要接入的编号或 id（逗号分隔），回车为全部: ")?;
+        write!(
+            out,
+            "{}",
+            tr!(
+                "接入哪些？编号或 id，逗号分隔；回车 = 全部：",
+                "Which ones? Numbers or ids, comma-separated; Enter = all: "
+            )
+        )?;
         out.flush()?;
         let Some(a) = read_answer(input) else { return Ok(Vec::new()) };
         if a.is_empty() {
@@ -606,7 +711,7 @@ fn ask_agents<'a>(input: &mut dyn BufRead, out: &mut dyn Write, detected: &'a [D
             }
         }
         match bad {
-            Some(w) => writeln!(out, "不认识 `{w}`，请重新输入。")?,
+            Some(w) => writeln!(out, "{}", tr!("不认识 `{w}`，请重新输入", "unknown `{w}`, try again"))?,
             None => return Ok(v),
         }
     }
@@ -633,12 +738,19 @@ fn plan(ctx: &Ctx, mode: Mode, picked: &[&Detected], hook: bool) -> Plan {
                     match link_state(&link, &target, &shared) {
                         LinkState::Missing => Step::Link { link, target },
                         LinkState::Ours => {
-                            Step::Note(Note::Unchanged, format!("Skill 软链已存在：{}", ctx.env.show(&link)))
+                            let l = ctx.env.show(&link);
+                            Step::Note(Note::Unchanged, tr!("Skill 软链已就绪（{l}）", "Skill link in place ({l})"))
                         }
-                        LinkState::Other => Step::Note(
-                            Note::Occupied,
-                            format!("{} 已被占用（不是指向 Uniflo Skill 的软链），未改动", ctx.env.show(&link)),
-                        ),
+                        LinkState::Other => {
+                            let l = ctx.env.show(&link);
+                            Step::Note(
+                                Note::Occupied,
+                                tr!(
+                                    "{l} 已被占用（不是指向 Uniflo Skill 的软链），未改动",
+                                    "{l} is taken (not a link to the Uniflo Skill), left alone"
+                                ),
+                            )
+                        }
                     }
                 }
             });
@@ -655,7 +767,13 @@ fn plan(ctx: &Ctx, mode: Mode, picked: &[&Detected], hook: bool) -> Plan {
 fn mcp_steps(ctx: &Ctx, d: &Detected) -> Vec<Step> {
     let bin = ctx.bin.as_str();
     match &d.spec.mcp {
-        Mcp::None => vec![Step::Note(Note::Skipped, format!("{} 没有可用的 MCP 客户端，改装 Skill", d.spec.name))],
+        Mcp::None => {
+            let name = d.spec.name;
+            vec![Step::Note(
+                Note::Skipped,
+                tr!("{name} 没有 MCP 客户端，改装 Skill", "{name} has no MCP client, Skill instead"),
+            )]
+        }
         Mcp::File { file, key, shape } => {
             let path = ctx.env.file(file);
             let want = edit::entry(*shape, bin);
@@ -675,9 +793,13 @@ fn mcp_steps(ctx: &Ctx, d: &Detected) -> Vec<Step> {
                         o => vec![note_for(ctx, &probe_path, "mcp_servers.uniflo", o)],
                     };
                 }
+                let bin = d.spec.bins[0];
                 return vec![Step::Note(
                     Note::Skipped,
-                    format!("PATH 中没有 {}，无法用它的 mcp add 注册", d.spec.bins[0]),
+                    tr!(
+                        "PATH 中没有 {bin}，无法用它的 mcp add 注册",
+                        "no {bin} on PATH to register through its mcp add"
+                    ),
                 )];
             };
             let argv = |tpl: &[&str]| -> Vec<String> {
@@ -687,13 +809,20 @@ fn mcp_steps(ctx: &Ctx, d: &Detected) -> Vec<Step> {
             };
             match found {
                 Some(Ok(Some(p))) if p == bin => {
-                    vec![Step::Note(Note::Unchanged, format!("{} 中已有 uniflo，未变化", ctx.env.show(&probe_path)))]
+                    let f = ctx.env.show(&probe_path);
+                    vec![Step::Note(Note::Unchanged, tr!("MCP 已就绪（{f}）", "MCP in place ({f})"))]
                 }
                 Some(Ok(Some(_))) => vec![Step::Run { argv: argv(add), first: Some(argv(remove)) }],
-                Some(Err(())) => vec![Step::Note(
-                    Note::Occupied,
-                    format!("{} 中的 uniflo 条目不是 Uniflo 写入的，未覆盖", ctx.env.show(&probe_path)),
-                )],
+                Some(Err(())) => {
+                    let f = ctx.env.show(&probe_path);
+                    vec![Step::Note(
+                        Note::Occupied,
+                        tr!(
+                            "{f} 中的 uniflo 条目不是 Uniflo 写入的，未覆盖",
+                            "the uniflo entry in {f} was not written by Uniflo, left alone"
+                        ),
+                    )]
+                }
                 Some(Ok(None)) | None => vec![Step::Run { argv: argv(add), first: None }],
             }
         }
@@ -713,13 +842,19 @@ fn probe_cli(ctx: &Ctx, probe: &Probe) -> (PathBuf, Option<Result<Option<String>
 }
 
 fn note_for(ctx: &Ctx, path: &Path, what: &str, o: Outcome) -> Step {
+    let f = ctx.env.show(path);
     match o {
-        Outcome::Unchanged => Step::Note(Note::Unchanged, format!("{} 中的 {what} 已是最新", ctx.env.show(path))),
+        Outcome::Unchanged => Step::Note(Note::Unchanged, tr!("MCP 已就绪（{f}）", "MCP in place ({f})")),
         Outcome::Occupied => Step::Note(
             Note::Occupied,
-            format!("{} 中的 {what} 已被占用（不是 Uniflo 写入的），未覆盖", ctx.env.show(path)),
+            tr!(
+                "{f} 中的 {what} 已被占用（不是 Uniflo 写入的），未覆盖",
+                "{what} in {f} is taken (not written by Uniflo), left alone"
+            ),
         ),
-        Outcome::Invalid(e) => Step::Note(Note::Skipped, format!("{} 解析失败，跳过：{e}", ctx.env.show(path))),
+        Outcome::Invalid(e) => {
+            Step::Note(Note::Skipped, tr!("{f} 解析失败，跳过：{e}", "cannot parse {f}, skipped: {e}"))
+        }
         Outcome::Write { .. } => unreachable!("writes are steps"),
     }
 }
@@ -736,20 +871,32 @@ fn uninstall_plan(ctx: &Ctx, st: &State) -> Plan {
                 match (&spec.mcp, cli) {
                     (Mcp::Cli { remove, probe, .. }, Some(cli)) => match probe_cli(ctx, probe) {
                         (_, Some(Ok(None))) => {}
-                        (path, Some(Err(()))) => steps.push(Step::Note(
-                            Note::Occupied,
-                            format!("{} 中的 uniflo 已不是 Uniflo 写入的，保留", ctx.env.show(&path)),
-                        )),
+                        (path, Some(Err(()))) => {
+                            let f = ctx.env.show(&path);
+                            steps.push(Step::Note(
+                                Note::Occupied,
+                                tr!(
+                                    "{f} 中的 uniflo 已不是 Uniflo 写入的，保留",
+                                    "the uniflo entry in {f} is no longer Uniflo's, kept"
+                                ),
+                            ))
+                        }
                         _ => steps.push(Step::RunRemove {
                             argv: std::iter::once(cli.display().to_string())
                                 .chain(remove.iter().map(|w| (*w).to_owned()))
                                 .collect(),
                         }),
                     },
-                    _ => steps.push(Step::Note(
-                        Note::Skipped,
-                        format!("PATH 中没有 {}，请手动移除 uniflo 条目", spec.bins[0]),
-                    )),
+                    _ => {
+                        let bin = spec.bins[0];
+                        steps.push(Step::Note(
+                            Note::Skipped,
+                            tr!(
+                                "PATH 中没有 {bin}，请手动移除 uniflo 条目",
+                                "no {bin} on PATH: remove the uniflo entry yourself"
+                            ),
+                        ))
+                    }
                 }
             }
             Some(McpRec::Json { path, key, created }) => {
@@ -778,17 +925,20 @@ fn uninstall_plan(ctx: &Ctx, st: &State) -> Plan {
     }
 }
 
-fn print_plan(ctx: &Ctx, p: &Plan, out: &mut dyn Write, verb: &str) -> Result<()> {
-    if verb == "接入" {
-        writeln!(out, "uniflo setup：{verb}方式 {} · 可执行文件 {}", p.mode.label(), ctx.bin)?;
+fn print_plan(ctx: &Ctx, p: &Plan, out: &mut dyn Write) -> Result<()> {
+    if p.undo {
+        writeln!(out, "\n{}", tr!("撤销计划：", "Undo plan:"))?;
     } else {
-        writeln!(out, "uniflo setup：{verb}")?;
+        let (label, bin) = (p.mode.label(), &ctx.bin);
+        writeln!(out, "\n{}", tr!("接入计划 · {label} · {bin}", "Plan · {label} · {bin}"))?;
     }
     if let Some(f) = &p.skill {
-        writeln!(out, "  {:<10} 写入 Skill {}", "skill", ctx.env.show(f))?;
+        let f = ctx.env.show(f);
+        writeln!(out, "  {:<10} {}", "skill", tr!("写入 {f}", "write {f}"))?;
     }
     if let Some(f) = &p.unskill {
-        writeln!(out, "  {:<10} 删除 Skill {}", "skill", ctx.env.show(Path::new(f)))?;
+        let f = ctx.env.show(Path::new(f));
+        writeln!(out, "  {:<10} {}", "skill", tr!("删除 {f}", "delete {f}"))?;
     }
     for it in &p.items {
         for (i, s) in it.steps.iter().enumerate() {
@@ -797,14 +947,27 @@ fn print_plan(ctx: &Ctx, p: &Plan, out: &mut dyn Write, verb: &str) -> Result<()
         }
     }
     if let Some((f, cmd)) = &p.hook {
-        writeln!(out, "  {:<10} 编辑 {}：hooks.SessionStart 追加 `{cmd}`（改前备份）", "hook", ctx.env.show(f))?;
-    }
-    if let Some(h) = &p.unhook {
+        let f = ctx.env.show(f);
         writeln!(
             out,
-            "  {:<10} 编辑 {}：移除 uniflo 的 SessionStart hook（改前备份）",
+            "  {:<10} {}",
             "hook",
-            ctx.env.show(Path::new(&h.path))
+            tr!(
+                "编辑 {f}：hooks.SessionStart 追加 `{cmd}`（改前备份）",
+                "edit {f}: append `{cmd}` to hooks.SessionStart (backed up first)"
+            )
+        )?;
+    }
+    if let Some(h) = &p.unhook {
+        let f = ctx.env.show(Path::new(&h.path));
+        writeln!(
+            out,
+            "  {:<10} {}",
+            "hook",
+            tr!(
+                "编辑 {f}：移除 uniflo 的 SessionStart hook（改前备份）",
+                "edit {f}: remove the uniflo SessionStart hook (backed up first)"
+            )
         )?;
     }
     Ok(())
@@ -818,25 +981,37 @@ fn describe(ctx: &Ctx, s: &Step) -> String {
         }
         w.join(" ")
     };
+    let show = |p: &Path| ctx.env.show(p);
     match s {
-        Step::Run { argv, first: None } => format!("运行 {}", cmd(argv)),
-        Step::Run { argv, first: Some(f) } => format!("刷新路径：运行 {}，再运行 {}", cmd(f), cmd(argv)),
-        Step::Json { path, key, .. } => format!("编辑 {}：写入 {key}.uniflo（改前备份）", ctx.env.show(path)),
-        Step::Toml { path } => format!("编辑 {}：写入 [mcp_servers.uniflo]（改前备份）", ctx.env.show(path)),
-        Step::Link { link, target } => format!("Skill 软链 {} → {}", ctx.env.show(link), target.display()),
-        Step::Shared => "Skill：读取 ~/.agents/skills，无需软链".to_owned(),
-        Step::RunRemove { argv } => format!("运行 {}", cmd(argv)),
-        Step::JsonRemove { path, key, .. } => format!("编辑 {}：移除 {key}.uniflo（改前备份）", ctx.env.show(path)),
-        Step::TomlRemove { path, .. } => format!("编辑 {}：移除 [mcp_servers.uniflo]（改前备份）", ctx.env.show(path)),
-        Step::Unlink { link } => format!("删除软链 {}（仅当它指向 Uniflo Skill）", ctx.env.show(link)),
-        Step::Note(n, text) => format!(
-            "{}：{text}",
-            match n {
-                Note::Unchanged => "未变化",
-                Note::Skipped => "跳过",
-                Note::Occupied => "已占用",
-            }
+        Step::Run { argv, first: None } => tr!("运行 {}", "run {}", cmd(argv)),
+        Step::Run { argv, first: Some(f) } => {
+            tr!("刷新路径：运行 {}，再运行 {}", "refresh the path: run {}, then {}", cmd(f), cmd(argv))
+        }
+        Step::Json { path, key, .. } => {
+            tr!("编辑 {}：写入 {key}.uniflo（改前备份）", "edit {}: set {key}.uniflo (backed up first)", show(path))
+        }
+        Step::Toml { path } => tr!(
+            "编辑 {}：写入 [mcp_servers.uniflo]（改前备份）",
+            "edit {}: set [mcp_servers.uniflo] (backed up first)",
+            show(path)
         ),
+        Step::Link { link, target } => tr!("Skill 软链 {} → {}", "Skill link {} → {}", show(link), target.display()),
+        Step::Shared => tr!("Skill：读取 ~/.agents/skills，无需软链", "Skill: reads ~/.agents/skills, no link needed"),
+        Step::RunRemove { argv } => tr!("运行 {}", "run {}", cmd(argv)),
+        Step::JsonRemove { path, key, .. } => {
+            tr!("编辑 {}：移除 {key}.uniflo（改前备份）", "edit {}: remove {key}.uniflo (backed up first)", show(path))
+        }
+        Step::TomlRemove { path, .. } => tr!(
+            "编辑 {}：移除 [mcp_servers.uniflo]（改前备份）",
+            "edit {}: remove [mcp_servers.uniflo] (backed up first)",
+            show(path)
+        ),
+        Step::Unlink { link } => tr!(
+            "删除软链 {}（仅当它指向 Uniflo Skill）",
+            "delete link {} (only if it points at the Uniflo Skill)",
+            show(link)
+        ),
+        Step::Note(_, text) => text.clone(),
     }
 }
 
@@ -869,11 +1044,12 @@ fn apply(ctx: &Ctx, p: &Plan, st: &mut State, out: &mut dyn Write) -> Result<()>
                 Err(StepErr::Failed(m)) => bump(4, m),
             }
         }
-        let (rank, msg) = (worst, msgs.join("；"));
+        let (rank, msg) = (worst, msgs.join(" · "));
         let done = if p.undo { "removed" } else { "connected" };
         rec.result = ["unchanged", done, "skipped", "occupied", "failed"][rank as usize].to_owned();
         rec.detail = (!msg.is_empty()).then(|| msg.clone());
-        writeln!(out, "  {:<10} {:<9} {msg}", it.spec.id, rec.result)?;
+        let mark = [Mark::Ok, Mark::Ok, Mark::Info, Mark::Warn, Mark::Fail][rank as usize];
+        writeln!(out, "{}", step(mark, &format!("{:<10} {msg}", it.spec.id)))?;
     }
     if let Some((path, cmd)) = &p.hook {
         let text = std::fs::read_to_string(path).ok();
@@ -883,12 +1059,12 @@ fn apply(ctx: &Ctx, p: &Plan, st: &mut State, out: &mut dyn Write) -> Result<()>
                 st.backups.extend(b.map(|b| b.display().to_string()));
                 st.files.push(path.display().to_string());
                 st.hook = Some(FileRec { path: path.display().to_string(), created });
-                writeln!(out, "  {:<10} {:<9} {}", "hook", "connected", ctx.env.show(path))?;
+                writeln!(out, "{}", step(Mark::Ok, &format!("{:<10} {}", "hook", ctx.env.show(path))))?;
             }
             Outcome::Unchanged => {
                 st.hook.get_or_insert_with(|| FileRec { path: path.display().to_string(), created: Vec::new() });
             }
-            o => writeln!(out, "  {:<10} {:<9} {:?}", "hook", "skipped", o)?,
+            o => writeln!(out, "{}", step(Mark::Info, &format!("{:<10} {o:?}", "hook")))?,
         }
     }
     if let Some(h) = &p.unhook {
@@ -898,7 +1074,11 @@ fn apply(ctx: &Ctx, p: &Plan, st: &mut State, out: &mut dyn Write) -> Result<()>
             let b =
                 if text.is_empty() { edit::delete(&path, &ctx.stamp)? } else { edit::write(&path, &text, &ctx.stamp)? };
             st.backups.extend(b.map(|b| b.display().to_string()));
-            writeln!(out, "  {:<10} {:<9} {}", "hook", "removed", ctx.env.show(&path))?;
+            writeln!(
+                out,
+                "{}",
+                step(Mark::Ok, &format!("{:<10} {}", "hook", tr!("已移除 {}", "removed {}", ctx.env.show(&path))))
+            )?;
         }
     }
     if let Some(f) = &p.unskill {
@@ -935,15 +1115,13 @@ fn exec(
             }
             run_cli(ctx, argv).map_err(StepErr::Failed)?;
             rec.mcp = Some(McpRec::Cli);
-            Ok(Some(format!(
-                "已用 {} mcp add 注册",
-                Path::new(&argv[0]).file_name().unwrap_or_default().to_string_lossy()
-            )))
+            let cli = Path::new(&argv[0]).file_name().unwrap_or_default().to_string_lossy().into_owned();
+            Ok(Some(tr!("已用 {cli} mcp add 注册", "registered with {cli} mcp add")))
         }
         Step::RunRemove { argv } => {
             run_cli(ctx, argv).map_err(StepErr::Failed)?;
             rec.mcp = None;
-            Ok(Some("已移除 uniflo".into()))
+            Ok(Some(tr!("已移除 uniflo", "removed uniflo")))
         }
         Step::Json { path, key, want } => {
             let text = std::fs::read_to_string(path).ok();
@@ -957,7 +1135,7 @@ fn exec(
                         _ => created,
                     };
                     rec.mcp = Some(McpRec::Json { path: path.display().to_string(), key: (*key).to_owned(), created });
-                    Ok(Some(format!("已写入 {}", ctx.env.show(path))))
+                    Ok(Some(tr!("已写入 {}", "wrote {}", ctx.env.show(path))))
                 }
                 o => match note_for(ctx, path, &format!("{key}.uniflo"), o) {
                     Step::Note(n, m) => Err(StepErr::Note(n, m)),
@@ -973,7 +1151,7 @@ fn exec(
                     backups.extend(b.map(|b| b.display().to_string()));
                     files.push(path.display().to_string());
                     rec.mcp = Some(McpRec::Toml { path: path.display().to_string(), created });
-                    Ok(Some(format!("已写入 {}", ctx.env.show(path))))
+                    Ok(Some(tr!("已写入 {}", "wrote {}", ctx.env.show(path))))
                 }
                 o => match note_for(ctx, path, "mcp_servers.uniflo", o) {
                     Step::Note(n, m) => Err(StepErr::Note(n, m)),
@@ -991,9 +1169,9 @@ fn exec(
                 .map_err(|e| failed(anyhow::Error::from(e).context(format!("link {}", link.display()))))?;
             links.push(link.display().to_string());
             rec.link = Some(link.display().to_string());
-            Ok(Some(format!("Skill 软链 {}", ctx.env.show(link))))
+            Ok(Some(tr!("Skill 软链 {}", "Skill link {}", ctx.env.show(link))))
         }
-        Step::Shared => Ok(Some("Skill 在 ~/.agents/skills".into())),
+        Step::Shared => Ok(Some(tr!("Skill 在 ~/.agents/skills", "Skill in ~/.agents/skills"))),
         Step::Unlink { link } => {
             let shared = ctx.skill_dir();
             let target = relative(link.parent().unwrap_or(Path::new("/")), &shared);
@@ -1001,14 +1179,18 @@ fn exec(
                 LinkState::Ours => {
                     unlink(link).map_err(|e| failed(e.into()))?;
                     rec.link = None;
-                    Ok(Some(format!("已删除软链 {}", ctx.env.show(link))))
+                    Ok(Some(tr!("已删除软链 {}", "deleted link {}", ctx.env.show(link))))
                 }
                 LinkState::Missing => {
                     rec.link = None;
                     Ok(None)
                 }
                 LinkState::Other => {
-                    Err(StepErr::Note(Note::Occupied, format!("{} 不再指向 Uniflo Skill，保留", ctx.env.show(link))))
+                    let l = ctx.env.show(link);
+                    Err(StepErr::Note(
+                        Note::Occupied,
+                        tr!("{l} 不再指向 Uniflo Skill，保留", "{l} no longer points at the Uniflo Skill, kept"),
+                    ))
                 }
             }
         }
@@ -1030,17 +1212,22 @@ fn remove_file_entry(
             let b = b.map_err(|e| StepErr::Failed(format!("{e:#}")))?;
             backups.extend(b.map(|b| b.display().to_string()));
             rec.mcp = None;
-            Ok(Some(format!("已从 {} 移除 uniflo", ctx.env.show(path))))
+            Ok(Some(tr!("已从 {} 移除 uniflo", "removed uniflo from {}", ctx.env.show(path))))
         }
         Outcome::Unchanged => {
             rec.mcp = None;
             Ok(None)
         }
         Outcome::Occupied => {
-            Err(StepErr::Note(Note::Occupied, format!("{} 中的 uniflo 不是 Uniflo 写入的，保留", ctx.env.show(path))))
+            let f = ctx.env.show(path);
+            Err(StepErr::Note(
+                Note::Occupied,
+                tr!("{f} 中的 uniflo 不是 Uniflo 写入的，保留", "the uniflo entry in {f} is not Uniflo's, kept"),
+            ))
         }
         Outcome::Invalid(e) => {
-            Err(StepErr::Note(Note::Skipped, format!("{} 解析失败，未改动：{e}", ctx.env.show(path))))
+            let f = ctx.env.show(path);
+            Err(StepErr::Note(Note::Skipped, tr!("{f} 解析失败，未改动：{e}", "cannot parse {f}, left unchanged: {e}")))
         }
     }
 }

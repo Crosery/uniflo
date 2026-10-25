@@ -59,13 +59,15 @@ for _ in $(seq 50); do curl -fsS "http://127.0.0.1:$port/index/uniflo" >/dev/nul
 echo "release server: http://127.0.0.1:$port (pid $server_pid) · $target · $old_v → $new_v"
 
 # A clean environment per machine: only system tools on PATH, everything Uniflo writes under $m.
+# UNIFLO_LANG=zh pins message language regardless of this machine's locale/desktop language, so
+# the checks below can assert fixed Chinese text; the English path is exercised separately.
 in_machine() {
   local m=$1
   shift
   mkdir -p "$m/home" "$m/tmp"
   env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME="$m/home" UNIFLO_HOME="$m/home" UNIFLO_CONFIG_DIR="$m/cfg" \
     TMPDIR="$m/tmp" UNIFLO_INSTALL_DIR="$m/bin" UNIFLO_RELEASE_BASE_URL="http://127.0.0.1:$port/releases" \
-    UNIFLO_UPDATE_INDEX_URL="http://127.0.0.1:$port/index/uniflo" "$@"
+    UNIFLO_UPDATE_INDEX_URL="http://127.0.0.1:$port/index/uniflo" UNIFLO_LANG=zh "$@"
 }
 
 # --- install.sh, not on a terminal ---------------------------------------------------------
@@ -80,6 +82,14 @@ grep -q '跳过 uniflo setup' "$work/a.out" && [[ ! -e $m/cfg/setup.json ]] || f
 [[ -z "$(ls -A "$m/tmp")" ]] || fail "install.sh left temp files"
 pass "install.sh (non-TTY): uniflo $old_v installed, install.json written, setup skipped, temp dir cleaned"
 sed 's/^/      /' "$work/a.out"
+
+# --- install.sh, UNIFLO_LANG=en: the English path is exercised too -------------------------
+m=$work/a-en
+in_machine "$m" env UNIFLO_LANG=en sh "$root/scripts/install.sh" </dev/null >"$work/a-en.out" 2>&1 ||
+  fail "install.sh (en) exit $?: $(cat "$work/a-en.out")"
+grep -q 'skipping uniflo setup' "$work/a-en.out" || fail "UNIFLO_LANG=en did not print English text: $(cat "$work/a-en.out")"
+pass "install.sh (UNIFLO_LANG=en, non-TTY): English messages printed"
+sed 's/^/      /' "$work/a-en.out"
 
 # --- install.sh with one byte of the package flipped ---------------------------------------
 cp "$pkg_old" "$work/pkg.bak"
@@ -103,15 +113,15 @@ tty_install() {
 installer=(perl -e 'alarm 60; exec @ARGV or die' script -q /dev/null sh "$root/scripts/install.sh")
 m=$work/c
 tty_install "$m" "${installer[@]}" || fail "TTY install: $(cat "$m.out")"
-grep -q '选择 agent 接入方式' "$m.out" && [[ "$(field "$m/cfg/setup.json" asked)" == True ]] || fail "setup did not run on a terminal: $(cat "$m.out")"
+grep -q '接入方式' "$m.out" && [[ "$(field "$m/cfg/setup.json" asked)" == True ]] || fail "setup did not run on a terminal: $(cat "$m.out")"
 pass "install.sh (TTY): uniflo setup ran (answered 'skip', recorded asked=true in setup.json)"
 m=$work/d
 tty_install "$m" "${installer[@]}" --no-setup || fail "TTY --no-setup install"
-grep -q '跳过 uniflo setup' "$m.out" && ! grep -q '选择 agent 接入方式' "$m.out" && [[ ! -e $m/cfg/setup.json ]] || fail "--no-setup ran setup"
+grep -q '跳过 uniflo setup' "$m.out" && ! grep -q '接入方式' "$m.out" && [[ ! -e $m/cfg/setup.json ]] || fail "--no-setup ran setup"
 pass "install.sh (TTY, --no-setup): setup skipped"
 m=$work/e
 tty_install "$m" UNIFLO_NO_SETUP=1 "${installer[@]}" || fail "TTY UNIFLO_NO_SETUP install"
-grep -q '跳过 uniflo setup' "$m.out" && ! grep -q '选择 agent 接入方式' "$m.out" && [[ ! -e $m/cfg/setup.json ]] || fail "UNIFLO_NO_SETUP=1 ran setup"
+grep -q '跳过 uniflo setup' "$m.out" && ! grep -q '接入方式' "$m.out" && [[ ! -e $m/cfg/setup.json ]] || fail "UNIFLO_NO_SETUP=1 ran setup"
 pass "install.sh (TTY, UNIFLO_NO_SETUP=1): setup skipped"
 
 # --- binary self-upgrade ---------------------------------------------------------------------

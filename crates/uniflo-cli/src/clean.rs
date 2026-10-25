@@ -1,6 +1,7 @@
 //! `uniflo clean` (plan → confirm → archive + trash) and `uniflo archive [ls|rm <key>]`, against
 //! the daemon's write endpoints or, without a daemon, in-process.
 
+use crate::i18n::tr;
 use crate::render::date_time;
 use crate::{Source, enc};
 use anyhow::{Result, bail};
@@ -50,7 +51,10 @@ fn local(engine: &std::sync::Arc<Engine>) -> Result<Cleanup> {
 
 pub fn clean(src: &Source, a: &CleanArgs) -> Result<()> {
     if a.keys.is_empty() && a.query.is_none() {
-        bail!("name sessions (`uniflo clean <key>…`) or select them with --query");
+        bail!(tr!(
+            "请指定会话（`uniflo clean <key>…`）或用 --query 选择",
+            "name sessions (`uniflo clean <key>…`) or select them with --query"
+        ));
     }
     // Unresolvable keys go through as given: the plan reports them as unknown.
     let sessions = a.keys.iter().map(|k| src.resolve(k).map_or_else(|_| k.clone(), |s| s.key)).collect();
@@ -73,14 +77,23 @@ pub fn clean(src: &Source, a: &CleanArgs) -> Result<()> {
     }
     if !a.yes {
         if !std::io::stdin().is_terminal() {
-            bail!("not a terminal: add --yes to execute this plan (or --dry-run to only look)");
+            bail!(tr!(
+                "当前不是终端：加 `--yes` 执行这个计划（或加 `--dry-run` 只查看）",
+                "not a terminal: add --yes to execute this plan (or --dry-run to only look)"
+            ));
         }
-        eprint!("move {eligible} session(s) to the trash after archiving them? [y/N] ");
+        eprint!(
+            "{}",
+            tr!(
+                "归档后把 {eligible} 个会话移入回收站？[y/N] ",
+                "move {eligible} session(s) to the trash after archiving them? [y/N] "
+            )
+        );
         std::io::stderr().flush()?;
         let mut line = String::new();
         std::io::stdin().lock().read_line(&mut line)?;
         if !matches!(line.trim(), "y" | "Y" | "yes") {
-            bail!("cancelled; nothing changed");
+            bail!(tr!("已取消，没有改动", "cancelled; nothing changed"));
         }
     }
     let report: CleanupReport = match (src, svc) {
@@ -89,8 +102,8 @@ pub fn clean(src: &Source, a: &CleanArgs) -> Result<()> {
         }
         (_, Some(svc)) => match svc.execute(&plan.plan_id) {
             Ok(r) => r,
-            Err(ExecError::Expired) => bail!("plan expired; run again"),
-            Err(ExecError::Unknown) => bail!("unknown plan"),
+            Err(ExecError::Expired) => bail!(tr!("计划已过期，请重新运行", "plan expired; run again")),
+            Err(ExecError::Unknown) => bail!(tr!("未知的计划", "unknown plan")),
         },
         (Source::Local(_), None) => unreachable!(),
     };
@@ -117,30 +130,44 @@ pub fn archive(src: &Source, a: &ArchiveArgs) -> Result<()> {
                 return Ok(());
             }
             for e in &list.archives {
-                let title = e.title.as_deref().unwrap_or("(untitled)");
-                let restored = if e.restored { "  [restored]" } else { "" };
+                let untitled = tr!("（无标题）", "(untitled)");
+                let title = e.title.as_deref().unwrap_or(&untitled);
+                let restored = if e.restored { tr!("  [已还原]", "  [restored]") } else { String::new() };
                 println!(
-                    "{:<48} {:>9}  (was {:>9})  {}  {title}{restored}",
-                    e.key,
-                    bytes(e.bytes),
-                    bytes(e.source_bytes),
-                    date_time(e.archived_at)
+                    "{}",
+                    tr!(
+                        "{:<48} {:>9}  (原 {:>9})  {}  {title}{restored}",
+                        "{:<48} {:>9}  (was {:>9})  {}  {title}{restored}",
+                        e.key,
+                        bytes(e.bytes),
+                        bytes(e.source_bytes),
+                        date_time(e.archived_at)
+                    )
                 );
             }
-            eprintln!("{} archive(s), {}", list.archives.len(), bytes(list.bytes));
+            eprintln!("{}", tr!("{} 个归档，共 {}", "{} archive(s), {}", list.archives.len(), bytes(list.bytes)));
         }
         Some(ArchiveCmd::Rm { key }) => {
             let r: ArchiveRemoved = match src {
                 Source::Daemon(c) => c.write_json("DELETE", &format!("/v1/archive/{}", enc(key)), None)?,
                 Source::Local(engine) => match local(engine)?.remove_archive(key)? {
                     Some(r) => r,
-                    None => bail!("no archive for {key}"),
+                    None => bail!(tr!("没有 {key} 的归档", "no archive for {key}")),
                 },
             };
             if a.json {
                 println!("{}", serde_json::to_string_pretty(&r)?);
             } else {
-                println!("deleted {} archive(s), {}: {}", r.removed.len(), bytes(r.bytes), r.removed.join(" "));
+                println!(
+                    "{}",
+                    tr!(
+                        "删除了 {} 个归档，共 {}：{}",
+                        "deleted {} archive(s), {}: {}",
+                        r.removed.len(),
+                        bytes(r.bytes),
+                        r.removed.join(" ")
+                    )
+                );
             }
         }
     }
@@ -148,13 +175,17 @@ pub fn archive(src: &Source, a: &ArchiveArgs) -> Result<()> {
 }
 
 fn print_plan(p: &CleanupPlan, to_stderr: bool) {
-    let mut lines = vec![format!("plan {} (expires {})", p.plan_id, date_time(p.expires_at))];
+    let mut lines = vec![tr!("计划 {}（过期时间 {}）", "plan {} (expires {})", p.plan_id, date_time(p.expires_at))];
     for c in &p.sessions {
         let title = c.title.as_deref().unwrap_or("");
         if c.eligible {
-            let kids =
-                if c.children.is_empty() { String::new() } else { format!(" +{} sub-agent(s)", c.children.len()) };
-            lines.push(format!(
+            let kids = if c.children.is_empty() {
+                String::new()
+            } else {
+                tr!(" +{} 个子代理", " +{} sub-agent(s)", c.children.len())
+            };
+            lines.push(tr!(
+                "  可清理  {}  {} → 归档 ~{}{kids}  {title}",
                 "  ok    {}  {} → archive ~{}{kids}  {title}",
                 c.key,
                 bytes(c.bytes),
@@ -162,11 +193,12 @@ fn print_plan(p: &CleanupPlan, to_stderr: bool) {
             ));
         } else {
             let why = c.message.as_deref().or(c.reason.as_deref()).unwrap_or("");
-            lines.push(format!("  skip  {}  {why}", c.key));
+            lines.push(tr!("  跳过  {}  {why}", "  skip  {}  {why}", c.key));
         }
     }
     let n = p.sessions.iter().filter(|c| c.eligible).count();
-    lines.push(format!(
+    lines.push(tr!(
+        "{} 个会话中有 {n} 个可清理：释放 {}，归档 ~{}",
         "{n} of {} session(s) can be cleaned: frees {}, archive ~{}",
         p.sessions.len(),
         bytes(p.freed_bytes),
@@ -184,14 +216,31 @@ fn print_plan(p: &CleanupPlan, to_stderr: bool) {
 fn print_report(r: &CleanupReport) {
     for x in &r.results {
         let status = match x.status {
-            CleanupStatus::Archived => "archived",
-            CleanupStatus::Failed => "FAILED",
-            CleanupStatus::Skipped => "skipped",
+            CleanupStatus::Archived => tr!("已归档", "archived"),
+            CleanupStatus::Failed => tr!("失败", "FAILED"),
+            CleanupStatus::Skipped => tr!("已跳过", "skipped"),
         };
         let why = x.message.as_deref().or(x.reason.as_deref()).map(|m| format!("  {m}")).unwrap_or_default();
-        println!("  {status:<8} {}  freed {}  archive {}{why}", x.key, bytes(x.freed_bytes), bytes(x.archive_bytes));
+        println!(
+            "{}",
+            tr!(
+                "  {status:<8} {}  释放 {}  归档 {}{why}",
+                "  {status:<8} {}  freed {}  archive {}{why}",
+                x.key,
+                bytes(x.freed_bytes),
+                bytes(x.archive_bytes)
+            )
+        );
     }
-    println!("freed {} into the trash, archives {}", bytes(r.freed_bytes), bytes(r.archive_bytes));
+    println!(
+        "{}",
+        tr!(
+            "释放 {} 到回收站，归档 {}",
+            "freed {} into the trash, archives {}",
+            bytes(r.freed_bytes),
+            bytes(r.archive_bytes)
+        )
+    );
 }
 
 fn bytes(n: u64) -> String {
