@@ -8,6 +8,7 @@
 use crate::adapter::{Adapter, Cursor, HistoryQuery, LiveSession, MetaPatch, ReadOutput, Record};
 use crate::archive::ArchiveStore;
 use crate::cache::{self, CacheFile, CachedSession, CachedSource};
+use crate::family;
 use crate::pricing::Pricing;
 use crate::status::{StatusTracker, Windows, effective};
 use crate::usage::UsageIndex;
@@ -21,7 +22,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, mpsc};
-use uniflo_schema::{Body, Envelope, Event, Harness, SCHEMA_VERSION, Session, Status, UsageProgress, session_key};
+use uniflo_schema::{
+    Body, Envelope, Event, Harness, SCHEMA_VERSION, Session, SessionFamily, Status, UsageProgress, session_key,
+};
 
 #[path = "engine_usage.rs"]
 mod usage_glue;
@@ -98,6 +101,7 @@ impl Entry {
                 harness: harness.to_owned(),
                 id: id.to_owned(),
                 parent: None,
+                parent_call: None,
                 title: None,
                 cwd: None,
                 model: None,
@@ -110,6 +114,7 @@ impl Entry {
                 status_reason: None,
                 pid: None,
                 usage: None,
+                family: None,
                 archived: false,
             },
             tracker_since: 0,
@@ -128,6 +133,9 @@ impl Entry {
         let s = &mut self.session;
         if let Some(par) = p.parent {
             s.parent = Some(session_key(harness, &par));
+        }
+        if p.parent_call.is_some() {
+            s.parent_call = p.parent_call;
         }
         if let Some((rank, t)) = p.title {
             let t = preview(&t, TITLE_CHARS);
@@ -226,6 +234,67 @@ struct State {
     sources: HashMap<PathBuf, SourceState>,
 }
 
+impl State {
+    /// Keys of the sessions above `keys` (nearest first, each once): the ones whose family an
+    /// update to `keys` can change.
+    fn ancestors_of<'a>(&self, keys: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+        let parent_of = |k: &str| self.sessions.get(k).and_then(|e| e.session.parent.as_deref());
+        let mut out: Vec<String> = Vec::new();
+        for k in keys {
+            for a in family::ancestors(k, parent_of) {
+                if self.sessions.contains_key(a) && !out.iter().any(|x| x == a) {
+                    out.push(a.to_owned());
+                }
+            }
+        }
+        out
+    }
+
+    /// The sessions whose family a change to `keys` can touch: the ones above them, and the
+    /// ones among them that have descendants (a family includes its own session).
+    fn family_roots<'a>(&self, keys: impl IntoIterator<Item = &'a str> + Clone) -> Vec<String> {
+        let mut roots: Vec<String> = keys
+            .clone()
+            .into_iter()
+            .filter(|k| self.sessions.get(*k).is_some_and(|e| e.session.family.is_some()))
+            .map(str::to_owned)
+            .collect();
+        let have: HashSet<String> = roots.iter().cloned().collect();
+        roots.extend(self.ancestors_of(keys).into_iter().filter(|a| !have.contains(a)));
+        roots
+    }
+
+    /// Recompute `Session.family` of `roots`, one pass over the sessions for the parent index.
+    /// Returns the keys whose family changed.
+    fn recompute_families(&mut self, roots: &[String]) -> Vec<String> {
+        if roots.is_empty() {
+            return Vec::new();
+        }
+        let fresh: Vec<Option<Box<SessionFamily>>> = {
+            let forest = family::Forest::new(
+                self.sessions.iter().filter_map(|(k, e)| Some((k.as_str(), e.session.parent.as_deref()?))),
+            );
+            let usage = |k: &str| self.sessions.get(k).and_then(|e| e.session.usage.as_deref());
+            roots.iter().map(|r| forest.family(r, usage).map(Box::new)).collect()
+        };
+        let mut changed = Vec::new();
+        for (k, f) in roots.iter().zip(fresh) {
+            if let Some(e) = self.sessions.get_mut(k)
+                && e.session.family != f
+            {
+                e.session.family = f;
+                changed.push(k.clone());
+            }
+        }
+        changed
+    }
+
+    fn recompute_all_families(&mut self) -> Vec<String> {
+        let all: Vec<String> = self.sessions.keys().cloned().collect();
+        self.recompute_families(&all)
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct Stats {
     pub uptime_ms: i64,
@@ -294,6 +363,9 @@ pub struct Engine {
     started: i64,
     pricing: Pricing,
     usage: RwLock<UsageIndex>,
+    /// The first complete build finished: sources queued later (new sessions) publish their
+    /// totals, though they make `usage_progress().ready` false while they build.
+    usage_settled: AtomicBool,
     usage_tx: Mutex<Option<mpsc::UnboundedSender<usage_glue::UsageMsg>>>,
     archive: Option<Arc<ArchiveStore>>,
 }
@@ -301,7 +373,7 @@ pub struct Engine {
 impl Engine {
     pub fn new(adapters: Vec<Arc<dyn Adapter>>, opts: EngineOptions) -> Arc<Self> {
         let ids: Vec<&str> = adapters.iter().map(|a| a.info().id).collect();
-        let tag = format!("uniflo-core/{}/schema{}-r2/{}", env!("CARGO_PKG_VERSION"), SCHEMA_VERSION, ids.join(","));
+        let tag = format!("uniflo-core/{}/schema{}-r3/{}", env!("CARGO_PKG_VERSION"), SCHEMA_VERSION, ids.join(","));
         let (tx, _) = broadcast::channel(opts.replay.max(1024));
         let probing = adapters.iter().map(|_| AtomicBool::new(false)).collect();
         let pricing = Pricing::new(opts.data_dir.as_ref().map(|d| d.join("pricing")));
@@ -322,6 +394,7 @@ impl Engine {
             started: now_ms(),
             pricing,
             usage: RwLock::new(UsageIndex::default()),
+            usage_settled: AtomicBool::new(false),
             usage_tx: Mutex::new(None),
             archive,
         })
@@ -504,6 +577,8 @@ impl Engine {
             }
         }
         let stale = self.windows();
+        let mut linked: Vec<String> = Vec::new();
+        let mut sent: HashSet<String> = HashSet::new();
         for (key, prev) in before {
             let Some(entry) = st.sessions.get_mut(&key) else { continue };
             if entry.session.updated_at == 0 {
@@ -511,8 +586,22 @@ impl Engine {
             }
             let changed = entry.refresh(now, stale);
             let is_new = prev.is_none();
+            if live && (is_new || prev.as_ref().is_some_and(|p| p.parent != entry.session.parent)) {
+                linked.push(key.clone());
+            }
             if live && (is_new || changed || prev.is_some_and(|p| sig(&p) != sig(&entry.session))) {
                 pending.push(Pending::Session(entry.session.clone()));
+                sent.insert(key);
+            }
+        }
+        // A session appeared or changed parent: the families above it grow or shrink, and it may
+        // itself be the parent of sub-sessions indexed before it. (While indexing, `index()`
+        // computes every family once at the end instead.)
+        let mut roots = st.ancestors_of(linked.iter().map(String::as_str));
+        roots.extend(linked);
+        for k in st.recompute_families(&roots) {
+            if live && sent.insert(k.clone()) {
+                pending.extend(st.sessions.get(&k).map(|e| Pending::Session(e.session.clone())));
             }
         }
         self.dirty.store(true, Ordering::Relaxed);
@@ -526,11 +615,16 @@ impl Engine {
         self.dirty.store(true, Ordering::Relaxed);
         self.usage_gone(src);
         let mut out = Vec::new();
-        for k in s.keys {
-            if st.sessions.get(&k).is_some_and(|e| e.src == src) {
-                st.sessions.remove(&k);
-                out.push(Pending::Removed(k));
-            }
+        let gone: Vec<String> =
+            s.keys.into_iter().filter(|k| st.sessions.get(k).is_some_and(|e| e.src == src)).collect();
+        let above = st.ancestors_of(gone.iter().map(String::as_str));
+        for k in gone {
+            st.sessions.remove(&k);
+            out.push(Pending::Removed(k));
+        }
+        // The families above the removed sessions shrink.
+        for k in st.recompute_families(&above) {
+            out.extend(st.sessions.get(&k).map(|e| Pending::Session(e.session.clone())));
         }
         out
     }
@@ -640,7 +734,11 @@ impl Engine {
             }
         });
 
-        self.load_archived(&mut self.state.write().unwrap());
+        {
+            let mut st = self.state.write().unwrap();
+            self.load_archived(&mut st);
+            st.recompute_all_families();
+        }
         for i in 0..self.adapters.len() {
             if let Some(list) = self.adapters[i].live() {
                 self.apply_live(i, list, now_ms());

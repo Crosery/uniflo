@@ -926,16 +926,71 @@ pub struct Tokens {
     pub cache_write: u64,
 }
 
-/// USD for one step: `(input×in + output×out + cache_read×cr + cache_write×cw) / 1e6`, with the
-/// whole step billed at the highest tier whose `above` the full prompt exceeds.
+impl Tokens {
+    /// What the model saw: the prompt size that picks a tier.
+    pub fn prompt(&self) -> u64 {
+        self.input + self.cache_read + self.cache_write
+    }
+}
+
+/// The unit prices one step is billed at (USD per million tokens), after the tier choice and
+/// the `cache_write` default. The single source of both a step's amount and its split.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Rates {
+    pub input: f64,
+    pub output: f64,
+    pub cache_read: f64,
+    pub cache_write: f64,
+    /// `above` of the tier the step was billed at.
+    pub tier_above: Option<u64>,
+}
+
+impl Rates {
+    /// Prices of `s` for a step of `t`: the whole step is billed at the highest tier whose
+    /// `above` the full prompt exceeds.
+    pub fn of(s: &PriceSegment, t: Tokens) -> Rates {
+        let prompt = t.prompt();
+        match s.tiers.iter().filter(|x| prompt > x.above).max_by_key(|x| x.above) {
+            Some(x) => Rates {
+                input: x.input,
+                output: x.output,
+                cache_read: x.cache_read,
+                cache_write: x.cache_write.unwrap_or(x.input * CACHE_WRITE_MULTIPLIER),
+                tier_above: Some(x.above),
+            },
+            None => Rates {
+                input: s.input,
+                output: s.output,
+                cache_read: s.cache_read,
+                cache_write: s.cache_write.unwrap_or(s.input * CACHE_WRITE_MULTIPLIER),
+                tier_above: None,
+            },
+        }
+    }
+
+    /// USD: `(input×in + output×out + cache_read×cr + cache_write×cw) / 1e6`.
+    pub fn cost(&self, t: Tokens) -> f64 {
+        (t.input as f64 * self.input
+            + t.output as f64 * self.output
+            + t.cache_read as f64 * self.cache_read
+            + t.cache_write as f64 * self.cache_write)
+            / 1e6
+    }
+
+    /// [`Rates::cost`] split by token class: `[input, output, cache_read, cache_write]`.
+    pub fn parts(&self, t: Tokens) -> [f64; 4] {
+        [
+            t.input as f64 * self.input / 1e6,
+            t.output as f64 * self.output / 1e6,
+            t.cache_read as f64 * self.cache_read / 1e6,
+            t.cache_write as f64 * self.cache_write / 1e6,
+        ]
+    }
+}
+
+/// USD for one step of segment `s` (see [`Rates`]).
 pub fn step_cost(s: &PriceSegment, t: Tokens) -> f64 {
-    let prompt = t.input + t.cache_read + t.cache_write;
-    let tier = s.tiers.iter().filter(|x| prompt > x.above).max_by_key(|x| x.above);
-    let (i, o, cr, cw) = match tier {
-        Some(x) => (x.input, x.output, x.cache_read, x.cache_write.unwrap_or(x.input * CACHE_WRITE_MULTIPLIER)),
-        None => (s.input, s.output, s.cache_read, s.cache_write.unwrap_or(s.input * CACHE_WRITE_MULTIPLIER)),
-    };
-    (t.input as f64 * i + t.output as f64 * o + t.cache_read as f64 * cr + t.cache_write as f64 * cw) / 1e6
+    Rates::of(s, t).cost(t)
 }
 
 #[cfg(test)]
@@ -1242,6 +1297,15 @@ mod tests {
         assert!((step_cost(&s, big) - want).abs() < 1e-12, "whole request billed at the tier");
         let edge = Tokens { input: 200_000, ..Default::default() };
         assert!((step_cost(&s, edge) - 0.6).abs() < 1e-12, "exactly `above` stays in the base tier");
+
+        // The rates are the ones the amount is computed from, and the parts add up to it.
+        for (tokens, tier) in [(t, None), (big, Some(200_000)), (edge, None)] {
+            let r = Rates::of(&s, tokens);
+            assert_eq!(r.tier_above, tier);
+            assert!((r.parts(tokens).iter().sum::<f64>() - step_cost(&s, tokens)).abs() < 1e-12);
+        }
+        assert_eq!(Rates::of(&s, t).cache_write, 3.75);
+        assert_eq!(Rates::of(&s, big).cache_write, 7.5);
     }
 
     #[test]

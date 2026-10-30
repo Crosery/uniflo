@@ -327,6 +327,7 @@ mod tests {
             harness: harness.into(),
             id: id.into(),
             parent: None,
+            parent_call: None,
             title: None,
             cwd: Some(cwd.into()),
             model: None,
@@ -339,6 +340,7 @@ mod tests {
             status_reason: None,
             pid: None,
             usage: None,
+            family: None,
             archived: false,
         }
     }

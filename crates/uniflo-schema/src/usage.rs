@@ -27,6 +27,23 @@ pub struct SessionUsage {
     pub context_limit: Option<u64>,
 }
 
+/// Totals of a session and all its descendants (`Session.family`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SessionFamily {
+    /// Descendant sessions, not counting the session itself.
+    pub sessions: u64,
+    pub steps: u64,
+    pub input: u64,
+    pub output: u64,
+    pub cache_read: u64,
+    pub cache_write: u64,
+    pub reasoning: u64,
+    /// Sum over priced steps of the whole family; `null` when none could be priced.
+    #[serde(default)]
+    pub cost_usd: Option<f64>,
+    pub unpriced_steps: u64,
+}
+
 /// Where a step's amount came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -103,6 +120,28 @@ pub struct UsageReport {
     pub indexing: UsageProgress,
 }
 
+/// A step's amount split by token class, USD; the four add up to `cost_usd`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CostParts {
+    pub input: f64,
+    pub output: f64,
+    pub cache_read: f64,
+    pub cache_write: f64,
+}
+
+/// The unit prices a step was billed at, USD per million tokens, tier and price segment
+/// already applied (`cache_write` defaulted to `input × 1.25` when the catalog has none).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct StepPrice {
+    pub input: f64,
+    pub output: f64,
+    pub cache_read: f64,
+    pub cache_write: f64,
+    /// Set when the step was billed at a tier: the prompt size that tier starts above.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier_above: Option<u64>,
+}
+
 /// One model call of a session (`GET /v1/sessions/{key}/usage`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct StepUsage {
@@ -122,6 +161,12 @@ pub struct StepUsage {
     pub cost_usd: Option<f64>,
     #[serde(default)]
     pub cost_source: Option<CostSource>,
+    /// Split of `cost_usd`; only for `catalog` / `approx` steps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_parts: Option<CostParts>,
+    /// Unit prices behind `cost_parts`; same condition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub price: Option<StepPrice>,
     /// `input + cache_read + cache_write`: what the model saw this step.
     pub context_tokens: u64,
     #[serde(default)]

@@ -112,7 +112,7 @@ impl Held {
 
     fn into_patch(self) -> MetaPatch {
         let Held { parent, title, cwd, model, started_at, updated_at } = self;
-        MetaPatch { parent, title, cwd, model, started_at, updated_at }
+        MetaPatch { parent, title, cwd, model, started_at, updated_at, ..Default::default() }
     }
 }
 

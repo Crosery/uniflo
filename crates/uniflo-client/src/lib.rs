@@ -67,6 +67,9 @@ pub use uniflo_schema::ModelUsage;
 pub use uniflo_schema::ResumeInfo;
 /// One conversation of one harness, returned by [`Client::sessions`] and [`Client::session`].
 pub use uniflo_schema::Session;
+/// Turns, steps and items of one session with its sub-sessions, returned by
+/// [`Client::session_trajectory`].
+pub use uniflo_schema::SessionTrajectory;
 /// Per-step usage and per-turn totals of one session, returned by [`Client::session_usage`].
 pub use uniflo_schema::SessionUsageDetail;
 /// Token / cost aggregation, returned by [`Client::usage`].
@@ -242,6 +245,12 @@ impl Client {
     /// `GET /v1/sessions/{key}/usage`: every priced step of one session plus per-turn totals.
     pub fn session_usage(&self, key: &str) -> Result<SessionUsageDetail> {
         self.get_json(&format!("/v1/sessions/{}/usage", http::percent_encode(key)))
+    }
+
+    /// `GET /v1/sessions/{key}/trajectory`: the call chain of one session as turns → steps →
+    /// items, with its direct sub-sessions hung on the calls that started them.
+    pub fn session_trajectory(&self, key: &str) -> Result<SessionTrajectory> {
+        self.get_json(&format!("/v1/sessions/{}/trajectory", http::percent_encode(key)))
     }
 
     /// `GET /v1/models`: every model seen across sessions, with its price-catalog match and

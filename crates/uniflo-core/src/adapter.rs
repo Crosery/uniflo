@@ -21,6 +21,8 @@ pub struct HarnessInfo {
 pub struct MetaPatch {
     /// Native id of the parent session (sub-agents, forks).
     pub parent: Option<String>,
+    /// Tool call (`call_id`) of the parent session that started this session.
+    pub parent_call: Option<String>,
     pub title: Option<(u8, String)>,
     pub cwd: Option<String>,
     pub model: Option<String>,

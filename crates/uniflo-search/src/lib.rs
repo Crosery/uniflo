@@ -223,6 +223,8 @@ mod tests {
             harness: harness.into(),
             id: id.into(),
             parent: None,
+            parent_call: None,
+            family: None,
             title: Some(title.into()),
             cwd: Some(cwd.into()),
             model: None,

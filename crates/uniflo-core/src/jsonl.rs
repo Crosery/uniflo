@@ -44,6 +44,13 @@ pub trait LineDecoder: Send + Sync + 'static {
     fn roots(&self) -> Vec<PathBuf>;
     fn is_source(&self, path: &Path) -> bool;
     fn identify(&self, path: &Path) -> Option<SourceId>;
+
+    /// The tool call of the parent session that started the session in `path`, when the
+    /// harness records it beside the transcript (read-only).
+    fn parent_call(&self, _path: &Path) -> Option<String> {
+        None
+    }
+
     fn decode(&self, record: &Value, cx: &mut Cx<'_, Self::State>);
 
     /// End of a contiguous run of records (one read window): emit what is still open, e.g. a
@@ -166,6 +173,18 @@ pub struct JsonlAdapter<D: LineDecoder> {
 impl<D: LineDecoder> JsonlAdapter<D> {
     pub fn new(decoder: D) -> Self {
         Self { decoder }
+    }
+
+    /// What opens the batch of a sub-session: its parent and the call that started it.
+    fn parent_meta(&self, src: &Path, sid: &SourceId) -> Option<MetaPatch> {
+        let parent = sid.parent.clone()?;
+        Some(MetaPatch { parent: Some(parent), parent_call: self.decoder.parent_call(src), ..Default::default() })
+    }
+
+    fn prepend_parent(&self, batch: &mut Batch, src: &Path, sid: &SourceId) {
+        if let Some(meta) = self.parent_meta(src, sid) {
+            batch.items.insert(0, (sid.id.clone(), Record::Meta(meta)));
+        }
     }
 
     fn decode_value(&self, v: &Value, at: At<'_>, pos: u64, state: &mut D::State, sink: &mut Sink) {
@@ -315,7 +334,7 @@ impl<D: LineDecoder> Adapter for JsonlAdapter<D> {
         let key = session_key(self.info().id, &sid.id);
         if self.decoder.whole_file(src) {
             let mut out = self.read_whole(src, cursor, &key, &sid.id, size, mtime)?;
-            prepend_parent(&mut out.batch, &sid);
+            self.prepend_parent(&mut out.batch, src, &sid);
             return Ok(out);
         }
 
@@ -340,7 +359,7 @@ impl<D: LineDecoder> Adapter for JsonlAdapter<D> {
             }
         }
         out.batch = sink.into_batch(&sid.id, bytes);
-        prepend_parent(&mut out.batch, &sid);
+        self.prepend_parent(&mut out.batch, src, &sid);
         Ok(out)
     }
 
@@ -403,14 +422,14 @@ impl<D: LineDecoder> Adapter for JsonlAdapter<D> {
         let key = session_key(self.info().id, &sid.id);
         if self.decoder.whole_file(src) {
             let mut out = self.read_whole(src, None, &key, &sid.id, size, mtime)?;
-            prepend_parent(&mut out.batch, &sid);
+            self.prepend_parent(&mut out.batch, src, &sid);
             for (id, r) in out.batch.items {
                 sink(&id, r);
             }
             return Ok(out.cursor);
         }
-        if let Some(p) = &sid.parent {
-            sink(&sid.id, Record::Meta(MetaPatch { parent: Some(p.clone()), ..Default::default() }));
+        if let Some(meta) = self.parent_meta(src, &sid) {
+            sink(&sid.id, Record::Meta(meta));
         }
         // Bounded windows keep memory flat on multi-GB transcripts; a window grows only when a
         // single line does not fit.
@@ -457,13 +476,6 @@ impl<D: LineDecoder> Adapter for JsonlAdapter<D> {
 
 fn to_state<S: Serialize>(s: &S) -> Value {
     serde_json::to_value(s).unwrap_or(Value::Null)
-}
-
-fn prepend_parent(batch: &mut Batch, sid: &SourceId) {
-    if let Some(p) = &sid.parent {
-        let meta = MetaPatch { parent: Some(p.clone()), ..Default::default() };
-        batch.items.insert(0, (sid.id.clone(), Record::Meta(meta)));
-    }
 }
 
 fn number_positions(records: &mut [Record]) {

@@ -9,7 +9,7 @@
 pub mod catalog;
 pub mod sync;
 
-use catalog::{Catalog, Tokens, match_key, segment_at, step_cost};
+use catalog::{Catalog, Rates, Tokens, match_key, segment_at};
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -141,12 +141,18 @@ impl Loaded {
         Resolved { kind: hit.0, entry: hit.1.map(|i| self.shared[i].clone()) }
     }
 
-    /// Catalog price of one step at its event time; `None` when the model is unknown.
-    pub fn price(&self, model: &str, ts: i64, t: Tokens) -> Option<(f64, CostSource)> {
+    /// Unit prices one step is billed at (segment of its event time, tier, defaults applied),
+    /// and where they came from; `None` when the model is unknown.
+    pub fn rates(&self, model: &str, ts: i64, t: Tokens) -> Option<(Rates, CostSource)> {
         let r = self.resolve(model);
         let seg = segment_at(r.entry.as_deref()?, ts)?;
         let src = if r.kind == MatchKind::Exact { CostSource::Catalog } else { CostSource::Approx };
-        Some((step_cost(seg, t), src))
+        Some((Rates::of(seg, t), src))
+    }
+
+    /// Catalog price of one step at its event time; `None` when the model is unknown.
+    pub fn price(&self, model: &str, ts: i64, t: Tokens) -> Option<(f64, CostSource)> {
+        self.rates(model, ts, t).map(|(r, src)| (r.cost(t), src))
     }
 
     /// `(fetched_at, stale)`: last successful sync, else the snapshot's build time.

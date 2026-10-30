@@ -2,7 +2,7 @@
 
 > 守护进程如何从各 harness 的会话存储得到统一、实时的会话与事件流。
 
-状态：`current` · 更新：2026-10-26
+状态：`current` · 更新：2026-10-30
 
 ## 数据流
 
@@ -69,10 +69,15 @@ run() → usage_loop
 每会话账本 Ledger：步骤（usage 事件，按事件 id 去重 / 覆盖）+ 提问（非注入 user_message）+ 回合
    ▼
 Session.usage（随 session envelope 推送）· /v1/usage 聚合 · /v1/sessions/{key}/usage · /v1/models
+   ▼
+Session.family（family.rs）· /v1/sessions/{key}/trajectory（trajectory.rs）
 ```
 
 - **回合**：非注入的 `user_message` 或 `turn_start` 开一个新回合，中间没有任何活动的相邻边界合并成一个。
 - **步骤模型**：事件自带 `model` 优先，否则取该会话最近一条 assistant 消息 / 元数据的模型。
+- **家族合计**：`Session.family` 是本会话加全部后代会话（经 `parent` 链递归）的 `usage` 之和，存在引擎的会话快照里，不另起账本。`refresh_sessions` 在 `usage` 变化时，对变化的会话、它们的所有祖先（以及自带后代的会话本身）重算 `family`：每次更新按 `parent` 建一次父子索引（`family::Forest`，O(会话数)），只算受影响的那几个会话的子树，不是每次列表请求都算；叶子会话的更新沿 `parent` 链找不到祖先，也不建索引。新会话出现、会话被移除、`parent` 变化时同样重算祖先，`index()` 结束时全量算一次。变化了的会话（祖先在内）都作为 `session` envelope 推送。
+- **会话链路**：`GET /v1/sessions/{key}/trajectory` 不进账本。`Engine::session_trajectory` 用 `Adapter::read_all` 按源文件顺序（含重复的 usage 事件，不是 `history()` 去重后的）把该会话的记录流式喂给 `trajectory::Builder`，它内部用一个 `Ledger` 算每一步的数字（所以与 `/usage` 同一步一致，也用同一套价格路径），再把记录按"usage 之前的归后一个 usage"归组；`link_children` 把直接子会话挂到启动它们的调用上。只保留预览，内存与会话大小无关。
+- **每步费用拆分**：`pricing::catalog::Rates` 是价格段 + 分档 + `cache_write` 缺省值的唯一落点，`step_cost`、`Loaded::price`（费用）与 `Loaded::rates`（`cost_parts` / `price`）都从它出，所以拆分不会和金额各算各的。
 - **价格三层**：`<数据目录>/pricing/overrides.json`（用户覆盖，同步不碰）> `catalog.json`（同步结果）> 内置快照 `crates/uniflo-core/data/pricing-snapshot.json`。按事件时间选价格段，所以重建索引后费用不变。规则见 ADR-0010。
 - **全量读**：`Adapter::read_all` 默认先取摘要元数据，再逐会话 `history()` 全量重放；JSONL 适配器按 4 MiB 分块顺序解码（单行更长时窗口翻倍），Hermes 覆盖它以追加会话级 usage。
 - **代价**（本机约 17 GB 会话数据、38 万步）：冷启动后台全量读约 12 s，缓存 36 MB，常驻内存比不建用量索引时多约 130 MB；有缓存时启动到 `/v1/health` 与改动前持平，账本恢复约 1 s。

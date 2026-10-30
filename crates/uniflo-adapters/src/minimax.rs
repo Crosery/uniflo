@@ -147,6 +147,7 @@ fn sess_row(r: &Row) -> SessRow {
             model: None,
             started_at: started,
             updated_at: Some(updated).filter(|t| *t > 0),
+            ..Default::default()
         },
         hot: updated.max(started.unwrap_or(0)) > now_ms() - HOT_MS,
         id,

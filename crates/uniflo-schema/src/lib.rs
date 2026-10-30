@@ -12,7 +12,9 @@ use serde_json::Value;
 
 pub mod cleanup;
 pub mod search;
+mod trajectory;
 mod usage;
+pub use trajectory::*;
 pub use usage::*;
 mod agent;
 pub use agent::*;
@@ -46,6 +48,10 @@ pub struct Session {
     /// Parent session key for sub-agents / forks.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<String>,
+    /// Tool call of the parent session that started this sub-session (`ToolCall.call_id`), when
+    /// the harness records it (Claude sub-agents: `toolUseId` of the `agent-<id>.meta.json` sidecar).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_call: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -73,6 +79,10 @@ pub struct Session {
     /// Boxed to keep `Session` (and every envelope) small; the JSON is the plain object.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<Box<SessionUsage>>,
+    /// This session plus every descendant reached through `parent`; present only when it has
+    /// at least one. Boxed like `usage`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub family: Option<Box<SessionFamily>>,
     /// The source files were cleaned up (moved to the system trash); events come from Uniflo's
     /// compact archive. Disappears when the source is restored.
     #[serde(default, skip_serializing_if = "is_false")]

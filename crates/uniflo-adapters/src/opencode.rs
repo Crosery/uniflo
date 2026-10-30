@@ -305,6 +305,7 @@ fn sess_meta(r: &Row) -> (String, MetaPatch, i64) {
         model: None,
         started_at: int(r, 4).filter(|t| *t > 0),
         updated_at: Some(updated).filter(|t| *t > 0),
+        ..Default::default()
     };
     (id, patch, updated)
 }

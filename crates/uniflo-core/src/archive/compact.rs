@@ -177,6 +177,7 @@ mod tests {
             harness: "t".into(),
             id: "1".into(),
             parent: None,
+            parent_call: None,
             title: Some("标题".into()),
             cwd: None,
             model: None,
@@ -189,6 +190,7 @@ mod tests {
             status_reason: None,
             pid: None,
             usage: None,
+            family: None,
             archived: true,
         };
         let evs = vec![ev("a", Body::Reasoning { text: "r".into() }), ev("b", Body::TurnEnd { reason: None })];

@@ -272,6 +272,7 @@ impl Engine {
         {
             let mut st = self.state.write().unwrap();
             let mut u = self.usage.write().unwrap();
+            let above = st.ancestors_of(keys.iter().map(String::as_str));
             for k in keys {
                 if let Some(e) = st.sessions.get(k).filter(|e| e.archive.is_some()) {
                     if let Some(p) = &e.archive {
@@ -280,6 +281,9 @@ impl Engine {
                     st.sessions.remove(k);
                     out.push(Pending::Removed(k.clone()));
                 }
+            }
+            for k in st.recompute_families(&above) {
+                out.extend(st.sessions.get(&k).map(|e| Pending::Session(e.session.clone())));
             }
             u.dirty |= !out.is_empty();
         }
@@ -320,9 +324,14 @@ impl Engine {
     /// Recompute usage totals of `keys` and send their `session` envelopes.
     fn republish(&self, keys: &[String]) {
         self.refresh_sessions(keys, false);
-        let st = self.state.read().unwrap();
+        let mut st = self.state.write().unwrap();
+        // An archived snapshot carries the family it was archived with: recompute it, and the
+        // families above, from the sessions as they are now.
+        let mut roots = keys.to_vec();
+        roots.extend(st.ancestors_of(keys.iter().map(String::as_str)).into_iter().filter(|k| !keys.contains(k)));
+        st.recompute_families(&roots);
         let out: Vec<Pending> =
-            keys.iter().filter_map(|k| st.sessions.get(k)).map(|e| Pending::Session(e.session.clone())).collect();
+            roots.iter().filter_map(|k| st.sessions.get(k)).map(|e| Pending::Session(e.session.clone())).collect();
         drop(st);
         self.publish(out);
     }

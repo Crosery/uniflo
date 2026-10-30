@@ -107,6 +107,14 @@ async fn client_round_trips_every_read_route_against_a_real_gateway() {
     assert_eq!(detail.session, key);
     assert!(detail.steps.iter().any(|s| s.input == 120 && s.output == 40), "{:?}", detail.steps);
 
+    let traj = client.session_trajectory(&key).unwrap();
+    assert_eq!(traj.session, key);
+    let step = &traj.turns[0].steps[0];
+    assert_eq!((step.index, step.input, step.output), (1, 120, 40), "{traj:?}");
+    assert_eq!(traj.turns[0].prompt.as_deref(), Some("缓存击穿怎么修？"));
+    assert!(traj.children.is_empty());
+    assert!(client.session_trajectory("claude:nope").is_err());
+
     let report = client.usage(&UsageQuery { group_by: Some("harness".into()), ..Default::default() }).unwrap();
     assert_eq!(report.group_by, "harness");
     assert!(report.rows.iter().any(|r| r.key == "claude" && r.steps >= 1), "{:?}", report.rows);

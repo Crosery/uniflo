@@ -21,6 +21,7 @@
 | `harness` | string | harness id，见 `GET /v1/harnesses` |
 | `id` | string | harness 内的会话 id |
 | `parent` | string? | 父会话 `key`（子代理、fork） |
+| `parent_call` | string? | 启动本会话的那次工具调用（父会话里某个 `tool_call` 的 `call_id`），harness 记录了才有。目前只有 Claude 子代理：读 `agent-<id>.jsonl` 旁边 `agent-<id>.meta.json` 的 `toolUseId`（只读） |
 | `title` | string? | harness 自带或生成的标题，按优先级取最高者 |
 | `cwd` | string? | 工作目录 |
 | `model` | string? | 最近使用的模型 |
@@ -33,6 +34,7 @@
 | `status_reason` | string? | `user_message`、`tool_call`、`turn_end`、`stale`、`exited`、`live` 等 |
 | `pid` | u32? | 当前附着的进程（能探测到时） |
 | `usage` | object? | 会话合计，见下文 [Session.usage](#sessionusage)；后台用量索引读完该会话前不输出 |
+| `family` | object? | 本会话加上全部后代会话的合计，见下文 [Session.family](#sessionfamily)；没有后代会话时不输出 |
 | `archived` | bool | 源文件已被清理（移入回收站），事件来自 Uniflo 的精简归档，`source` 指向归档文件、状态为 idle（`status_reason` 为 `archived`）；源文件从回收站还原后消失。缺省为 false，见 `docs/api.md#会话清理` |
 
 ### status
@@ -98,20 +100,56 @@
 
 一步的上下文占用 = `input + cache_read + cache_write`。费用计算见 `docs/decisions/ADR-0010-价格目录同步与费用口径.md`。
 
+### Session.family
+
+本会话**加上**经 `parent` 链递归得到的全部后代会话（子代理的子代理也算）的合计。只在至少有一个后代会话时输出。
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `sessions` | u64 | 后代会话数，不含本会话；还没读到用量的后代也算一个 |
+| `steps` `input` `output` `cache_read` `cache_write` `reasoning` `unpriced_steps` | u64 | 本会话与各后代的 `usage` 之和；`usage` 缺失（用量尚未索引）的会话按 0 计 |
+| `cost_usd` | f64? | 已定价金额之和；全部未定价时为 `null` |
+
+任一成员会话的 `usage` 变化、后代会话增减时，受影响的祖先会话（以及成员本身）的 `family` 随之重算，并和 `usage` 一样经 `session` envelope 推送。
+
 ## 用量与价格接口的类型
 
-`/v1/usage`、`/v1/sessions/{key}/usage`、`/v1/models`、`/v1/pricing` 的响应类型在 `crates/uniflo-schema/src/usage.rs`，同样只增不改。金额单位 USD，价格单位 USD / 百万 token；对订阅用户都是"API 等价成本"，不是账单。
+`/v1/usage`、`/v1/sessions/{key}/usage`、`/v1/models`、`/v1/pricing` 的响应类型在 `crates/uniflo-schema/src/usage.rs`，同样只增不改；`/v1/sessions/{key}/trajectory` 的在 `crates/uniflo-schema/src/trajectory.rs`（见 [会话链路的类型](#会话链路的类型)）。金额单位 USD，价格单位 USD / 百万 token；对订阅用户都是"API 等价成本"，不是账单。
 
 | 类型 | 用途 | 要点 |
 |---|---|---|
 | `UsageReport` | `/v1/usage` | `group_by`、`since`、`until`、`tz`、`under`、`rows[]`、`totals`、`pricing{fetched_at, stale}`、`indexing{ready, done, total}` |
 | `UsageRow` | 一行聚合 | `key`（机器键）、`label`（显示名）、`sessions`、`steps`、`prompts`、五项 token、`cost_usd?`、`unpriced_steps`；各行之和等于 `totals` |
 | `SessionUsageDetail` | `/v1/sessions/{key}/usage` | `steps[]`（`StepUsage`）、`turns[]`（`TurnUsage`）、`totals`（`SessionUsage`） |
-| `StepUsage` | 一步 | `event`、`ts`、`turn`、`model?`、五项 token、`cost_usd?`、`cost_source?`（`harness` / `catalog` / `approx`）、`context_tokens`、`context_limit?`、`context_pct?` |
+| `StepUsage` | 一步 | `event`、`ts`、`turn`、`model?`、五项 token、`cost_usd?`、`cost_source?`（`harness` / `catalog` / `approx`）、`cost_parts?`、`price?`、`context_tokens`、`context_limit?`、`context_pct?` |
+| `CostParts` | `StepUsage.cost_parts` | `{input, output, cache_read, cache_write}`：这一步金额按 token 类别的拆分（USD），四项之和等于 `cost_usd`（误差 < 1e-9） |
+| `StepPrice` | `StepUsage.price` | `{input, output, cache_read, cache_write, tier_above?}`：这一步实际采用的单价（USD / 百万 token），已按事件时间选好价格段、按整单 prompt 选好分档（用了分档时 `tier_above` 是该档的门槛），`cache_write` 目录缺价时为 `input × 1.25`。`cost_parts` 与 `price` 只在 `cost_source` 为 `catalog` 或 `approx` 时输出，harness 自报金额和未定价的步骤没有 |
+| `SessionFamily` | `Session.family` | 见上文 [Session.family](#sessionfamily) |
 | `TurnUsage` | 一回合 | `turn`、`started_at`、`prompts`、`steps`、五项 token、`cost_usd?`、`unpriced_steps` |
 | `ModelUsage` | `/v1/models` 一项 | `model`（原始名）、`match`（`exact` / `approx` / `none`）、`catalog_id?`、`provider?`、`prices[]`、`context_limit?`、`output_limit?`、`sessions`、`steps`、`cost_usd?`、`unpriced_steps` |
 | `PriceSegment` | 一段价格 | `from`、`until?`（epoch ms，`[from, until)`）、`input`、`output`、`cache_read`、`cache_write?`、`tiers[]`（`{above, input, output, cache_read, cache_write?}`） |
 | `PricingStatus` | `/v1/pricing` | `source`、`fetched_at?`、`stale`、`error?`、`models`、`overrides`、`last_attempt?`、`pending`、`sync_enabled` |
+
+## 会话链路的类型
+
+`GET /v1/sessions/{key}/trajectory` 返回 `SessionTrajectory`：把一个会话的记录按"回合 → 步 → 记录"组织起来，用于逐轮、逐步查看调用链。每一步的数值与 `/v1/sessions/{key}/usage` 里的同一步完全一致。
+
+| 类型 | 要点 |
+|---|---|
+| `SessionTrajectory` | `session`、`turns[]`、`children[]` |
+| `TrajectoryTurn` | `turn`（与 `StepUsage.turn` 同一编号，0 = 第一个回合之前）、`event?`（开启回合的人类消息的事件 id）、`started_at`、`ended_at`（回合内最后一条记录的时间）、`prompt?`（人类消息前 300 个字符）、`steps[]`、`items[]`（回合内不属于任何一步的记录） |
+| `TrajectoryStep` | `index`（整个会话内从 1 起，等于该步在 `/usage` 里的次序）、`event`（usage 事件 id）、`started_at`（上一步最后一条记录的结束时间；回合的第一步取回合开始时间）、`ts`（usage 事件时间）、`model?`、五项 token、`cost_usd?`、`cost_source?`、`cost_parts?`、`price?`、`context_tokens`、`context_pct?`、`items[]` |
+| `TrajectoryItem` | 按 `kind` 区分，每种都带来源事件的 `event` 和 `ts`：`reasoning`（`chars`）、`text`（`chars`、前 200 个字符的 `preview`）、`tool`（`name`、`call_id`、`input_preview`；有结果时 `ended_at`、`is_error`、`output_preview`，没有结果时 `running: true`；`children[]` 是这次调用启动的子会话 key）、`system`（`subtype`） |
+| `TrajectoryChild` | 直接子会话：`key`、`title?`（没有标题时取首条人类输入 `preview`，与会话列表一致）、`model?`、`status`、`started_at?`、`updated_at`、`usage?`、`family?`、`call_id?`、`step?`（它挂在哪次调用、哪一步，`step` 为 `TrajectoryStep.index`） |
+
+归组规则：
+
+- 回合由人类用户消息（或 harness 的回合开始标记）开启；harness 注入的 synthetic 消息不开新回合，也不作为记录列出。
+- 两个 usage 事件之间的思考、回复、工具调用、系统记录归后一个 usage 那一步。同一个 usage 事件 id 再次出现时（Claude 把一条 API 消息的 usage 重复写在它的每个内容块上），其间的记录并入已有的那一步。回合末尾还没有 usage 的记录放在回合的 `items` 里。
+- 工具结果按 `call_id` 回填到对应的调用，本身不是记录。
+- 预览按字符截取（不是字节）；输入参数的预览是 JSON 紧凑文本的前 200 个字符。
+- 子会话的挂接：有 `parent_call` 时按它精确对应到那次调用；没有 `parent_call` 的取开始时间之前最近的一次名称含 `agent`、`task` 或 `spawn`（不分大小写）且尚未挂接的工具调用；仍找不到时只按开始时间挂到所在的步骤（`call_id` 缺省）。`parent_call` 指向的调用不在本会话的转写里（子代理的子代理：Claude 把它们平铺在顶层会话的 `subagents/` 下；或调用已不在转写里）时不按时间猜调用，只挂到所在的步骤。
+- 已清理（`archived`）的会话从归档读取。归档里同一事件 id 只留一份，Claude 式重复 usage 的后续记录会落进下一步。
 
 ## agent 接入接口的类型
 

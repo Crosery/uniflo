@@ -1,5 +1,5 @@
-//! Usage and pricing routes: `/v1/usage`, `/v1/sessions/{key}/usage`, `/v1/models`,
-//! `/v1/pricing`. [`UsageParams::report`] is also what `uniflo usage --local` runs, so the
+//! Usage and pricing routes: `/v1/usage`, `/v1/sessions/{key}/usage`,
+//! `/v1/sessions/{key}/trajectory`, `/v1/models`, `/v1/pricing`. [`UsageParams::report`] is also what `uniflo usage --local` runs, so the
 //! CLI and REST answer from the same code.
 
 use super::{ApiError, AppState, with_seq};
@@ -84,6 +84,18 @@ pub(super) async fn session_usage(State(s): State<AppState>, Path(key): Path<Str
     let engine = s.engine.clone();
     match tokio::task::spawn_blocking(move || engine.session_usage(&key)).await {
         Ok(Ok(d)) => with_seq(&s.engine, Json(d).into_response()),
+        Ok(Err(err)) => ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("{err:#}")).into_response(),
+        Err(err) => ApiError(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
+    }
+}
+
+pub(super) async fn session_trajectory(State(s): State<AppState>, Path(key): Path<String>) -> Response {
+    if s.engine.session(&key).is_none() {
+        return ApiError(StatusCode::NOT_FOUND, format!("unknown session {key}")).into_response();
+    }
+    let engine = s.engine.clone();
+    match tokio::task::spawn_blocking(move || engine.session_trajectory(&key)).await {
+        Ok(Ok(t)) => with_seq(&s.engine, Json(t).into_response()),
         Ok(Err(err)) => ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("{err:#}")).into_response(),
         Err(err) => ApiError(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
     }

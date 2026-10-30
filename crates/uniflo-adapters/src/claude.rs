@@ -136,6 +136,16 @@ impl LineDecoder for ClaudeFamily {
         Some(SourceId { id, parent })
     }
 
+    /// `agent-<id>.meta.json` beside a sub-agent transcript names the `tool_use` that spawned it.
+    fn parent_call(&self, p: &Path) -> Option<String> {
+        if !is_subagent_file(p) {
+            return None;
+        }
+        let bytes = std::fs::read(p.with_extension("meta.json")).ok()?;
+        let v: Value = serde_json::from_slice(&bytes).ok()?;
+        string_of(&v, "toolUseId").filter(|id| !id.is_empty())
+    }
+
     fn decode(&self, v: &Value, cx: &mut Cx<'_, ()>) {
         let ty = str_of(v, "type").unwrap_or("");
         let t = v.get("timestamp").and_then(ts).unwrap_or(0);

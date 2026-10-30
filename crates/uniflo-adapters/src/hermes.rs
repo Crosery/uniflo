@@ -128,6 +128,7 @@ fn sess_row(r: &Row) -> SessRow {
             model: nonempty(r, 3),
             started_at: Some(started).filter(|t| *t > 0),
             updated_at: None,
+            ..Default::default()
         },
         hot: started > now_ms() - HOT_MS,
         id,

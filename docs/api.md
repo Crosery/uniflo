@@ -24,7 +24,8 @@
 | `GET /v1/sessions/{key}/events?around=<id>` | `limit`（默认 200，最大 10000）、`max_text`、`format=ndjson` | 以事件 `id` 为中心的窗口 `{session, around, events, next_before}`：前后各约 `limit/2` 条，一侧不足时由另一侧补足；`next_before` 同上，可继续往前翻；会话里没有该 id 时 404 |
 | `GET /v1/search` | `q`（必填，语法见 `docs/search.md#全文检索`）、`filter`（会话搜索语法）、`kinds`（逗号分隔的事件 kind）、`limit`（会话数，默认 20，最大 200）、`offset` | `SearchResponse`（`docs/schema.md#全文检索`）：按会话分组，每个会话最多 3 条命中；索引仍在构建时 `indexing: true` 并附 `progress`，结果只含已建部分。有短词（< 3 字符，含 `-` 排除的短词）时按时间倒序，从最近活动的会话往回扫，同时有 ≥ 3 字符的词时只扫它们在索引里的命中：凑够 `offset + limit` 个会话就停，此时带 `scanned_until`、`total` 为下限；超过 2 s 预算就返回已找到的部分，并带 `partial: true`。同分的会话按 `updated_at`、会话 key 排，翻页顺序固定。缺 `q` 或语法无效 400；以 `--no-fts` 启动或索引打不开时 503，`error` 说明原因 |
 | `GET /v1/usage` | 见下表 | `UsageReport`：按一个维度聚合 token 与费用；参数不合法返回 400 |
-| `GET /v1/sessions/{key}/usage` | — | `SessionUsageDetail`：每一步明细与按回合汇总；未知 key 返回 404 |
+| `GET /v1/sessions/{key}/usage` | — | `SessionUsageDetail`：每一步明细与按回合汇总；`catalog` / `approx` 的步骤另带 `cost_parts`（按 token 类别拆分的金额，四项之和等于 `cost_usd`）和 `price`（采用的单价，含 `tier_above`）；未知 key 返回 404 |
+| `GET /v1/sessions/{key}/trajectory` | — | `SessionTrajectory`：回合 → 步 → 记录的调用链，加上直接子会话 `children[]`（挂在哪次调用 `call_id`、哪一步 `step`）；步的数值与 `/usage` 同一步一致；每次请求完整读一遍会话源文件，只输出前 200 / 300 个字符的预览；未知 key 返回 404。字段与归组规则见 `docs/schema.md#会话链路的类型` |
 | `GET /v1/models` | `q` 查询 | `ModelUsage[]`：会话里出现过的模型、目录匹配结果（`exact` / `approx` / `none`）、价格段、上下文上限、步数与费用 |
 | `GET /v1/pricing` | — | `PricingStatus`：`{source, fetched_at, stale, error, models, overrides, last_attempt, pending, sync_enabled}` |
 | `GET /v1/archive` | — | `ArchiveList`：已清理会话的归档及其大小，见 [会话清理](#会话清理) |

@@ -114,6 +114,7 @@ impl Craft {
             model: string_of(head, "model").map(|m| m.strip_prefix("pi/").map_or(m.clone(), str::to_owned)),
             started_at: head.get("createdAt").and_then(ts),
             updated_at: head.get("lastMessageAt").and_then(ts),
+            ..Default::default()
         };
         batch.items.push((id.clone(), Record::Meta(meta)));
         let model = string_of(head, "model");

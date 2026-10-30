@@ -10,6 +10,7 @@
 use super::{Engine, Pending};
 use crate::adapter::{HistoryQuery, MetaPatch, Record};
 use crate::pricing::{Pricing, sync};
+use crate::trajectory;
 use crate::usage::{Ledger, Names, Phase, SourceLedger, report, store};
 use crate::util::now_ms;
 use anyhow::{Result, anyhow};
@@ -19,7 +20,9 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
-use uniflo_schema::{ModelUsage, PricingStatus, Session, SessionUsageDetail, UsageProgress, UsageReport, session_key};
+use uniflo_schema::{
+    ModelUsage, PricingStatus, Session, SessionTrajectory, SessionUsageDetail, UsageProgress, UsageReport, session_key,
+};
 
 /// Periodic catalog sync of a daemon: first run `delay` after start, then every `every`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,6 +116,49 @@ impl Engine {
             l.apply(&Record::Event(e), &mut names, &p);
         }
         Ok(l.detail(key, &p))
+    }
+
+    /// The call chain of one session: its full transcript read once in source order (an
+    /// archived session from its archive), and its direct sub-sessions hung on the calls that
+    /// started them. Blocking.
+    pub fn session_trajectory(&self, key: &str) -> Result<SessionTrajectory> {
+        self.pricing.refresh();
+        let p = self.pricing.current();
+        let (adapter, src, id, archived, model, kids) = {
+            let st = self.state.read().unwrap();
+            let e = st.sessions.get(key).ok_or_else(|| anyhow!("unknown session {key}"))?;
+            let kids: Vec<Session> = st
+                .sessions
+                .values()
+                .filter(|c| c.session.parent.as_deref() == Some(key))
+                .map(|c| c.session.clone())
+                .collect();
+            (
+                self.adapters[e.adapter].clone(),
+                e.src.clone(),
+                e.session.id.clone(),
+                e.archive.is_some(),
+                e.session.model.clone(),
+                kids,
+            )
+        };
+        let mut b = trajectory::Builder::new(key, &p);
+        if archived {
+            // Archives keep one event per id, so a message's usage sits ahead of its later lines.
+            b.push(&Record::Meta(MetaPatch { model, ..Default::default() }));
+            for e in Self::archived_history(&src, &HistoryQuery { before: None, limit: usize::MAX / 2 })? {
+                b.push(&Record::Event(e));
+            }
+        } else {
+            adapter.read_all(&src, std::slice::from_ref(&id), &mut |sid, rec| {
+                if sid == id {
+                    b.push(&rec);
+                }
+            })?;
+        }
+        let mut t = b.finish();
+        trajectory::link_children(&mut t, &kids);
+        Ok(t)
     }
 
     // ---------------------------------------------------------------- building
@@ -221,6 +267,9 @@ impl Engine {
         if self.pricing.generation() != generation {
             self.reprice(Some(&keys));
         }
+        if self.usage_progress().ready {
+            self.usage_settled.store(true, Ordering::Relaxed);
+        }
         self.refresh_sessions(&keys, publish);
     }
 
@@ -241,7 +290,7 @@ impl Engine {
                 let (queue, next, done) = (&queue, &next, done.clone());
                 s.spawn(move || {
                     while let Some(p) = queue.get(next.fetch_add(1, Ordering::Relaxed)) {
-                        let publish = self.usage_progress().ready;
+                        let publish = self.usage_settled.load(Ordering::Relaxed) || self.usage_progress().ready;
                         self.build_source(p, publish);
                         if let Some(tx) = &done {
                             let _ = tx.send(p.clone());
@@ -340,7 +389,8 @@ impl Engine {
         changed
     }
 
-    /// Write ledger totals into the session snapshots; `publish` sends `session` envelopes.
+    /// Write ledger totals into the session snapshots, and the family totals above them;
+    /// `publish` sends `session` envelopes for every session that changed.
     pub(super) fn refresh_sessions(&self, keys: &[String], publish: bool) {
         if keys.is_empty() {
             return;
@@ -353,15 +403,23 @@ impl Engine {
         let mut out = Vec::new();
         {
             let mut st = self.state.write().unwrap();
+            let mut moved: Vec<String> = Vec::new();
             for (k, sum) in sums {
                 if let Some(e) = st.sessions.get_mut(k)
                     && e.session.usage != sum
                 {
                     e.session.usage = sum;
-                    if publish {
-                        out.push(Pending::Session(e.session.clone()));
-                    }
+                    moved.push(k.clone());
                 }
+            }
+            // A session's totals are part of its own family and of every family above it.
+            let roots = st.family_roots(moved.iter().map(String::as_str));
+            let seen: HashSet<String> = moved.iter().cloned().collect();
+            moved.extend(st.recompute_families(&roots).into_iter().filter(|k| !seen.contains(k)));
+            if publish {
+                out.extend(
+                    moved.iter().filter_map(|k| st.sessions.get(k)).map(|e| Pending::Session(e.session.clone())),
+                );
             }
         }
         self.dirty.store(true, Ordering::Relaxed);

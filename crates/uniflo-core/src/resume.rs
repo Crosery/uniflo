@@ -272,6 +272,7 @@ mod tests {
             harness: harness.into(),
             id: id.into(),
             parent: None,
+            parent_call: None,
             title: None,
             cwd: cwd.map(str::to_owned),
             model: None,
@@ -284,6 +285,7 @@ mod tests {
             status_reason: None,
             pid: None,
             usage: None,
+            family: None,
             archived: false,
         }
     }

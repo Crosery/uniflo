@@ -7,7 +7,8 @@
 //! - [`update`]: crates.io version check via the system curl; [`install`]: install method and
 //!   the self-upgrade of a prebuilt release binary
 //! - [`pricing`]: model price catalog (snapshot + sync + overrides) and per-step cost
-//! - [`usage`]: per-step usage ledgers and their aggregations
+//! - [`usage`]: per-step usage ledgers and their aggregations; [`family`]: a session's totals
+//!   with its sub-agents'; [`trajectory`]: a session's turns → steps → items chain
 //! - [`paths`]: Uniflo's own data / config / cache directories
 //! - [`window`]: event windows centred on one event (search hit → transcript)
 //! - [`cleanup`]: user-confirmed session cleanup (plan → archive → trash); [`archive`] keeps
@@ -21,6 +22,7 @@ pub mod cache;
 pub mod cleanup;
 pub mod context;
 pub mod engine;
+pub mod family;
 pub mod install;
 pub mod jsonl;
 pub mod memory;
@@ -29,6 +31,7 @@ pub mod pricing;
 pub mod procs;
 pub mod resume;
 pub mod status;
+pub mod trajectory;
 pub mod update;
 pub mod usage;
 pub mod util;

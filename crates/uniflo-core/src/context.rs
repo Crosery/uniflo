@@ -91,6 +91,7 @@ mod tests {
             harness: "claude".into(),
             id: key.into(),
             parent: None,
+            parent_call: None,
             title: Some(format!("t-{key}")),
             cwd: Some(cwd.into()),
             model: None,
@@ -103,6 +104,7 @@ mod tests {
             status_reason: None,
             pid: None,
             usage: None,
+            family: None,
             archived: false,
         }
     }

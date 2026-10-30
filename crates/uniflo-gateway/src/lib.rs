@@ -14,6 +14,7 @@
 //! | `GET /v1/stats` | engine counters, unknown discriminators |
 //! | `GET /v1/usage?group_by=&q=&since=&until=&tz=&under=&depth=&limit=&sort=` | token / cost aggregation |
 //! | `GET /v1/sessions/{key}/usage` | per-step usage, per-turn totals |
+//! | `GET /v1/sessions/{key}/trajectory` | turns → steps → items chain, sub-sessions hung on their calls |
 //! | `GET /v1/models?q=` · `GET /v1/pricing` | models seen with prices · catalog sync status |
 //! | `POST /v1/cleanup/plan` · `POST /v1/cleanup/plans/{id}/execute` | session cleanup (write) |
 //! | `GET /v1/archive` · `DELETE /v1/archive/{key}` (write) | archived sessions |
@@ -96,6 +97,7 @@ pub fn router_with(engine: Arc<Engine>, guard: GuardOptions, services: Services)
         .route("/v1/sessions/{key}", get(session))
         .route("/v1/sessions/{key}/events", get(events))
         .route("/v1/sessions/{key}/usage", get(usage::session_usage))
+        .route("/v1/sessions/{key}/trajectory", get(usage::session_trajectory))
         .route("/v1/usage", get(usage::usage))
         .route("/v1/models", get(usage::models))
         .route("/v1/pricing", get(usage::pricing))
@@ -155,7 +157,7 @@ async fn index() -> impl IntoResponse {
         "name": "uniflo",
         "version": env!("CARGO_PKG_VERSION"),
         "schema": SCHEMA_VERSION,
-        "endpoints": ["/demo", "/v1/health", "/v1/harnesses", "/v1/harnesses/{id}/icon.svg", "/v1/sessions", "/v1/sessions/{key}", "/v1/sessions/{key}/events", "/v1/search", "/v1/stream", "/v1/stream.ndjson", "/v1/ws", "/v1/stats", "/v1/usage", "/v1/sessions/{key}/usage", "/v1/models", "/v1/pricing", "/v1/cleanup/plan", "/v1/cleanup/plans/{id}/execute", "/v1/archive", "/v1/archive/{key}", "/v1/sessions/{key}/resume", "/v1/sessions/{key}/open-terminal", "/v1/memory", "/v1/memory/file"],
+        "endpoints": ["/demo", "/v1/health", "/v1/harnesses", "/v1/harnesses/{id}/icon.svg", "/v1/sessions", "/v1/sessions/{key}", "/v1/sessions/{key}/events", "/v1/search", "/v1/stream", "/v1/stream.ndjson", "/v1/ws", "/v1/stats", "/v1/usage", "/v1/sessions/{key}/usage", "/v1/sessions/{key}/trajectory", "/v1/models", "/v1/pricing", "/v1/cleanup/plan", "/v1/cleanup/plans/{id}/execute", "/v1/archive", "/v1/archive/{key}", "/v1/sessions/{key}/resume", "/v1/sessions/{key}/open-terminal", "/v1/memory", "/v1/memory/file"],
     }))
 }
 

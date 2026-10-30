@@ -23,7 +23,9 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use uniflo_schema::{Body, CostSource, Event, ModelUsage, SessionUsage, SessionUsageDetail, StepUsage, TurnUsage};
+use uniflo_schema::{
+    Body, CostParts, CostSource, Event, ModelUsage, SessionUsage, SessionUsageDetail, StepPrice, StepUsage, TurnUsage,
+};
 
 /// Bump when ledger semantics change so cached ledgers are rebuilt.
 pub const LEDGER_VERSION: u32 = 1;
@@ -64,6 +66,27 @@ impl Step {
 
     fn tokens(&self) -> Tokens {
         Tokens { input: self.input, output: self.output, cache_read: self.cache_read, cache_write: self.cache_write }
+    }
+
+    /// The split of a catalog-priced step's amount and the unit prices behind it, from the
+    /// same lookup that priced it. Harness-reported and unpriced steps have none.
+    fn breakdown(&self, p: &Loaded) -> Option<(CostParts, StepPrice)> {
+        if !matches!(self.source, Some(CostSource::Catalog | CostSource::Approx)) {
+            return None;
+        }
+        let t = self.tokens();
+        let (r, _) = p.rates(self.model.as_deref()?, self.ts, t)?;
+        let [input, output, cache_read, cache_write] = r.parts(t);
+        Some((
+            CostParts { input, output, cache_read, cache_write },
+            StepPrice {
+                input: r.input,
+                output: r.output,
+                cache_read: r.cache_read,
+                cache_write: r.cache_write,
+                tier_above: r.tier_above,
+            },
+        ))
     }
 
     fn price(&mut self, p: &Loaded) {
@@ -259,6 +282,7 @@ impl Ledger {
                         *limits.entry(m).or_insert_with(|| p.resolve(m).entry.and_then(|e| e.context_limit))
                     });
                     let ctx = s.context_tokens();
+                    let (cost_parts, price) = s.breakdown(p).unzip();
                     StepUsage {
                         event: s.event.to_string(),
                         ts: s.ts,
@@ -271,6 +295,8 @@ impl Ledger {
                         reasoning: s.reasoning,
                         cost_usd: s.cost,
                         cost_source: s.source,
+                        cost_parts,
+                        price,
                         context_tokens: ctx,
                         context_limit: limit,
                         context_pct: limit.filter(|l| *l > 0).map(|l| ctx as f64 * 100.0 / l as f64),
@@ -616,6 +642,28 @@ mod tests {
         assert_eq!((d.steps[4].cost_usd, d.steps[4].cost_source), (Some(0.0), None), "no tokens, nothing to price");
         assert_eq!(d.totals.unpriced_steps, 1, "unknown model is unpriced, not $0");
         assert!((d.totals.cost_usd.unwrap() - (plain + big + 0.5)).abs() < 1e-9);
+
+        // The split comes from the rates that priced the step.
+        let parts = |s: &StepUsage| {
+            let c = s.cost_parts.as_ref().unwrap();
+            c.input + c.output + c.cache_read + c.cache_write
+        };
+        for (s, whole) in [(&d.steps[0], plain), (&d.steps[1], big)] {
+            assert!((parts(s) - s.cost_usd.unwrap()).abs() < 1e-9 && (parts(s) - whole).abs() < 1e-9);
+        }
+        let c = d.steps[0].cost_parts.as_ref().unwrap();
+        assert!((c.cache_write - 2_000.0 * 3.75 / 1e6).abs() < 1e-12);
+        assert_eq!(
+            d.steps[0].price,
+            Some(StepPrice { input: 3.0, output: 15.0, cache_read: 0.3, cache_write: 3.75, tier_above: None })
+        );
+        assert_eq!(
+            d.steps[1].price,
+            Some(StepPrice { input: 6.0, output: 22.5, cache_read: 0.6, cache_write: 7.5, tier_above: Some(200_000) })
+        );
+        for s in &d.steps[2..] {
+            assert!(s.cost_parts.is_none() && s.price.is_none(), "reported, unpriced and empty steps have no split");
+        }
     }
 
     #[test]
