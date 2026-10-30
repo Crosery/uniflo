@@ -421,6 +421,12 @@ impl Engine {
         v
     }
 
+    /// Every session's `updated_at` by key, without cloning whole sessions.
+    pub fn updated_ats(&self) -> HashMap<String, i64> {
+        let st = self.state.read().unwrap();
+        st.sessions.iter().map(|(k, e)| (k.clone(), e.session.updated_at)).collect()
+    }
+
     pub fn session(&self, key: &str) -> Option<Session> {
         self.state.read().unwrap().sessions.get(key).map(|e| e.session.clone())
     }

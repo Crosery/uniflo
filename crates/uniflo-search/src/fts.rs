@@ -319,6 +319,9 @@ struct Inner {
     rebuilt: bool,
     shared: Mutex<Shared>,
     readers: Mutex<Vec<Connection>>,
+    /// Connections the verifying threads read compressed cold blocks through (small page cache:
+    /// a block is read once, then decoded into [`Inner::blocks`]).
+    blob_readers: Mutex<Vec<Connection>>,
     cmds: Mutex<Vec<Cmd>>,
     pending_commands: AtomicUsize,
     park_when_idle: AtomicBool,
@@ -464,6 +467,7 @@ impl Fts {
             rebuilt: open_state.rebuilt(),
             shared: Mutex::new(shared),
             readers: Mutex::new(Vec::new()),
+            blob_readers: Mutex::new(Vec::new()),
             cmds: Mutex::new(Vec::new()),
             pending_commands: AtomicUsize::new(0),
             park_when_idle: AtomicBool::new(false),
@@ -640,11 +644,13 @@ impl Fts {
         let mut groups: HashMap<i64, Vec<Cand>> = HashMap::new();
         let end: ScanEnd = match &plan.fts {
             Some(_) if !plan.recent() => {
-                self.rank_hot(&conn, &plan, kinds.as_ref(), allowed.as_ref(), &mut groups)?;
+                let idfs = self.hot_idfs(&conn, &plan)?;
+                self.rank_hot(&conn, &plan, &idfs, kinds.as_ref(), allowed.as_ref(), &mut groups)?;
                 self.rank_cold(
                     &conn,
                     &dir,
                     &plan,
+                    &idfs,
                     kinds.as_ref(),
                     allowed.as_ref(),
                     now,
@@ -723,13 +729,13 @@ impl Fts {
         &self,
         conn: &Connection,
         plan: &query::Plan,
+        idfs: &[f64],
         kinds: Option<&HashSet<i64>>,
         allowed: Option<&HashSet<i64>>,
         groups: &mut HashMap<i64, Vec<Cand>>,
     ) -> Result<()> {
-        let idfs = self.hot_idfs(conn, plan)?;
         let avgdl = store::counters(conn)?.avgdl();
-        let idf_json = rank::idf_json(&idfs);
+        let idf_json = rank::idf_json(idfs);
         let expr = plan.fts.as_deref().unwrap_or_default();
         let sql = "SELECT rowid, uniflo_bm25n(docs_fts, ?2, ?3) FROM docs_fts WHERE docs_fts MATCH ?1";
         let mut st = conn.prepare_cached(sql)?;
@@ -771,6 +777,7 @@ impl Fts {
         conn: &Connection,
         dir: &cache::BlockDir,
         plan: &query::Plan,
+        idfs: &[f64],
         kinds: Option<&HashSet<i64>>,
         allowed: Option<&HashSet<i64>>,
         now: i64,
@@ -782,7 +789,6 @@ impl Fts {
         if candidates.is_empty() {
             return Ok(ScanEnd { total: Some(groups.len()), ..Default::default() });
         }
-        let idfs = self.hot_idfs(conn, plan)?;
         let avgdl = store::counters(conn)?.avgdl();
         let crit = verify::Criteria::from_plan(plan);
         let cache_key = cold_cache_key(plan, kinds);
@@ -809,7 +815,7 @@ impl Fts {
                     groups: &mut HashMap<i64, Vec<Cand>>,
                     sofar: &mut BinaryHeap<Reverse<OrdF64>>| {
             let Some(facts) = v.facts.as_deref() else { return };
-            let hits = score_session(facts, &idfs, avgdl);
+            let hits = score_session(facts, idfs, avgdl);
             if let Some(&(_, best)) = hits.first() {
                 push_score(sofar, best * recency(now, upd));
             }
@@ -841,8 +847,8 @@ impl Fts {
             if batch.is_empty() {
                 continue;
             }
-            let jobs = self.jobs(conn, dir, blocks.as_ref(), &batch)?;
-            for (&(sid, upd), v) in batch.iter().zip(self.verify_all(jobs, &crit, kinds, Check::Rows)?) {
+            let jobs = self.jobs(dir, blocks.as_ref(), &batch);
+            for (&(sid, upd), v) in batch.iter().zip(self.verify_all(conn, jobs, &crit, kinds, Check::Rows)?) {
                 take(&v, upd, groups, &mut sofar);
                 fresh.insert(sid, v);
             }
@@ -871,8 +877,8 @@ impl Fts {
             if batch.is_empty() {
                 continue;
             }
-            let jobs = self.jobs(conn, dir, blocks.as_ref(), &batch)?;
-            for (&(sid, _), v) in batch.iter().zip(self.verify_all(jobs, &crit, kinds, Check::Exists)?) {
+            let jobs = self.jobs(dir, blocks.as_ref(), &batch);
+            for (&(sid, _), v) in batch.iter().zip(self.verify_all(conn, jobs, &crit, kinds, Check::Exists)?) {
                 rest_matched += usize::from(v.matched);
                 fresh.insert(sid, v);
             }
@@ -954,36 +960,26 @@ impl Fts {
         self.by_recency(allowed).into_iter().filter(|(sid, _)| has(sid)).collect()
     }
 
-    /// The candidate blocks of `batch`'s sessions: decoded already (block cache) or compressed,
-    /// read here from the query's snapshot so the verifying threads need no connection.
-    fn jobs(
-        &self,
-        conn: &Connection,
-        dir: &cache::BlockDir,
-        blocks: Option<&HashMap<i64, Vec<i64>>>,
-        batch: &[(i64, i64)],
-    ) -> Result<Vec<Job>> {
-        let mut st = conn.prepare_cached("SELECT z FROM blk_data WHERE bid = ?1")?;
-        let mut out = Vec::with_capacity(batch.len());
-        for &(sid, _) in batch {
-            let bids =
-                blocks.map_or_else(|| dir.by_sid.get(&sid), |b| b.get(&sid)).map(Vec::as_slice).unwrap_or_default();
-            let mut job = Job { blocks: Vec::with_capacity(bids.len()) };
-            for &bid in bids {
-                let block = match self.inner.blocks.get(bid) {
-                    Some(rows) => Block::Ready(rows),
-                    None => Block::Packed(st.query_row([bid], |r| r.get(0))?),
-                };
-                job.blocks.push((bid, block));
-            }
-            out.push(job);
-        }
-        Ok(out)
+    /// The candidate blocks of `batch`'s sessions: decoded already (block cache), or left for the
+    /// verifying thread to read, so a cold query's disk reads run in parallel.
+    fn jobs(&self, dir: &cache::BlockDir, blocks: Option<&HashMap<i64, Vec<i64>>>, batch: &[(i64, i64)]) -> Vec<Job> {
+        batch
+            .iter()
+            .map(|&(sid, _)| {
+                let bids =
+                    blocks.map_or_else(|| dir.by_sid.get(&sid), |b| b.get(&sid)).map(Vec::as_slice).unwrap_or_default();
+                Job { blocks: bids.iter().map(|&bid| (bid, self.inner.blocks.get(bid))).collect() }
+            })
+            .collect()
     }
 
-    /// Verify `jobs` on up to [`FtsOptions::verify_threads`] threads; results in `jobs` order.
+    /// Verify `jobs` on up to [`FtsOptions::verify_threads`] threads; results in `jobs` order. A
+    /// lone job reads its blocks through `conn` (the query's snapshot); parallel ones each through
+    /// a connection of their own. Blocks are never rewritten in place (`bid` is `AUTOINCREMENT`),
+    /// so a newer snapshot holds the same bytes, or none once the writer has moved the session.
     fn verify_all(
         &self,
+        conn: &Connection,
         jobs: Vec<Job>,
         crit: &verify::Criteria,
         kinds: Option<&HashSet<i64>>,
@@ -993,7 +989,8 @@ impl Fts {
         let blocks = &self.inner.blocks;
         let threads = self.verify_threads().min(jobs.len());
         if threads <= 1 {
-            return jobs.into_iter().map(|j| verify_job(blocks, j, crit, kinds, check)).collect();
+            let mut read = |bid| read_block(conn, bid);
+            return jobs.into_iter().map(|j| verify_job(blocks, j, &mut read, crit, kinds, check)).collect();
         }
         let slots: Vec<Mutex<Option<Job>>> = jobs.into_iter().map(|j| Mutex::new(Some(j))).collect();
         let done: Vec<Mutex<Option<Result<cache::SessionVerify>>>> = slots.iter().map(|_| Mutex::new(None)).collect();
@@ -1001,11 +998,19 @@ impl Fts {
         std::thread::scope(|s| {
             for _ in 0..threads {
                 s.spawn(|| {
+                    let mut own: Option<Pooled<'_>> = None;
+                    let mut read = |bid| {
+                        let c = match &mut own {
+                            Some(c) => c,
+                            None => own.insert(self.blob_reader()?),
+                        };
+                        read_block(c, bid)
+                    };
                     loop {
                         let i = next.fetch_add(1, Ordering::Relaxed);
                         let Some(slot) = slots.get(i) else { break };
                         let job = slot.lock().unwrap().take().expect("each job is taken once");
-                        *done[i].lock().unwrap() = Some(verify_job(blocks, job, crit, kinds, check));
+                        *done[i].lock().unwrap() = Some(verify_job(blocks, job, &mut read, crit, kinds, check));
                     }
                 });
             }
@@ -1181,8 +1186,7 @@ impl Fts {
 
     /// Indexed sessions as `(sid, updated_at)`, most recently active first.
     fn by_recency(&self, allowed: Option<&HashSet<i64>>) -> Vec<(i64, i64)> {
-        let live: HashMap<String, i64> =
-            self.inner.engine.sessions().into_iter().map(|s| (s.key, s.updated_at)).collect();
+        let live = self.inner.engine.updated_ats();
         let sh = self.inner.shared.lock().unwrap();
         let mut out: Vec<(i64, i64)> = sh
             .sessions
@@ -1296,6 +1300,19 @@ impl Fts {
         Ok(Pooled { conn: Some(conn), pool: &self.inner.readers })
     }
 
+    fn blob_reader(&self) -> Result<Pooled<'_>> {
+        let conn = self.inner.blob_readers.lock().unwrap().pop();
+        let conn = match conn {
+            Some(c) => c,
+            None => {
+                let c = store::open_reader(&self.inner.opts.path)?;
+                c.pragma_update(None, "cache_size", -1024)?;
+                c
+            }
+        };
+        Ok(Pooled { conn: Some(conn), pool: &self.inner.blob_readers })
+    }
+
     /// Cold blocks decompressed and matched since start (tests: early termination).
     #[doc(hidden)]
     pub fn cold_verified_count(&self) -> usize {
@@ -1395,13 +1412,14 @@ fn kth(sofar: &BinaryHeap<Reverse<OrdF64>>) -> f64 {
 }
 
 /// One cold session's candidate blocks, for [`verify_job`].
+/// A session's candidate blocks: decoded already (from the block cache), or still to be read.
 struct Job {
-    blocks: Vec<(i64, Block)>,
+    blocks: Vec<(i64, Option<Arc<Vec<store::Row>>>)>,
 }
 
-enum Block {
-    Ready(Arc<Vec<store::Row>>),
-    Packed(Vec<u8>),
+/// One block's compressed bytes; `None` once the writer has dropped it.
+fn read_block(conn: &Connection, bid: i64) -> Result<Option<Vec<u8>>> {
+    Ok(conn.prepare_cached("SELECT z FROM blk_data WHERE bid = ?1")?.query_row([bid], |r| r.get(0)).optional()?)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1417,6 +1435,7 @@ enum Check {
 fn verify_job(
     blocks: &cache::BlockCache,
     job: Job,
+    read: &mut dyn FnMut(i64) -> Result<Option<Vec<u8>>>,
     crit: &verify::Criteria,
     kinds: Option<&HashSet<i64>>,
     check: Check,
@@ -1424,8 +1443,9 @@ fn verify_job(
     let mut facts = cache::Facts::default();
     for (bid, block) in job.blocks {
         let rows = match block {
-            Block::Ready(rows) => rows,
-            Block::Packed(z) => {
+            Some(rows) => rows,
+            None => {
+                let Some(z) = read(bid)? else { continue };
                 let (bytes, rows) = cold::decode_compressed(&z)?;
                 blocks.insert(bid, bytes, rows)
             }

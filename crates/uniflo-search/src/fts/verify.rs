@@ -17,6 +17,17 @@ fn fold_table() -> &'static HashMap<char, char> {
     TABLE.get_or_init(build_fold_table)
 }
 
+/// [`fold_table`] spread over the Basic Multilingual Plane, one slot per code point (256 KB): a
+/// cold query folds every candidate row, and hashing each CJK character into the map was a large
+/// share of a first query's CPU.
+fn bmp_folds() -> &'static [char] {
+    static DENSE: OnceLock<Box<[char]>> = OnceLock::new();
+    DENSE.get_or_init(|| {
+        let table = fold_table();
+        (0u32..0x1_0000).map(|cp| char::from_u32(cp).map_or('\0', |c| table.get(&c).copied().unwrap_or(c))).collect()
+    })
+}
+
 /// Candidates: every ASCII character, plus every character that could possibly need folding —
 /// either its Rust `to_lowercase` differs from itself (ordinary upper → lower, including
 /// multi-character results like `İ`), or it is already "lowercase" by Rust's rules but is not the
@@ -92,7 +103,10 @@ pub fn fold_char(c: char) -> char {
     if c.is_ascii() {
         return c.to_ascii_lowercase();
     }
-    fold_table().get(&c).copied().unwrap_or(c)
+    match bmp_folds().get(c as usize) {
+        Some(&f) => f,
+        None => fold_table().get(&c).copied().unwrap_or(c),
+    }
 }
 
 /// `s` with every character folded the way FTS5's trigram tokenizer would.
@@ -290,6 +304,16 @@ mod tests {
         assert_eq!(find("", "a"), None);
         assert_eq!(find("ab", "abc"), None);
         assert!(row_matches("", &Criteria::default()));
+    }
+
+    #[test]
+    fn dense_folds_agree_with_the_probed_table() {
+        for (&c, &f) in fold_table() {
+            assert_eq!(fold_char(c), f, "{c:?}");
+        }
+        for c in ['中', '文', 'ı', '\u{1F600}', 'é'] {
+            assert_eq!(fold_char(c), fold_table().get(&c).copied().unwrap_or(c), "{c:?}");
+        }
     }
 
     #[test]
