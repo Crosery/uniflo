@@ -76,6 +76,16 @@ pub fn run(check: bool, prerelease: bool, json: bool) -> Result<()> {
     let cur = &info.current;
     if let Some(err) = &info.error {
         println!("{}", tr!("uniflo {cur}：无法检查更新 — {err}", "uniflo {cur}: cannot check for updates — {err}"));
+        println!(
+            "{}",
+            step(
+                Mark::Info,
+                &tr!(
+                    "可用 UNIFLO_MIRROR=cn（国内镜像优先）或 UNIFLO_MIRROR=official（官方优先）指定更新源后重试",
+                    "retry with UNIFLO_MIRROR=cn (mainland China mirrors first) or UNIFLO_MIRROR=official (official sources first)"
+                )
+            )
+        );
         return Ok(());
     }
     // Decide what (if anything) to install.
@@ -135,10 +145,10 @@ pub fn run(check: bool, prerelease: bool, json: bool) -> Result<()> {
     }
     let t0 = Instant::now();
     let how = match record {
-        Some(rec) => {
-            binary_upgrade(&exe, rec, &record_file, version)?;
-            tr!("发布包", "release package")
-        }
+        Some(rec) => match binary_upgrade(&exe, rec, &record_file, version)? {
+            Some(host) => tr!("发布包 · 经 {host}", "release package via {host}"),
+            None => tr!("发布包", "release package"),
+        },
         None => {
             cargo_install(&exe, version)?;
             "cargo install".to_owned()
@@ -226,8 +236,22 @@ fn cargo_install(#[cfg_attr(not(windows), allow(unused_variables))] exe: &Path, 
 /// `cargo install` with its build log folded into one live line; the log's tail is printed only
 /// when the build fails.
 fn run_cargo(version: &str) -> Result<()> {
+    let mirror = uniflo_core::mirror::cargo_args(uniflo_core::mirror::region(), &uniflo_core::mirror::cargo_home());
+    if !mirror.is_empty() {
+        println!(
+            "{}",
+            step(
+                Mark::Info,
+                &tr!(
+                    "按时区使用国内镜像 rsproxy.cn 下载依赖（UNIFLO_MIRROR=official 改回官方源）",
+                    "fetching crates through the rsproxy.cn mirror for your time zone (UNIFLO_MIRROR=official to use crates.io)"
+                )
+            )
+        );
+    }
     let mut child = std::process::Command::new("cargo")
         .args(["install", "uniflo", "--force", "--color", "never", "--version", version])
+        .args(&mirror)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
@@ -273,7 +297,8 @@ fn run_cargo(version: &str) -> Result<()> {
     Ok(())
 }
 
-fn binary_upgrade(exe: &Path, mut rec: InstallRecord, record_file: &Path, version: &str) -> Result<()> {
+/// Returns the host the package came from when it was not GitHub itself.
+fn binary_upgrade(exe: &Path, mut rec: InstallRecord, record_file: &Path, version: &str) -> Result<Option<String>> {
     let target = match rec.target.as_str() {
         "" => install::host_target()
             .context(tr!("这个平台没有预编译发布包", "no prebuilt package for this platform"))?
@@ -282,9 +307,11 @@ fn binary_upgrade(exe: &Path, mut rec: InstallRecord, record_file: &Path, versio
     };
     let mut live = Live::new();
     live.set(&tr!("下载 {version}（{target}）…", "downloading {version} ({target})…"));
-    let res = install::upgrade_binary(exe, &target, version, &install::release_base());
+    let bases = install::release_bases();
+    let res = install::upgrade_binary(exe, &target, version, &bases);
     live.clear();
-    res.with_context(|| tr!("升级失败，{} 未改动", "upgrade failed, {} left unchanged", exe.display()))?;
+    let from = res.with_context(|| tr!("升级失败，{} 未改动", "upgrade failed, {} left unchanged", exe.display()))?;
+    let via = (from != bases[0]).then(|| uniflo_core::mirror::host(from).to_owned());
     rec.version = version.to_owned();
     rec.target = target;
     if let Err(e) = rec.save(record_file) {
@@ -297,7 +324,7 @@ fn binary_upgrade(exe: &Path, mut rec: InstallRecord, record_file: &Path, versio
             )
         );
     }
-    Ok(())
+    Ok(via)
 }
 
 /// The two ways to upgrade an install `uniflo update` does not manage.

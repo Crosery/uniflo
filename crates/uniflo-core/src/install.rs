@@ -125,13 +125,13 @@ pub fn asset_binary(version: &str, target: &str) -> String {
     format!("uniflo-{version}-{target}/{exe}")
 }
 
-pub fn release_base() -> String {
-    std::env::var("UNIFLO_RELEASE_BASE_URL")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| RELEASE_BASE_URL.to_owned())
-        .trim_end_matches('/')
-        .to_owned()
+/// Release roots to download from: `UNIFLO_RELEASE_BASE_URL` alone when set, else GitHub and then
+/// the public accelerators in front of it ([`crate::mirror::release_bases`]).
+pub fn release_bases() -> Vec<String> {
+    match std::env::var("UNIFLO_RELEASE_BASE_URL").ok().filter(|s| !s.is_empty()) {
+        Some(base) => vec![base.trim_end_matches('/').to_owned()],
+        None => crate::mirror::release_bases(RELEASE_BASE_URL),
+    }
 }
 
 pub fn download_url(base: &str, version: &str, file: &str) -> String {
@@ -149,15 +149,17 @@ pub fn listed_sum(sums: &str, name: &str) -> Option<String> {
     })
 }
 
-/// Download `version` for `target` from `base`, check it against `SHA256SUMS`, unpack it, make sure
-/// the new executable runs and reports `version`, then put it in place of `exe`.
-pub fn upgrade_binary(exe: &Path, target: &str, version: &str, base: &str) -> Result<()> {
+/// Download `version` for `target` from the first of `bases` that serves it, check it against
+/// `SHA256SUMS` (fetched in the same order, so from GitHub itself whenever it answers), unpack it,
+/// make sure the new executable runs and reports `version`, then put it in place of `exe`.
+/// Returns the base the package came from.
+pub fn upgrade_binary<'a>(exe: &Path, target: &str, version: &str, bases: &'a [String]) -> Result<&'a str> {
     let work = Scratch::new()?;
     let name = asset_name(version, target);
     let pkg = work.0.join(&name);
     let sums = work.0.join(SUMS_FILE);
-    fetch(&download_url(base, version, &name), &pkg)?;
-    fetch(&download_url(base, version, SUMS_FILE), &sums)?;
+    fetch_any(bases, version, SUMS_FILE, &sums)?;
+    let from = fetch_any(bases, version, &name, &pkg)?;
     let listed = std::fs::read_to_string(&sums).context("read SHA256SUMS")?;
     let want = listed_sum(&listed, &name).with_context(|| format!("{SUMS_FILE} has no entry for {name}"))?;
     let got = crate::archive::sha256_file(&pkg).with_context(|| format!("hash {}", pkg.display()))?;
@@ -181,7 +183,8 @@ pub fn upgrade_binary(exe: &Path, target: &str, version: &str, base: &str) -> Re
     if reported != format!("uniflo {version}") {
         bail!("the unpacked executable reports {reported:?}, expected \"uniflo {version}\"");
     }
-    swap(&new, exe, if cfg!(windows) { Swap::Aside } else { Swap::Replace })
+    swap(&new, exe, if cfg!(windows) { Swap::Aside } else { Swap::Replace })?;
+    Ok(from)
 }
 
 /// A private temporary directory, removed on drop.
@@ -201,13 +204,28 @@ impl Drop for Scratch {
     }
 }
 
+/// Download `file` of `version` from the first base that serves it; returns that base.
+fn fetch_any<'a>(bases: &'a [String], version: &str, file: &str, dest: &Path) -> Result<&'a str> {
+    let mut errors = Vec::new();
+    for base in bases {
+        match fetch(&download_url(base, version, file), dest) {
+            Ok(()) => return Ok(base),
+            Err(e) => errors.push(format!("{e:#}")),
+        }
+    }
+    bail!("{}", errors.join("; "))
+}
+
+/// One download; a source that cannot connect within 8 s or stalls below 10 KB/s for 20 s fails,
+/// so the next one gets its turn.
 fn fetch(url: &str, dest: &Path) -> Result<()> {
     #[cfg(windows)]
     let bin = "curl.exe";
     #[cfg(not(windows))]
     let bin = "curl";
     let out = crate::util::silent_cmd(bin)
-        .args(["-fsSL", "--max-time", "600", "--user-agent", &format!("uniflo/{}", crate::update::current_version())])
+        .args(["-fsSL", "--connect-timeout", "8", "--speed-limit", "10240", "--speed-time", "20", "--max-time", "600"])
+        .args(["--user-agent", &format!("uniflo/{}", crate::update::current_version())])
         .arg("-o")
         .arg(dest)
         .arg(url)
@@ -586,6 +604,31 @@ mod tests {
         remove_aside(&exe);
         assert!(!legacy.exists());
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_failed_source_hands_over_to_the_next() {
+        use std::io::{Read, Write};
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let good = format!("http://{}/releases", l.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for mut s in l.incoming().map_while(Result::ok) {
+                let mut req = [0u8; 4096];
+                let n = s.read(&mut req).unwrap_or(0);
+                let hit = String::from_utf8_lossy(&req[..n]).starts_with("GET /releases/download/v1.2.3/SHA256SUMS ");
+                let (status, body) = if hit { ("200 OK", "sums") } else { ("404 Not Found", "") };
+                let _ =
+                    write!(s, "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            }
+        });
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let bases = vec![format!("http://127.0.0.1:{port}/releases"), good.clone()];
+        let work = Scratch::new().unwrap();
+        let dest = work.0.join(SUMS_FILE);
+        assert_eq!(fetch_any(&bases, "1.2.3", SUMS_FILE, &dest).unwrap(), good);
+        assert_eq!(std::fs::read_to_string(&dest).unwrap(), "sums");
+        let err = fetch_any(&bases[..1], "1.2.3", SUMS_FILE, &dest).unwrap_err();
+        assert!(format!("{err:#}").contains(&format!("127.0.0.1:{port}")), "{err:#}");
     }
 
     #[test]

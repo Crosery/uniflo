@@ -8,7 +8,7 @@
 
 [开发者站](https://crosery.github.io/uniflo/) · [快速开始](#快速开始) · [网页控制台](docs/console.md) · [网关 API](docs/api.md) · [Rust SDK](docs/sdk.md) · [Agent 接入](docs/agents.md) · [llms.txt](https://crosery.github.io/uniflo/llms.txt)
 
-[0.2.5 发布说明](docs/releases/v0.2.5.md)：全文索引空闲时不再持续占用 CPU，冷查询更快，建库后新增会话如实显示进度，MCP 切回守护进程后归还内存。
+[0.2.6 发布说明](docs/releases/v0.2.6.md)：更新检查同时有官方源和国内镜像，下载在 GitHub 连不上时自动改经加速站，中国大陆的 `uniflo update` 不再卡住。
 
 ![会话视图](docs/assets/demo.png)
 
@@ -41,6 +41,8 @@ cargo install uniflo
 curl -fsSL https://github.com/Crosery/uniflo/releases/latest/download/install.sh | sh
 #   Windows PowerShell（装到 %LOCALAPPDATA%\Programs\uniflo）：
 #   irm https://github.com/Crosery/uniflo/releases/latest/download/install.ps1 | iex
+#   中国大陆连不上 GitHub 时，经加速地址取脚本（脚本里的下载会自动换源）：
+#   curl -fsSL https://ghfast.top/https://github.com/Crosery/uniflo/releases/latest/download/install.sh | sh
 
 # 方式 3：cargo-binstall（下载同一份预编译包，不编译）
 cargo binstall uniflo
@@ -140,7 +142,7 @@ for s in client.sessions("s:work", 20)? {
 
 ## 升级
 
-守护进程默认每小时向 crates.io 稀疏索引发一次 HTTPS GET（系统 `curl`）。**更新只指向正式版**；预发布版（`-rc`/`-beta`）仅被探测并提示，装不装由你决定。在终端里运行 uniflo 的命令，结束时如果已有新正式版，会在末尾弹出一个小框提醒（stdout、stderr 都是终端时才出现，管道、脚本、hook、agent 看不到；`UNIFLO_NO_UPDATE_CHECK=1` 关闭）。最新版本缓存在缓存目录的 `update-check.json`，后台线程最多每小时刷新一次，命令本身不等网络。`uniflo update` 按安装方式升级：
+守护进程默认每小时查一次 crates.io 稀疏索引（系统 `curl`）。系统时区是中国大陆时先问国内镜像（rsproxy.cn、中科大），其他地区先问 crates.io；首选源 2 秒内没有回答或失败就同时问另一组，取各源报告的最新版本。`UNIFLO_MIRROR=cn` 或 `official` 可以指定先问哪一组。**更新只指向正式版**；预发布版（`-rc`/`-beta`）仅被探测并提示，装不装由你决定。在终端里运行 uniflo 的命令，结束时如果已有新正式版，会在末尾弹出一个小框提醒（stdout、stderr 都是终端时才出现，管道、脚本、hook、agent 看不到；`UNIFLO_NO_UPDATE_CHECK=1` 关闭）。最新版本缓存在缓存目录的 `update-check.json`，后台线程最多每小时刷新一次，命令本身不等网络。`uniflo update` 按安装方式升级：
 
 ```sh
 uniflo update --check                     # 只查询有没有新正式版（退出码 10 = 有新版）
@@ -152,8 +154,8 @@ uniflo daemon --no-update-check           # 关闭后台检查
 
 | 安装方式 | 判定 | `uniflo update` 的做法 |
 |---|---|---|
-| `cargo` | 可执行文件在 `$CARGO_HOME/bin` 或 `~/.cargo/bin` | `cargo install uniflo --force --version <新版本>` |
-| `binary` | `install.json` 记录的路径就是当前可执行文件（安装脚本写入） | 下载新版本的包和 `SHA256SUMS`，校验后原子替换，并更新 `install.json`；任何一步失败，原可执行文件都不变 |
+| `cargo` | 可执行文件在 `$CARGO_HOME/bin` 或 `~/.cargo/bin` | `cargo install uniflo --force --version <新版本>`；中国大陆时区且 cargo 配置没有自己替换源时，经 rsproxy.cn 镜像下载 |
+| `binary` | `install.json` 记录的路径就是当前可执行文件（安装脚本写入） | 下载新版本的包和 `SHA256SUMS`，校验后原子替换，并更新 `install.json`；GitHub 连不上或太慢时依次改经 ghfast.top、gh-proxy.com；任何一步失败，原可执行文件都不变 |
 | `unknown` | 其他（源码构建、拷贝的文件等） | 只打印上面两种升级方式，不做改动 |
 
 装好之后由新版本收尾，每步一行：

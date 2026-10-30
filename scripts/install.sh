@@ -11,7 +11,7 @@
 #   UNIFLO_VERSION           version to install (default: the newest stable release)
 #   UNIFLO_INSTALL_DIR       where the executable goes (default: ~/.local/bin)
 #   UNIFLO_NO_SETUP=1        never run `uniflo setup` (same as --no-setup)
-#   UNIFLO_RELEASE_BASE_URL  release root (default: https://github.com/Crosery/uniflo/releases)
+#   UNIFLO_RELEASE_BASE_URL  release root (default: GitHub, then ghfast.top and gh-proxy.com in front of it)
 #   UNIFLO_CONFIG_DIR, UNIFLO_HOME  where install.json goes, exactly as for uniflo itself
 set -eu
 
@@ -36,8 +36,14 @@ done
 # pick "中文" "English": the message in the detected language.
 pick() { if [ "$lang_zh" = 1 ]; then printf '%s' "$1"; else printf '%s' "$2"; fi; }
 
-base=${UNIFLO_RELEASE_BASE_URL:-https://github.com/Crosery/uniflo/releases}
-base=${base%/}
+# Release roots, tried in order: GitHub, then public accelerators in front of it, which answer from
+# mainland China when GitHub does not. UNIFLO_RELEASE_BASE_URL replaces them all.
+github=https://github.com/Crosery/uniflo/releases
+if [ -n "${UNIFLO_RELEASE_BASE_URL:-}" ]; then
+  bases=${UNIFLO_RELEASE_BASE_URL%/}
+else
+  bases="$github https://ghfast.top/$github https://gh-proxy.com/$github"
+fi
 
 say() { printf 'uniflo-install: %s\n' "$*"; }
 die() {
@@ -85,7 +91,15 @@ elif command -v sha256sum >/dev/null 2>&1; then
 else
   die "$(pick "需要 shasum 或 sha256sum 来校验下载" "shasum or sha256sum is required to verify the download")"
 fi
-fetch() { curl -fsSL --retry 2 -o "$2" "$1" || die "$(pick "下载失败：$1" "download failed: $1")"; }
+# fetch <path under the release root> <dest>: the first root that serves it wins; a root that
+# cannot connect within 8 s or stalls below 10 KB/s for 20 s hands over to the next.
+fetch() {
+  for b in $bases; do
+    curl -fsSL --connect-timeout 8 --speed-limit 10240 --speed-time 20 -o "$2" "$b/$1" && return 0
+    rm -f "$2"
+  done
+  die "$(pick "下载失败：$1" "download failed: $1")"
+}
 
 tmp=$(mktemp -d 2>/dev/null || mktemp -d -t uniflo) || die "$(pick "无法创建临时目录" "could not create a temp directory")"
 trap 'rm -rf "$tmp"' EXIT
@@ -95,15 +109,15 @@ version=${UNIFLO_VERSION:-}
 version=${version#v}
 if [ -z "$version" ]; then
   # The newest stable release's SHA256SUMS names its packages, and so its version.
-  fetch "$base/latest/download/SHA256SUMS" "$tmp/latest-SHA256SUMS"
+  fetch "latest/download/SHA256SUMS" "$tmp/latest-SHA256SUMS"
   version=$(sed -n "s/^[0-9a-fA-F]\{64\}[ *]*uniflo-\(.*\)-$target\.tar\.gz\$/\1/p" "$tmp/latest-SHA256SUMS" | head -n 1)
   [ -n "$version" ] || die "$(pick "最新发布里没有 $target 的包" "the latest release has no package for $target")"
 fi
 
 pkg=uniflo-$version-$target.tar.gz
 say "$(pick "下载 uniflo ${version}（${target}）" "downloading uniflo ${version} (${target})")"
-fetch "$base/download/v$version/$pkg" "$tmp/$pkg"
-fetch "$base/download/v$version/SHA256SUMS" "$tmp/SHA256SUMS"
+fetch "download/v$version/$pkg" "$tmp/$pkg"
+fetch "download/v$version/SHA256SUMS" "$tmp/SHA256SUMS"
 want=$(awk -v f="$pkg" '$2 == f || $2 == "*" f { print tolower($1); exit }' "$tmp/SHA256SUMS")
 [ -n "$want" ] || die "$(pick "SHA256SUMS 里没有 $pkg" "SHA256SUMS has no entry for $pkg")"
 got=$(sha256 "$tmp/$pkg" | tr 'A-F' 'a-f')

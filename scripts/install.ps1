@@ -10,7 +10,7 @@
 #   UNIFLO_VERSION           version to install (default: the newest stable release)
 #   UNIFLO_INSTALL_DIR       where uniflo.exe goes (default: %LOCALAPPDATA%\Programs\uniflo)
 #   UNIFLO_NO_SETUP=1        never run `uniflo setup` (same as --no-setup)
-#   UNIFLO_RELEASE_BASE_URL  release root (default: https://github.com/Crosery/uniflo/releases)
+#   UNIFLO_RELEASE_BASE_URL  release root (default: GitHub, then ghfast.top and gh-proxy.com in front of it)
 #   UNIFLO_CONFIG_DIR, UNIFLO_HOME  where install.json goes, exactly as for uniflo itself
 
 & {
@@ -49,13 +49,20 @@
         $prefix = if ($isZh) { T 'uniflo-install: \u9519\u8bef\uff1a' } else { 'uniflo-install: error: ' }
         throw ($prefix + $m)
     }
-    function Fetch([string]$url, [string]$out) {
-        try { Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $out }
-        catch { Fail ((Pick '\u4e0b\u8f7d\u5931\u8d25\uff1a{0}\uff08{1}\uff09' 'download failed: {0} ({1})') -f $url, $_.Exception.Message) }
+    # Release roots, tried in order: GitHub, then public accelerators in front of it, which answer
+    # from mainland China when GitHub does not. UNIFLO_RELEASE_BASE_URL replaces them all.
+    $github = 'https://github.com/Crosery/uniflo/releases'
+    $bases = @($github, "https://ghfast.top/$github", "https://gh-proxy.com/$github")
+    if ($env:UNIFLO_RELEASE_BASE_URL) { $bases = @($env:UNIFLO_RELEASE_BASE_URL.TrimEnd('/')) }
+    # Fetch <path under the release root> <dest>: the first root that serves it wins.
+    function Fetch([string]$path, [string]$out) {
+        $errs = @()
+        foreach ($b in $bases) {
+            try { Invoke-WebRequest -UseBasicParsing -TimeoutSec 30 -Uri "$b/$path" -OutFile $out; return }
+            catch { $errs += "$b/$path ($($_.Exception.Message))"; Remove-Item -Force -ErrorAction SilentlyContinue $out }
+        }
+        Fail ((Pick '\u4e0b\u8f7d\u5931\u8d25\uff1a{0}\uff08{1}\uff09' 'download failed: {0} ({1})') -f $path, ($errs -join '; '))
     }
-
-    $base = 'https://github.com/Crosery/uniflo/releases'
-    if ($env:UNIFLO_RELEASE_BASE_URL) { $base = $env:UNIFLO_RELEASE_BASE_URL.TrimEnd('/') }
     $noSetup = ($args -contains '--no-setup') -or ($args -contains '-NoSetup') -or
         ($env:UNIFLO_NO_SETUP -and $env:UNIFLO_NO_SETUP -ne '0')
 
@@ -72,7 +79,7 @@
         if (-not $version) {
             # The newest stable release's SHA256SUMS names its packages, and so its version.
             $latest = Join-Path $tmp 'latest-SHA256SUMS'
-            Fetch "$base/latest/download/SHA256SUMS" $latest
+            Fetch "latest/download/SHA256SUMS" $latest
             $pattern = '^[0-9a-fA-F]{64}\s+\*?uniflo-(.+)-' + [regex]::Escape($target) + '\.zip$'
             $hit = Get-Content -LiteralPath $latest | Where-Object { $_ -match $pattern } | Select-Object -First 1
             if (-not $hit) { Fail ((Pick '\u6700\u65b0\u53d1\u5e03\u91cc\u6ca1\u6709 {0} \u7684\u5305' 'the latest release has no package for {0}') -f $target) }
@@ -84,8 +91,8 @@
         $pkgPath = Join-Path $tmp $pkg
         $sumsPath = Join-Path $tmp 'SHA256SUMS'
         Say ((Pick '\u4e0b\u8f7d uniflo {0}\uff08{1}\uff09' 'downloading uniflo {0} ({1})') -f $version, $target)
-        Fetch "$base/download/v$version/$pkg" $pkgPath
-        Fetch "$base/download/v$version/SHA256SUMS" $sumsPath
+        Fetch "download/v$version/$pkg" $pkgPath
+        Fetch "download/v$version/SHA256SUMS" $sumsPath
         $want = $null
         foreach ($line in Get-Content -LiteralPath $sumsPath) {
             if ($line -match '^([0-9a-fA-F]{64})\s+\*?(.+)$' -and $Matches[2].Trim() -eq $pkg) {

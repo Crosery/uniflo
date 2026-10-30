@@ -1,14 +1,30 @@
-//! Update check against the crates.io sparse index.
+//! Update check against the crates.io sparse index and its mirrors.
 //!
 //! Transport is the system `curl` (ships with macOS and Windows 10 1803+), like the
 //! `ps`/`lsof` shells in [`crate::procs`]: the tree stays free of TLS/HTTP deps.
-//! The sparse index is NDJSON, one object per published version.
+//! The sparse index is NDJSON, one object per published version. Sources and their order come
+//! from [`crate::mirror`]: the first group is asked at once, the second when the first is slow or
+//! fails, and the newest version any of them reports wins, so a lagging mirror cannot hide a
+//! release.
 
 use serde::Serialize;
+use std::path::PathBuf;
+use std::process::{Child, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
-/// crates.io sparse-index path for the `uniflo` crate (2-letter namespace);
-/// `UNIFLO_UPDATE_INDEX_URL` replaces it (tests).
+/// Sparse-index path of the `uniflo` crate under an index root (2-letter namespace).
+pub const INDEX_PATH: &str = "un/if/uniflo";
+/// The official sparse-index URL of the crate; `UNIFLO_UPDATE_INDEX_URL` replaces every source
+/// with one URL (tests, a private mirror).
 pub const INDEX_URL: &str = "https://index.crates.io/un/if/uniflo";
+
+/// How long the first group gets before the second is asked too.
+const HEDGE: Duration = Duration::from_secs(2);
+/// After the first answer, how long the other running sources still get to report a newer version.
+const GRACE: Duration = Duration::from_millis(800);
+/// The whole check ends by then; each request also gives up on its own (`--max-time`).
+const DEADLINE: Duration = Duration::from_secs(12);
 
 pub fn current_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
@@ -87,30 +103,129 @@ pub struct UpdateInfo {
     pub error: Option<String>,
 }
 
-/// Fetch the sparse index with the system curl. Err carries a human-readable reason
-/// (missing curl, network failure, timeout) — never a panic path for the daemon.
+/// Ask the index sources for the published versions. Err carries a human-readable reason
+/// (missing curl, every source failed) — never a panic path for the daemon.
 pub fn fetch_releases() -> Result<Releases, String> {
+    let groups = match std::env::var("UNIFLO_UPDATE_INDEX_URL").ok().filter(|s| !s.is_empty()) {
+        Some(url) => [vec![url], Vec::new()],
+        None => crate::mirror::index_groups(crate::mirror::region())
+            .map(|g| g.into_iter().map(|root| format!("{root}{INDEX_PATH}")).collect()),
+    };
+    race(&groups, HEDGE, GRACE, DEADLINE)
+}
+
+/// One running `curl` writing an index body to `out`.
+struct Probe {
+    url: String,
+    child: Child,
+    out: PathBuf,
+}
+
+/// Fetch `groups[0]` at once and `groups[1]` once `hedge` passes without an answer or the first
+/// group has failed; merge every answer that arrives within `grace` of the first one.
+fn race(groups: &[Vec<String>; 2], hedge: Duration, grace: Duration, deadline: Duration) -> Result<Releases, String> {
     #[cfg(windows)]
     let bin = "curl.exe";
     #[cfg(not(windows))]
     let bin = "curl";
-    let url = std::env::var("UNIFLO_UPDATE_INDEX_URL").ok().filter(|s| !s.is_empty());
-    let out = crate::util::silent_cmd(bin)
-        .args(["-fsS", "--max-time", "15", "--user-agent", &format!("uniflo/{}", current_version())])
-        .arg(url.as_deref().unwrap_or(INDEX_URL))
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .map_err(|e| format!("{bin} unavailable: {e}"))?;
-    if !out.status.success() {
-        return Err(format!("crates.io index fetch failed (exit {:?})", out.status.code()));
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "uniflo-index-{}-{}-{}",
+        std::process::id(),
+        crate::util::now_ms(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+    let agent = format!("uniflo/{}", current_version());
+    let limit = deadline.as_secs().max(1).to_string();
+    let mut n = 0;
+    let mut start = |url: &String, running: &mut Vec<Probe>, errors: &mut Vec<String>| {
+        n += 1;
+        let out = dir.join(format!("{n}.ndjson"));
+        let spawned = crate::util::silent_cmd(bin)
+            .args(["-fsSL", "--connect-timeout", "5", "--max-time", &limit, "--user-agent", &agent, "-o"])
+            .arg(&out)
+            .arg(url)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+        match spawned {
+            Ok(child) => running.push(Probe { url: url.clone(), child, out }),
+            Err(e) => errors.push(format!("{bin} unavailable: {e}")),
+        }
+    };
+    let t0 = Instant::now();
+    let (mut running, mut errors, mut found) = (Vec::new(), Vec::new(), Vec::new());
+    for url in &groups[0] {
+        start(url, &mut running, &mut errors);
     }
-    let body = String::from_utf8_lossy(&out.stdout).into_owned();
-    let rel = parse_releases(&body);
-    if rel.stable.is_none() && rel.prerelease.is_none() {
-        return Err("no published versions found".to_owned());
+    let mut second = groups[1].is_empty();
+    let mut settle = None;
+    loop {
+        running.retain_mut(|p| {
+            let status = match p.child.try_wait() {
+                Ok(None) => return true,
+                Ok(Some(status)) => status,
+                Err(e) => {
+                    errors.push(format!("{} ({e})", crate::mirror::host(&p.url)));
+                    return false;
+                }
+            };
+            let host = crate::mirror::host(&p.url);
+            if !status.success() {
+                errors.push(format!("{host} (curl exit {})", status.code().map_or("signal".into(), |c| c.to_string())));
+                return false;
+            }
+            let rel = parse_releases(&std::fs::read_to_string(&p.out).unwrap_or_default());
+            if rel == Releases::default() {
+                errors.push(format!("{host} (no published versions)"));
+            } else {
+                found.push(rel);
+            }
+            false
+        });
+        let now = Instant::now();
+        if !found.is_empty() {
+            let at = *settle.get_or_insert(now + grace);
+            if running.is_empty() || now >= at {
+                break;
+            }
+        } else if !second && (running.is_empty() || now >= t0 + hedge) {
+            second = true;
+            for url in &groups[1] {
+                start(url, &mut running, &mut errors);
+            }
+        } else if running.is_empty() {
+            break;
+        }
+        if now >= t0 + deadline {
+            errors.extend(running.iter().map(|p| format!("{} (timed out)", crate::mirror::host(&p.url))));
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
     }
-    Ok(rel)
+    for mut p in running {
+        let _ = p.child.kill();
+        let _ = p.child.wait();
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    if found.is_empty() {
+        return Err(format!("no update source answered: {}", errors.join(", ")));
+    }
+    Ok(merge(found))
+}
+
+/// The newest stable and the newest prerelease across several answers.
+fn merge(all: Vec<Releases>) -> Releases {
+    let pick = |a: Option<String>, b: Option<String>| match (a, b) {
+        (Some(a), Some(b)) => Some(if is_newer(&b, &a) { b } else { a }),
+        (a, b) => a.or(b),
+    };
+    all.into_iter().fold(Releases::default(), |acc, r| Releases {
+        stable: pick(acc.stable, r.stable),
+        prerelease: pick(acc.prerelease, r.prerelease),
+    })
 }
 
 /// Judge a release pair against the running version: `available` is driven by the
@@ -151,6 +266,91 @@ pub fn check() -> UpdateInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+
+    const V4: &str = "{\"name\":\"uniflo\",\"vers\":\"0.2.4\",\"yanked\":false}\n";
+    const V5: &str = "{\"name\":\"uniflo\",\"vers\":\"0.2.5\",\"yanked\":false}\n";
+
+    /// An index source on 127.0.0.1 answering every request with `body` after `delay`; counts requests.
+    fn source(body: &'static str, delay: Duration) -> (String, Arc<AtomicUsize>) {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/{INDEX_PATH}", l.local_addr().unwrap());
+        let hits = Arc::new(AtomicUsize::new(0));
+        let h = hits.clone();
+        std::thread::spawn(move || {
+            for mut s in l.incoming().map_while(Result::ok) {
+                h.fetch_add(1, SeqCst);
+                std::thread::spawn(move || {
+                    let _ = s.read(&mut [0u8; 4096]);
+                    std::thread::sleep(delay);
+                    let _ = write!(
+                        s,
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                });
+            }
+        });
+        (url, hits)
+    }
+
+    /// A URL nothing listens on.
+    fn closed() -> String {
+        let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        format!("http://127.0.0.1:{port}/{INDEX_PATH}")
+    }
+
+    const LONG: Duration = Duration::from_secs(10);
+
+    #[test]
+    fn a_quick_first_group_answers_alone() {
+        let (a, _) = source(V5, Duration::ZERO);
+        let (b, b_hits) = source(V4, Duration::ZERO);
+        let rel = race(&[vec![a], vec![b]], Duration::from_secs(2), Duration::from_millis(100), LONG).unwrap();
+        assert_eq!(rel.stable.as_deref(), Some("0.2.5"));
+        assert_eq!(b_hits.load(SeqCst), 0, "the second group was asked although the first answered");
+    }
+
+    #[test]
+    fn a_slow_first_group_is_hedged() {
+        let (slow, _) = source(V5, Duration::from_secs(5));
+        let (fast, fast_hits) = source(V4, Duration::ZERO);
+        let t0 = Instant::now();
+        let rel =
+            race(&[vec![slow], vec![fast]], Duration::from_millis(200), Duration::from_millis(100), LONG).unwrap();
+        assert!(t0.elapsed() < Duration::from_secs(3), "took {:?}", t0.elapsed());
+        assert_eq!(rel.stable.as_deref(), Some("0.2.4"));
+        assert_eq!(fast_hits.load(SeqCst), 1);
+    }
+
+    #[test]
+    fn a_failed_first_group_falls_through_without_waiting() {
+        let (b, _) = source(V5, Duration::ZERO);
+        let t0 = Instant::now();
+        // Windows takes about 2 s to report a refused localhost connection; still well under the hedge.
+        let rel = race(&[vec![closed()], vec![b]], Duration::from_secs(8), Duration::from_millis(100), LONG).unwrap();
+        assert!(t0.elapsed() < Duration::from_secs(5), "took {:?}", t0.elapsed());
+        assert_eq!(rel.stable.as_deref(), Some("0.2.5"));
+    }
+
+    #[test]
+    fn a_lagging_mirror_does_not_hide_a_release() {
+        let (lagging, _) = source(V4, Duration::ZERO);
+        let (current, _) = source(V5, Duration::from_millis(300));
+        let rel =
+            race(&[vec![lagging, current], vec![]], Duration::from_secs(2), Duration::from_secs(2), LONG).unwrap();
+        assert_eq!(rel.stable.as_deref(), Some("0.2.5"));
+    }
+
+    #[test]
+    fn every_failed_source_is_named() {
+        let err = race(&[vec![closed()], vec![closed()]], Duration::from_millis(100), Duration::from_millis(100), LONG)
+            .unwrap_err();
+        assert_eq!(err.matches("127.0.0.1:").count(), 2, "{err}");
+    }
 
     #[test]
     fn release_ordering_and_prerelease_rank() {

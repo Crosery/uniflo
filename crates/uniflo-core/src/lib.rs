@@ -26,6 +26,7 @@ pub mod family;
 pub mod install;
 pub mod jsonl;
 pub mod memory;
+pub mod mirror;
 pub mod paths;
 pub mod pricing;
 pub mod procs;
