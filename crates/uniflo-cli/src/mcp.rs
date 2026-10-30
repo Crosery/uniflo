@@ -216,8 +216,7 @@ impl Server {
             if let Ok(mut r) = c.get(path) {
                 let status = r.status;
                 let body = r.body()?;
-                self.local = None;
-                self.noted = false;
+                self.drop_fallback();
                 return Ok((status, body));
             }
         }
@@ -242,8 +241,14 @@ impl Server {
     /// request asks the daemon first and rebuilds the index (from the cache) only without one.
     fn release_idle(&mut self) {
         if self.holds_fallback() {
-            self.local = None;
-            self.noted = false;
+            self.drop_fallback();
+        }
+    }
+
+    /// Back to the daemon (or idle): drop the fallback index and give its memory back.
+    fn drop_fallback(&mut self) {
+        self.noted = false;
+        if self.local.take().is_some() {
             uniflo_core::util::trim_heap();
         }
     }
@@ -281,8 +286,7 @@ impl Server {
         if !self.local_only {
             let alive = Client::new(&self.url, self.token.clone()).is_ok_and(|c| c.alive());
             if alive {
-                self.local = None;
-                self.noted = false;
+                self.drop_fallback();
                 return;
             }
         }
