@@ -542,7 +542,9 @@ fn background_build_format_bump_and_incremental_restart() {
     let engine = env.engine();
     let fts = env.fts(&engine, FtsOptions::default());
     let st = fts.status();
-    assert_eq!((st.progress.total, st.progress.total - st.progress.done), (40, 1), "{st:?}");
+    // A change the index is about to pick up is not a backlog: it only counts once it has waited
+    // out the grace period unwritten.
+    assert_eq!((st.progress.total, st.progress.done, st.indexing), (40, 40, false), "{st:?}");
     idle(&fts);
     assert_eq!(fts.status().progress.events, 2001);
     assert_eq!(events(&search(&fts, "quasarflux")), vec![("claude:b3", "u50")]);
@@ -1414,4 +1416,407 @@ fn completed_snapshot_yields_the_writer_lease_but_keeps_searching() {
     assert_eq!(search(&writer, "snapshotmarker").total, 1);
     assert!(wait_for(|| search(&snapshot, "laterwritermarker").total == 1, Duration::from_secs(3)));
     assert_eq!((snapshot.status().errors, writer.status().errors), (0, 0));
+}
+
+/// Hot rows for an event the cold blocks already hold, under another id: what a half-applied
+/// promotion or a writer outside the lease leaves behind.
+fn inject_dual_tier(env: &Env, key: &str, event: &str, text: &str) -> i64 {
+    let c = rusqlite::Connection::open(env.fts_path()).unwrap();
+    let sid: i64 = c.query_row("SELECT sid FROM sess WHERE key=?1", [key], |r| r.get(0)).unwrap();
+    let id = (sid << 32) | (5 << 3) | 1;
+    c.execute(
+        "INSERT INTO docs (id, sid, event, ts, pos, text) VALUES (?1, ?2, ?3, 1, 0, ?4)",
+        rusqlite::params![id, sid, event, text],
+    )
+    .unwrap();
+    c.execute("INSERT INTO docs_fts (rowid, text) VALUES (?1, ?2)", rusqlite::params![id, text]).unwrap();
+    sid
+}
+
+/// `(cold flag, hot rows, cold blocks)` of one session, read behind the writer's back.
+fn tiers(env: &Env, key: &str) -> (i64, i64, i64) {
+    let c = rusqlite::Connection::open(env.fts_path()).unwrap();
+    let sid: i64 = c.query_row("SELECT sid FROM sess WHERE key=?1", [key], |r| r.get(0)).unwrap();
+    let cold = c.query_row("SELECT cold FROM sess WHERE sid=?1", [sid], |r| r.get(0)).unwrap();
+    let hot = c.query_row("SELECT count(*) FROM docs WHERE sid=?1", [sid], |r| r.get(0)).unwrap();
+    let blocks = c.query_row("SELECT count(*) FROM blk WHERE sid=?1", [sid], |r| r.get(0)).unwrap();
+    (cold, hot, blocks)
+}
+
+fn append(path: &std::path::Path, text: &str) {
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(path)
+        .and_then(|mut f| std::io::Write::write_all(&mut f, text.as_bytes()))
+        .unwrap();
+}
+
+/// Scenario: 促温失败不留双层数据. Fault injection: a trigger rejects the cold row's original id,
+/// which `promote` reinserts, so promotion fails once. The session stays exactly as it was (cold,
+/// blocks intact), one error is recorded, and the retry after the fault is gone moves it to the
+/// hot tier with every event.
+#[test]
+fn failed_promotion_leaves_the_session_cold_then_retries_to_hot() {
+    let env = Env::new();
+    let real_now = now_ms();
+    let (now_fn, clock) = now_clock(real_now);
+    let f = env.path("claude/-w-demo/age.jsonl");
+    std::fs::write(&f, user("u1", real_now - 60_000, "an aging session about deploy script")).unwrap();
+    let engine = env.engine();
+    let fts = env.fts(&engine, FtsOptions { hot_days: 1, now: now_fn, ..FtsOptions::default() });
+    idle(&fts);
+    clock.store(real_now + 2 * DAY, Ordering::SeqCst);
+    assert!(wait_for(|| is_cold(&env, "claude:age"), Duration::from_secs(10)), "expected compaction to run");
+    drop(fts);
+
+    let side = rusqlite::Connection::open(env.fts_path()).unwrap();
+    let sid: i64 = side.query_row("SELECT sid FROM sess WHERE key='claude:age'", [], |r| r.get(0)).unwrap();
+    let orig = (sid << 32) | 1; // seq 0, kind user_message (1)
+    side.execute_batch(&format!(
+        "CREATE TRIGGER boom BEFORE INSERT ON docs WHEN new.id = {orig} BEGIN SELECT RAISE(ABORT,'boom'); END;"
+    ))
+    .unwrap();
+
+    let resumed_at = clock.load(Ordering::SeqCst);
+    let mut body = std::fs::read_to_string(&f).unwrap();
+    body.push_str(&user("u2", resumed_at, "resumed addition about zzyyqqrotation"));
+    std::fs::write(&f, body).unwrap();
+    let engine = env.engine();
+    let (now_fn, _clock) = now_clock(resumed_at);
+    let fts = env.fts(&engine, FtsOptions { hot_days: 1, now: now_fn, ..FtsOptions::default() });
+    assert!(wait_for(|| fts.status().errors > 0, Duration::from_secs(10)), "promotion should have failed");
+    let (cold, hot, blocks) = tiers(&env, "claude:age");
+    assert!(cold == 1 && hot == 0 && blocks > 0, "a failed promotion changes nothing: {:?}", (cold, hot, blocks));
+    assert_eq!(events(&search(&fts, "deploy")).len(), 1, "still searchable from the cold blocks");
+
+    side.execute_batch("DROP TRIGGER boom;").unwrap();
+    assert!(
+        wait_for(|| !search(&fts, "zzyyqqrotation").results.is_empty(), Duration::from_secs(15)),
+        "the promotion is retried after a back-off"
+    );
+    idle(&fts);
+    assert_eq!(tiers(&env, "claude:age"), (0, 2, 0));
+    assert_eq!(events(&search(&fts, "deploy")).len(), 1, "no duplicate row after the retry");
+    assert_eq!(sessions(&search(&fts, "zzyyqqrotation")), vec!["claude:age"]);
+}
+
+/// Scenario: 促温失败不留双层数据 (repair half). A session found in both tiers at the start is
+/// merged into one: live writes for it and for its neighbours raise no error, and no event is
+/// lost or doubled.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dual_tier_session_is_repaired_and_live_writes_do_not_fail() {
+    let env = Env::new();
+    let real_now = now_ms();
+    let (now_fn, clock) = now_clock(real_now);
+    let age = env.path("claude/-w-demo/age.jsonl");
+    let other = env.path("claude/-w-demo/other.jsonl");
+    std::fs::write(&age, user("u1", real_now - 60_000, "an aging session about deploy script")).unwrap();
+    std::fs::write(&other, user("o1", real_now - 60_000, "a bystander session")).unwrap();
+    let engine = env.engine();
+    let fts = env.fts(&engine, FtsOptions { hot_days: 1, now: now_fn, ..FtsOptions::default() });
+    idle(&fts);
+    clock.store(real_now + 2 * DAY, Ordering::SeqCst);
+    assert!(wait_for(|| is_cold(&env, "claude:age"), Duration::from_secs(10)), "expected compaction");
+    drop(fts);
+    drop(engine);
+
+    inject_dual_tier(&env, "claude:age", "u1", "an aging session about deploy script");
+    let (cold, hot, blocks) = tiers(&env, "claude:age");
+    assert!(cold == 1 && hot > 0 && blocks > 0, "the fixture is in both tiers");
+
+    let engine = env.engine();
+    let (now_fn, _c) = now_clock(clock.load(Ordering::SeqCst));
+    let fts = tokio::task::block_in_place(|| {
+        let fts = env.fts(&engine, FtsOptions { hot_days: 1, now: now_fn, ..FtsOptions::default() });
+        idle(&fts);
+        fts
+    });
+    let (cold, hot, blocks) = tiers(&env, "claude:age");
+    assert!(hot == 0 || (cold == 0 && blocks == 0), "one tier left: {:?}", (cold, hot, blocks));
+    let base = fts.status().errors;
+    let t = clock.load(Ordering::SeqCst);
+    append(&age, &user("u2", t, "resumed zzyyqqrotation"));
+    append(&other, &user("o2", t, "bystander wwxxkkmarker"));
+    engine.notify_path(age.clone()).await;
+    engine.notify_path(other.clone()).await;
+    tokio::task::block_in_place(|| {
+        assert!(wait_for(|| !search(&fts, "wwxxkkmarker").results.is_empty(), Duration::from_secs(10)));
+        assert!(wait_for(|| !search(&fts, "zzyyqqrotation").results.is_empty(), Duration::from_secs(10)));
+        std::thread::sleep(Duration::from_secs(2));
+        let st = fts.status();
+        assert_eq!(st.errors, base, "live writes for a repaired session raise no errors: {:?}", st.last_error);
+        assert_eq!(events(&search(&fts, "deploy")), vec![("claude:age", "u1")]);
+    });
+}
+
+/// Scenario: 检索不因单个会话出错. A reader that cannot repair the index (the lease is held
+/// elsewhere) still answers for a session found in both tiers: a hit whose cold row is gone is
+/// served from the hot data or skipped, never an error.
+#[test]
+fn search_answers_for_a_dual_tier_session_it_cannot_repair() {
+    let env = Env::new();
+    let real_now = now_ms();
+    let (now_fn, clock) = now_clock(real_now);
+    std::fs::write(env.path("claude/-w-demo/age.jsonl"), user("u1", real_now - 60_000, "an aging deploy script"))
+        .unwrap();
+    let engine = env.engine();
+    let owner = env.fts(&engine, FtsOptions { hot_days: 1, now: now_fn, ..FtsOptions::default() });
+    idle(&owner);
+    clock.store(real_now + 2 * DAY, Ordering::SeqCst);
+    assert!(wait_for(|| is_cold(&env, "claude:age"), Duration::from_secs(10)), "expected compaction");
+    drop(owner);
+
+    let (now_fn, _c) = now_clock(clock.load(Ordering::SeqCst));
+    let owner = env.fts(
+        &engine,
+        FtsOptions { hot_days: 1, now: now_fn.clone(), reconcile: Duration::from_secs(600), ..FtsOptions::default() },
+    );
+    idle(&owner);
+    let reader = env.fts(&engine, FtsOptions { hot_days: 1, now: now_fn, ..FtsOptions::default() });
+    inject_dual_tier(&env, "claude:age", "u1", "an aging deploy script");
+    for q in ["deploy", "aging", "script"] {
+        let r = reader.search(&SearchParams { q: q.into(), ..Default::default() }).expect("search must not fail");
+        assert_eq!(sessions(&r), vec!["claude:age"], "{q}");
+        assert_eq!(events(&r), vec![("claude:age", "u1")], "{q}: one event, not one per tier");
+    }
+    assert_eq!(reader.status().errors, 0);
+    drop(owner);
+}
+
+/// Scenario: 失败只回滚出错的单元. One session cannot be written (a trigger rejects its text):
+/// it is rolled back alone and retried; the sessions around it are indexed and kept, and the
+/// build is complete once the fault is gone.
+#[test]
+fn a_failing_session_rolls_back_alone_and_is_retried() {
+    let env = Env::new();
+    let t = now_ms() - 60_000;
+    // Create the index file, then arm the fault before any session exists.
+    {
+        let engine = env.engine();
+        let fts = env.fts(&engine, FtsOptions::default());
+        idle(&fts);
+    }
+    let side = rusqlite::Connection::open(env.fts_path()).unwrap();
+    side.execute_batch(
+        "CREATE TRIGGER poison BEFORE INSERT ON docs WHEN new.text LIKE '%poisonedmarker%'
+         BEGIN SELECT RAISE(ABORT,'poisoned'); END;",
+    )
+    .unwrap();
+    for i in 0..6 {
+        let text = if i == 3 { "poisonedmarker".to_owned() } else { format!("goodmarker{i}") };
+        std::fs::write(env.path(&format!("claude/-w-demo/s{i}.jsonl")), user(&format!("u{i}"), t + i, &text)).unwrap();
+    }
+    let engine = env.engine();
+    let fts = env.fts(&engine, FtsOptions { reconcile: Duration::from_millis(300), ..FtsOptions::default() });
+    assert!(
+        wait_for(
+            || (0..6).filter(|i| *i != 3).all(|i| search(&fts, &format!("goodmarker{i}")).total == 1),
+            Duration::from_secs(10)
+        ),
+        "the other sessions are indexed while one keeps failing"
+    );
+    assert!(fts.status().errors > 0);
+    assert_eq!(search(&fts, "poisonedmarker").total, 0);
+    let first = fts.status().errors;
+    assert!(wait_for(|| fts.status().errors > first, Duration::from_secs(10)), "the failing session is retried");
+    for i in (0..6).filter(|i| *i != 3) {
+        assert_eq!(search(&fts, &format!("goodmarker{i}")).total, 1, "kept across the failures");
+    }
+
+    side.execute_batch("DROP TRIGGER poison;").unwrap();
+    assert!(wait_for(|| search(&fts, "poisonedmarker").total == 1, Duration::from_secs(20)), "retried after the fault");
+    idle(&fts);
+    let st = fts.status();
+    assert_eq!((st.progress.events, st.progress.done, st.progress.total), (6, 6, 6), "{st:?}");
+}
+
+/// Scenario: 失败只回滚出错的单元 (cold half). Old sessions are written to the cold tier in
+/// groups; the one that cannot be written does not take the others of its group down.
+#[test]
+fn a_failing_cold_session_does_not_take_its_group_down() {
+    let env = Env::new();
+    let old = now_ms() - 30 * DAY;
+    {
+        let engine = env.engine();
+        let fts = env.fts(&engine, FtsOptions::default());
+        idle(&fts);
+    }
+    let side = rusqlite::Connection::open(env.fts_path()).unwrap();
+    side.execute_batch(
+        "CREATE TRIGGER poison BEFORE INSERT ON sess WHEN new.key = 'claude:s3'
+         BEGIN SELECT RAISE(ABORT,'poisoned'); END;",
+    )
+    .unwrap();
+    for i in 0..6 {
+        std::fs::write(
+            env.path(&format!("claude/-w-demo/s{i}.jsonl")),
+            user(&format!("u{i}"), old + i, &format!("coldmarker{i}")),
+        )
+        .unwrap();
+    }
+    let engine = env.engine();
+    let fts = env.fts(&engine, FtsOptions { reconcile: Duration::from_millis(300), ..FtsOptions::default() });
+    assert!(
+        wait_for(
+            || (0..6).filter(|i| *i != 3).all(|i| search(&fts, &format!("coldmarker{i}")).total == 1),
+            Duration::from_secs(10)
+        ),
+        "the other old sessions are written while one keeps failing"
+    );
+    assert!((0..6).filter(|i| *i != 3).all(|i| is_cold(&env, &format!("claude:s{i}"))));
+    assert!(fts.status().errors > 0);
+    assert_eq!(search(&fts, "coldmarker3").total, 0);
+
+    side.execute_batch("DROP TRIGGER poison;").unwrap();
+    assert!(wait_for(|| search(&fts, "coldmarker3").total == 1, Duration::from_secs(20)), "retried after the fault");
+    idle(&fts);
+    assert!(is_cold(&env, "claude:s3"));
+    let st = fts.status();
+    assert_eq!((st.progress.done, st.progress.total), (6, 6), "{st:?}");
+}
+
+/// Scenario: 进度只反映未建部分. Live appends to a finished session are not a backlog: the index
+/// never goes back to "building" because of them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn live_appends_do_not_report_the_index_as_building() {
+    let env = Env::new();
+    let t = now_ms() - 60_000;
+    let live = env.path("claude/-w-demo/live.jsonl");
+    std::fs::write(&live, user("u0", t, "first message")).unwrap();
+    let engine = env.engine();
+    let fts = tokio::task::block_in_place(|| {
+        let fts = env.fts(&engine, FtsOptions { reconcile: Duration::from_millis(300), ..FtsOptions::default() });
+        idle(&fts);
+        fts
+    });
+    let (mut building, mut samples) = (0, 0);
+    let t0 = Instant::now();
+    let mut n = 0;
+    while t0.elapsed() < Duration::from_secs(4) {
+        n += 1;
+        append(&live, &user(&format!("u{n}"), now_ms(), "more text"));
+        engine.notify_path(live.clone()).await;
+        for _ in 0..5 {
+            samples += 1;
+            building += usize::from(tokio::task::block_in_place(|| fts.status()).indexing);
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+    assert_eq!(building, 0, "indexing was reported in {building} of {samples} samples");
+}
+
+/// Scenario: 进度只反映未建部分. During a build, `progress.done` only goes up, even when sessions
+/// that were already indexed grow and new ones appear.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn progress_done_never_decreases_during_a_build() {
+    let env = Env::new();
+    many_sessions(&env, 40, 40);
+    let engine = env.engine();
+    let fts = tokio::task::block_in_place(|| {
+        env.fts(
+            &engine,
+            FtsOptions { pause: 2.0, page: 100, reconcile: Duration::from_millis(100), ..Default::default() },
+        )
+    });
+    let (mut last, mut samples, mut grown) = (0, 0, false);
+    let t0 = Instant::now();
+    loop {
+        let st = tokio::task::block_in_place(|| fts.status());
+        assert!(st.progress.done >= last, "done went from {last} to {} at sample {samples}: {st:?}", st.progress.done);
+        last = st.progress.done;
+        samples += 1;
+        if !grown && st.progress.done >= 10 {
+            grown = true;
+            for s in 0..10 {
+                let f = env.path(&format!("claude/-w-demo/b{s}.jsonl"));
+                append(&f, &user("late", now_ms(), &format!("late addition lateword{s}")));
+                engine.notify_path(f).await;
+            }
+            append_new_session(&env, 100);
+            engine.notify_path(env.path("claude/-w-demo/b100.jsonl")).await;
+        }
+        if !st.indexing && st.progress.done > 0 && grown {
+            break;
+        }
+        assert!(t0.elapsed() < Duration::from_secs(60), "the build did not finish: {st:?}");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(grown, "the build was observed mid-way");
+    tokio::task::block_in_place(|| idle(&fts));
+}
+
+fn append_new_session(env: &Env, n: usize) {
+    std::fs::write(env.path(&format!("claude/-w-demo/b{n}.jsonl")), user("n0", now_ms(), "a brand new session"))
+        .unwrap();
+}
+
+/// Scenario: 与旧版写者共存. A writer outside the lease removes a finished session: the next live
+/// write for it neither fails nor counts as an error, the change is counted as a foreign write,
+/// and the session is indexed again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn foreign_removal_is_counted_not_an_error_and_the_session_is_indexed_again() {
+    let env = Env::new();
+    let other = env.path("claude/-w-demo/other.jsonl");
+    std::fs::write(&other, user("o1", now_ms() - 60_000, "a bystander session wwxxkkmarker")).unwrap();
+    let engine = env.engine();
+    let fts = tokio::task::block_in_place(|| {
+        let fts = env.fts(&engine, FtsOptions { reconcile: Duration::from_millis(300), ..FtsOptions::default() });
+        idle(&fts);
+        fts
+    });
+    assert_eq!(fts.status().foreign_writes, 0);
+    {
+        use uniflo_search::fts::store;
+        let c = rusqlite::Connection::open(env.fts_path()).unwrap();
+        let sid: i64 = c.query_row("SELECT sid FROM sess WHERE key='claude:other'", [], |r| r.get(0)).unwrap();
+        c.execute_batch("BEGIN IMMEDIATE").unwrap();
+        store::drop_hot(&c, sid).unwrap();
+        store::drop_session_row(&c, sid).unwrap();
+        c.execute_batch("COMMIT").unwrap();
+    }
+    let base = fts.status().errors;
+    // The daemon's next write for that session starts a transaction and must notice the change.
+    append(&other, &user("o2", now_ms(), "bystander again"));
+    engine.notify_path(other.clone()).await;
+    let back = tokio::task::block_in_place(|| {
+        wait_for(
+            || search(&fts, "wwxxkkmarker").total == 1 && search(&fts, "again").total == 1,
+            Duration::from_secs(10),
+        )
+    });
+    let st = fts.status();
+    assert!(back, "the session is back in the index: {st:?}");
+    assert!(st.foreign_writes >= 1, "{st:?}");
+    assert_eq!(st.errors, base, "a foreign write is not an error: {:?}", st.last_error);
+}
+
+/// Scenario: 与旧版写者共存. The index lists the other processes that hold it open for writing.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn foreign_writers_name_another_process_holding_the_index_open() {
+    use std::io::{BufRead, Write};
+    use std::process::{Command, Stdio};
+    let env = Env::new();
+    std::fs::write(env.path("claude/-w-demo/s.jsonl"), user("u1", now_ms() - 60_000, "some text")).unwrap();
+    let engine = env.engine();
+    let fts = env.fts(&engine, FtsOptions::default());
+    idle(&fts);
+    let Ok(mut shell) =
+        Command::new("sqlite3").arg(env.fts_path()).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn()
+    else {
+        eprintln!("no sqlite3 on this machine: skipped");
+        return;
+    };
+    let pid = shell.id();
+    writeln!(shell.stdin.as_mut().unwrap(), "INSERT INTO meta (k, v) VALUES ('probe', '1');\nSELECT 'ready';").unwrap();
+    let mut ready = String::new();
+    std::io::BufReader::new(shell.stdout.as_mut().unwrap()).read_line(&mut ready).unwrap();
+    assert_eq!(ready.trim(), "ready", "the shell has the index open");
+    let listed = wait_for(|| fts.status().foreign_writers.iter().any(|w| w.pid == pid), Duration::from_secs(30));
+    let writers = fts.status().foreign_writers;
+    shell.kill().ok();
+    shell.wait().ok();
+    assert!(listed, "{writers:?}");
+    assert!(writers.iter().all(|w| w.pid != std::process::id()), "this process is never listed");
+    assert!(writers.iter().any(|w| w.pid == pid && w.command.contains("sqlite3")), "{writers:?}");
 }

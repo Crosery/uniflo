@@ -213,7 +213,7 @@
 
 `SearchHit`：`event`（事件 id，传给 `events?around=`）、`kind`、`ts`、`snippet`（高亮区间以 `\u0002` 开始、`\u0003` 结束，常量 `HIGHLIGHT_START` / `HIGHLIGHT_END`）。
 
-`FtsStatus`（`GET /v1/stats` 的 `fts`）：`indexing`、`progress`、`path`（索引文件）、`bytes`（索引文件含 WAL 的磁盘占用）、`rebuilt`（本次启动因格式标签变化或文件损坏而重建）、`warming?`（启动后索引仍在合并成一个段、或在读进系统页缓存，期间某个词的第一次查询可能较慢；缺省为 false）、`build_ms?`（从空索引开始的最近一次全量构建耗时）、`errors`、`last_error?`。ADR-0011 的热/冷分层新增：`hot_days?`（当前生效的 `--fts-hot-days`，省略表示未知）、`hot_events?` / `cold_events?`（两层各自的事件行数，省略表示未知）、`cold_blocks?`（冷层压缩块数，省略表示未知）、`migrating`（后台正在把旧版 `fts-v1.sqlite` 转换进来；缺省为 false）、`reclaimed_bytes`（迁移删除旧文件释放的字节数；缺省为 0）。
+`FtsStatus`（`GET /v1/stats` 的 `fts`）：`indexing`、`progress`、`path`（索引文件）、`bytes`（索引文件含 WAL 的磁盘占用）、`rebuilt`（本次启动因格式标签变化或文件损坏而重建）、`warming?`（启动后索引仍在合并成一个段、或在读进系统页缓存，期间某个词的第一次查询可能较慢；缺省为 false）、`build_ms?`（从空索引开始的最近一次全量构建耗时）、`errors`、`last_error?`。ADR-0011 的热/冷分层新增：`hot_days?`（当前生效的 `--fts-hot-days`，省略表示未知）、`hot_events?` / `cold_events?`（两层各自的事件行数，省略表示未知）、`cold_blocks?`（冷层压缩块数，省略表示未知）、`migrating`（后台正在把旧版 `fts-v1.sqlite` 转换进来；缺省为 false）、`reclaimed_bytes`（迁移删除旧文件释放的字节数；缺省为 0）。可靠性字段（只增不改，缺省省略）：`foreign_writes?`（持有写租约期间发现别的进程写过索引的次数，不计入 `errors`；缺省为 0）、`foreign_writers?`（见到外部写入之后，当前以写方式打开索引文件的其他进程 `FtsWriter {pid, command}`，尽力而为，取不到时省略）。`indexing` 只在有会话尚未首次索引、或会话变化超过 15 s 仍未写入时为 true，`progress.done` 在同一轮构建内不减少。
 
 ## 会话清理
 

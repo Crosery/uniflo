@@ -116,12 +116,46 @@ pub struct FtsStatus {
     /// Bytes reclaimed by deleting the old-format file after this start's migration (0 if none).
     #[serde(default)]
     pub reclaimed_bytes: u64,
+    /// Times another process changed the index file while this one held the write lease (an older
+    /// Uniflo that ignores the lease, or a stray SQL client). Not counted in `errors`.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub foreign_writes: u64,
+    /// Other processes that currently have the index file open for writing, best effort (empty
+    /// when none or when the platform cannot tell).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub foreign_writers: Vec<FtsWriter>,
+}
+
+/// A process other than this one that has the full-text index file open for writing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FtsWriter {
+    pub pid: u32,
+    /// Executable and subcommand, e.g. `/usr/local/bin/uniflo mcp`; no other arguments.
+    pub command: String,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn fts_status_foreign_fields_are_added_only() {
+        let mut v = json!({"indexing":false,"progress":{"done":1,"total":1,"events":2},"path":"p","bytes":3,
+            "rebuilt":false,"errors":0});
+        let st: FtsStatus = serde_json::from_value(v.clone()).unwrap();
+        assert_eq!((st.foreign_writes, st.foreign_writers.len()), (0, 0));
+        let out = serde_json::to_value(&st).unwrap();
+        assert!(out.get("foreign_writes").is_none() && out.get("foreign_writers").is_none(), "{out}");
+        v["foreign_writes"] = json!(2);
+        v["foreign_writers"] = json!([{"pid":7,"command":"uniflo mcp"}]);
+        let st: FtsStatus = serde_json::from_value(v.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&st).unwrap()["foreign_writers"][0]["pid"], json!(7));
+    }
 
     #[test]
     fn search_response_wire_shape() {

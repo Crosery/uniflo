@@ -574,6 +574,47 @@ pub fn insert_hot_row(c: &Connection, sid: i64, r: &Row) -> Result<()> {
     Ok(())
 }
 
+/// Like [`insert_hot_row`], but safe against a session that already has hot rows (a half-applied
+/// promotion, or a second writer): an event the hot tier already holds is kept as it is (it is the
+/// newer write) and skipped; a row whose id is taken by another event gets a fresh one. Returns the
+/// token count of the inserted row, `None` when it was skipped.
+pub fn merge_hot_row(c: &Connection, sid: i64, r: &Row) -> Result<Option<i64>> {
+    let have: Option<i64> = c
+        .prepare_cached("SELECT 1 FROM docs WHERE sid = ?1 AND event = ?2")?
+        .query_row(params![sid, r.event], |row| row.get(0))
+        .optional()?;
+    if have.is_some() {
+        return Ok(None);
+    }
+    let taken: Option<i64> =
+        c.prepare_cached("SELECT 1 FROM docs WHERE id = ?1")?.query_row([r.id], |row| row.get(0)).optional()?;
+    let id = if taken.is_some() { row_id(sid, next_seq(c, sid)?, kind_of(r.id)) } else { r.id };
+    c.prepare_cached("INSERT INTO docs (id, sid, event, ts, pos, text) VALUES (?1, ?2, ?3, ?4, ?5, ?6)")?
+        .execute(params![id, sid, r.event, r.ts, r.pos, r.text])?;
+    fts_insert(c, id, &r.text)?;
+    Ok(Some(token_count(&r.text)))
+}
+
+/// Whether a session has any hot row.
+pub fn has_hot(c: &Connection, sid: i64) -> Result<bool> {
+    Ok(c.prepare_cached("SELECT 1 FROM docs WHERE sid = ?1 LIMIT 1")?
+        .query_row([sid], |r| r.get::<_, i64>(0))
+        .optional()?
+        .is_some())
+}
+
+/// Sessions found in both tiers (or flagged for one tier while holding rows of the other): the
+/// state a half-applied promotion or a second writer leaves behind.
+pub fn dual_tier_sessions(c: &Connection) -> Result<Vec<i64>> {
+    let mut st = c.prepare(
+        "SELECT s.sid FROM sess s WHERE \
+         (s.cold = 1 AND EXISTS (SELECT 1 FROM docs d WHERE d.sid = s.sid)) OR \
+         (s.cold = 0 AND EXISTS (SELECT 1 FROM blk b WHERE b.sid = s.sid))",
+    )?;
+    let rows = st.query_map([], |r| r.get(0))?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
 /// Drop a session's `sess` row (its hot and cold rows must already be gone).
 pub fn drop_session_row(c: &Connection, sid: i64) -> Result<()> {
     c.prepare_cached("DELETE FROM sess WHERE sid = ?1")?.execute([sid])?;

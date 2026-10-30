@@ -30,6 +30,7 @@
 pub mod cache;
 pub mod cold;
 pub mod migrate;
+pub mod peers;
 pub mod query;
 pub mod rank;
 pub mod store;
@@ -37,8 +38,8 @@ pub mod verify;
 
 use crate::{Query as SessionQuery, search as filter_sessions};
 use anyhow::Result;
-use rusqlite::{Connection, params_from_iter, types::Value as Sql};
-use std::cell::Cell;
+use rusqlite::{Connection, OptionalExtension, params_from_iter, types::Value as Sql};
+use std::cell::{Cell, RefCell};
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -49,7 +50,9 @@ use store::SessRow;
 use tokio::sync::broadcast::{self, error::TryRecvError};
 use uniflo_core::util::now_ms;
 use uniflo_core::{Engine, HistoryQuery};
-use uniflo_schema::search::{FtsStatus, IndexProgress, SearchHit, SearchOrder, SearchResponse, SearchSession};
+use uniflo_schema::search::{
+    FtsStatus, FtsWriter, IndexProgress, SearchHit, SearchOrder, SearchResponse, SearchSession,
+};
 use uniflo_schema::{Envelope, Event, SCHEMA_VERSION, Session};
 
 /// Bump when what or how events are indexed changes: the next start rebuilds the index. The tag
@@ -78,6 +81,26 @@ const MERGE_PAGES: i64 = 2000;
 /// Bytes of free space to reclaim per `incremental_vacuum` idle step.
 const VACUUM_PAGES: i64 = 2000;
 const DAY_MS: f64 = 86_400_000.0;
+/// A session whose source moved on is not reported as "building" until it has gone this long
+/// without being written (live appends are written within a second or two).
+const CHANGE_GRACE: Duration = Duration::from_secs(15);
+/// A failed unit of work is retried after this long, doubling per consecutive failure up to
+/// [`BACKOFF_MAX`].
+const BACKOFF_BASE: Duration = Duration::from_millis(500);
+const BACKOFF_MAX: Duration = Duration::from_secs(30);
+/// A backfill page that keeps failing is given up on (and its session backed off) after this many tries.
+const PAGE_RETRIES: u32 = 3;
+/// With at least this many sessions still never indexed the backfill is a bulk build, and its
+/// throttle is relaxed to [`BULK_PAUSE`] x the configured one.
+const BULK_BACKLOG: usize = 100;
+const BULK_PAUSE: f32 = 0.3;
+/// Finished cold sessions wait to be written together once they hold this many events (or have
+/// waited [`COMMIT_EVERY`]): every unit of work ends in an FTS5 flush, and one flush per session
+/// is the dominant cost of a first build made mostly of old sessions.
+const COLD_BATCH_ROWS: usize = 3000;
+/// How long a scan for other processes holding the index open is reused (`lsof` costs about half
+/// a CPU second and several seconds of wall time on a busy machine).
+const PEERS_TTL: Duration = Duration::from_secs(10);
 
 /// A clock, injectable in tests so a session can be made deterministically "old" without faking
 /// file mtimes: production uses [`now_ms`].
@@ -203,6 +226,9 @@ struct Shared {
     keys: HashMap<i64, String>,
     progress: IndexProgress,
     indexing: bool,
+    /// The writer has sessions queued or a pass running, whether or not that counts as
+    /// `indexing` (a changed session within its grace period does not).
+    working: bool,
     /// Until the writer has decided on, or finished, the post-backlog segment merge.
     merging: bool,
     warming: bool,
@@ -212,6 +238,15 @@ struct Shared {
     build_ms: Option<u64>,
     errors: u64,
     last_error: Option<String>,
+    /// Times another process changed the index file while this one held the write lease.
+    foreign_writes: u64,
+    /// Newest event time `follow` has written for an already indexed session since its last
+    /// pass: such a session is up to date even though its pass marker is older.
+    live_upd: HashMap<String, i64>,
+    /// First time a session was seen with a source newer than its pass marker.
+    changed_since: HashMap<String, Instant>,
+    /// `progress.done` never goes below this while `indexing` stays true.
+    floor: usize,
 }
 
 impl Shared {
@@ -224,22 +259,52 @@ impl Shared {
         if let Some(r) = self.sessions.remove(key) {
             self.keys.remove(&r.sid);
         }
+        self.live_upd.remove(key);
     }
 
-    fn sync_progress(&mut self, expected: &[Session]) {
+    /// Recompute `progress` and `indexing` against the engine's sessions. Only what is not yet
+    /// in the index counts as pending: a session never indexed (or reset by an upgrade), and one
+    /// whose source changed and is still unwritten after [`CHANGE_GRACE`]. Live appends do not.
+    /// Returns the number of pending sessions.
+    fn sync_progress(&mut self, expected: &[Session], now: Instant) -> usize {
         let known: HashSet<&str> = expected.iter().map(|s| s.key.as_str()).collect();
         let pinned = self.sessions.iter().filter(|(key, row)| row.pinned && !known.contains(key.as_str())).count();
-        let done = expected
-            .iter()
-            .filter(|s| {
-                self.sessions
-                    .get(&s.key)
-                    .is_some_and(|row| row.pinned || row.done_upd.is_some_and(|t| t >= s.updated_at))
-            })
-            .count();
-        self.progress.total = expected.len() + pinned;
-        self.progress.done = done + pinned;
-        self.indexing = self.progress.done < self.progress.total;
+        let mut pending = 0;
+        let mut changed: HashMap<String, Instant> = HashMap::new();
+        for s in expected {
+            let row = self.sessions.get(&s.key);
+            let current = row.is_some_and(|r| r.pinned || r.done_upd.is_some_and(|t| t >= s.updated_at))
+                || self.live_upd.get(&s.key).is_some_and(|t| *t >= s.updated_at);
+            if current {
+                continue;
+            }
+            match row.and_then(|r| r.done_upd) {
+                None => pending += 1,
+                Some(_) => {
+                    let since = self.changed_since.get(&s.key).copied().unwrap_or(now);
+                    changed.insert(s.key.clone(), since);
+                    if now.saturating_duration_since(since) > CHANGE_GRACE {
+                        pending += 1;
+                    }
+                }
+            }
+        }
+        self.live_upd.retain(|k, _| known.contains(k.as_str()));
+        self.changed_since = changed;
+        let total = expected.len() + pinned;
+        self.progress.total = total;
+        let was = self.indexing;
+        self.indexing = pending > 0;
+        let done = total - pending.min(total);
+        self.progress.done = if self.indexing && was { done.max(self.floor) } else { done }.min(total);
+        self.floor = if self.indexing { self.progress.done } else { 0 };
+        pending
+    }
+
+    /// One counted session finished its pass.
+    fn finished(&mut self) {
+        self.progress.done = (self.progress.done + 1).min(self.progress.total);
+        self.floor = self.floor.max(self.progress.done);
     }
 }
 
@@ -258,9 +323,36 @@ struct Inner {
     dir: Mutex<Option<Arc<cache::BlockDir>>>,
     /// Cold sessions verified since start, for tests (and future diagnostics).
     cold_verified: AtomicUsize,
+    /// Other processes writing the index file, as of the last scan (see [`peers`]).
+    peers: Mutex<(Option<Instant>, Vec<FtsWriter>)>,
+    scanning_peers: AtomicBool,
 }
 
 impl Inner {
+    /// The last known foreign writers. Only once another process has been seen committing to the
+    /// index (`foreign_writes`) is the machine scanned for them: `lsof` walks every process, and
+    /// every `status()` of every index would otherwise pay for it. A scan older than [`PEERS_TTL`]
+    /// is refreshed in the background, so this never waits for it.
+    fn foreign_writers(self: &Arc<Self>) -> Vec<FtsWriter> {
+        let seen = self.shared.lock().unwrap().foreign_writes > 0;
+        let (stale, list) = {
+            let c = self.peers.lock().unwrap();
+            (seen && c.0.is_none_or(|t| t.elapsed() > PEERS_TTL), c.1.clone())
+        };
+        if stale && !self.scanning_peers.swap(true, Ordering::AcqRel) {
+            let me = self.clone();
+            let spawned = std::thread::Builder::new().name("uniflo-fts-peers".into()).spawn(move || {
+                let found = peers::writers_of(&me.opts.path);
+                *me.peers.lock().unwrap() = (Some(Instant::now()), found);
+                me.scanning_peers.store(false, Ordering::Release);
+            });
+            if spawned.is_err() {
+                self.scanning_peers.store(false, Ordering::Release);
+            }
+        }
+        list
+    }
+
     fn note_error(&self, msg: String) {
         tracing::debug!("full-text index: {msg}");
         let mut sh = self.shared.lock().unwrap();
@@ -357,7 +449,7 @@ impl Fts {
             shared.remember(&k, r);
         }
         if lease.is_none() {
-            shared.sync_progress(&engine.sessions());
+            shared.sync_progress(&engine.sessions(), Instant::now());
         }
         let fresh = shared.sessions.is_empty();
         let rx = engine.subscribe(None).1;
@@ -375,6 +467,8 @@ impl Fts {
             cold_cache: cache::ColdCache::default(),
             dir: Mutex::new(None),
             cold_verified: AtomicUsize::new(0),
+            peers: Mutex::new((None, Vec::new())),
+            scanning_peers: AtomicBool::new(false),
         });
         let mut w = Writer {
             inner: inner.clone(),
@@ -392,7 +486,16 @@ impl Fts {
             merge: None,
             compact_check: true,
             vacuum_check: true,
+            data_version: Cell::new(None),
+            foreign: Cell::new(false),
+            backoff: RefCell::new(HashMap::new()),
+            never_left: Cell::new(0),
+            retry_at: Cell::new(None),
+            cold_batch: Vec::new(),
+            cold_rows: 0,
+            cold_since: None,
         };
+        w.note_data_version();
         if w.lease.is_some() && !migrating {
             w.reconcile();
             w.commit(true);
@@ -432,6 +535,7 @@ impl Fts {
             }
             Err(_) => (None, None),
         };
+        let foreign_writers = self.inner.foreign_writers();
         let sh = self.inner.shared.lock().unwrap();
         FtsStatus {
             indexing: sh.indexing,
@@ -449,6 +553,8 @@ impl Fts {
             cold_blocks: blocks.map(|n| n.max(0) as u64),
             migrating: sh.migrating,
             reclaimed_bytes: sh.reclaimed_bytes,
+            foreign_writes: sh.foreign_writes,
+            foreign_writers,
         }
     }
 
@@ -457,14 +563,14 @@ impl Fts {
     pub fn wait_idle(&self, timeout: Duration) -> bool {
         let until = Instant::now() + timeout;
         loop {
-            let idle =
-                !self.inner.shared.lock().unwrap().indexing && self.inner.pending_commands.load(Ordering::Acquire) == 0;
-            if idle {
+            let idle = || {
+                let sh = self.inner.shared.lock().unwrap();
+                !sh.indexing && !sh.working && self.inner.pending_commands.load(Ordering::Acquire) == 0
+            };
+            if idle() {
                 // Let the writer finish the loop turn that drained the last command.
                 std::thread::sleep(IDLE * 2);
-                if !self.inner.shared.lock().unwrap().indexing
-                    && self.inner.pending_commands.load(Ordering::Acquire) == 0
-                {
+                if idle() {
                     return true;
                 }
             }
@@ -563,9 +669,18 @@ impl Fts {
         let mut results = Vec::new();
         for (meta, score, hits) in ranked.into_iter().skip(p.offset).take(limit) {
             let mut out = Vec::new();
+            let mut shown: HashSet<String> = HashSet::new();
             for c in &hits {
-                let (event, ts, snippet) = self.hit(&conn, &dir, &plan, c)?;
+                // A row the writer just moved or dropped is skipped, not an error for the query.
+                let Some((event, ts, snippet)) = self.hit(&conn, &dir, &plan, c)? else { continue };
+                // A session briefly in both tiers matches the same event in each.
+                if !shown.insert(event.clone()) {
+                    continue;
+                }
                 out.push(SearchHit { event, kind: store::kind_name(store::kind_of(c.id)).to_owned(), ts, snippet });
+            }
+            if out.is_empty() {
+                continue;
             }
             results.push(SearchSession {
                 session: meta.key,
@@ -1104,35 +1219,47 @@ impl Fts {
         self.inner.engine.session(&key).or(pinned)
     }
 
-    /// `(event id, ts, snippet)` of one hit. The snippet is cut from the stored text: FTS5's
-    /// `snippet()` would re-run the whole query for every hit. Cold hits are read back from their
-    /// block (through the cache) rather than a `docs` row.
+    /// `(event id, ts, snippet)` of one hit, `None` when its row is gone (the writer moved or
+    /// removed the session since the scan). The snippet is cut from the stored text: FTS5's
+    /// `snippet()` would re-run the whole query for every hit. A cold session's rows are read back
+    /// from their block (through the cache); a row no block covers is looked up in `docs`, which
+    /// also serves a session that briefly has rows in both tiers.
     fn hit(
         &self,
         conn: &Connection,
         dir: &cache::BlockDir,
         plan: &query::Plan,
         c: &Cand,
-    ) -> Result<(String, i64, String)> {
-        if let Some(bids) = dir.by_sid.get(&store::sid_of(c.id)) {
-            // The block whose id range covers the row; every block as a fallback.
-            let covering = bids.iter().filter(|b| {
+    ) -> Result<Option<(String, i64, String)>> {
+        let cold = dir.by_sid.get(&store::sid_of(c.id));
+        if let Some(bids) = cold {
+            // The block whose id range covers the row.
+            for &bid in bids.iter().filter(|b| {
                 let (_, first, last) = dir.blocks[*b];
                 (first..=last).contains(&c.id)
-            });
-            for &bid in covering.chain(bids) {
+            }) {
                 let rows = self.block_rows(conn, bid)?;
                 if let Some(row) = rows.iter().find(|r| r.id == c.id) {
-                    return Ok((row.event.clone(), row.ts, verify::fold_snippet(&row.text, &plan.marks)));
+                    return Ok(Some((row.event.clone(), row.ts, verify::fold_snippet(&row.text, &plan.marks))));
                 }
             }
-            anyhow::bail!("cold row vanished");
         }
-        let (event, ts, text): (String, i64, String) = conn
+        let found: Option<(String, i64, String)> = conn
             .prepare_cached("SELECT event, ts, text FROM docs WHERE id = ?1")?
-            .query_row([c.id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+            .query_row([c.id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .optional()?;
+        let Some((event, ts, text)) = found else {
+            // Not in `docs` either: try the session's other blocks before giving the hit up.
+            for &bid in cold.into_iter().flatten() {
+                let rows = self.block_rows(conn, bid)?;
+                if let Some(row) = rows.iter().find(|r| r.id == c.id) {
+                    return Ok(Some((row.event.clone(), row.ts, verify::fold_snippet(&row.text, &plan.marks))));
+                }
+            }
+            return Ok(None);
+        };
         if let Some(s) = query::snippet(&text, &plan.marks) {
-            return Ok((event, ts, s));
+            return Ok(Some((event, ts, s)));
         }
         let snippet = match &plan.fts {
             Some(expr) => {
@@ -1140,12 +1267,16 @@ impl Fts {
                     "SELECT snippet(docs_fts, 0, char(2), char(3), '…', {SNIPPET_TOKENS}) \
                      FROM docs_fts WHERE docs_fts MATCH ?1 AND rowid = ?2"
                 );
-                let s: String = conn.prepare_cached(&sql)?.query_row(rusqlite::params![expr, c.id], |r| r.get(0))?;
-                query::clean(&s)
+                let s: Option<String> =
+                    conn.prepare_cached(&sql)?.query_row(rusqlite::params![expr, c.id], |r| r.get(0)).optional()?;
+                match s {
+                    Some(s) => query::clean(&s),
+                    None => query::like_snippet(&text, &plan.marks),
+                }
             }
             None => query::like_snippet(&text, &plan.marks),
         };
-        Ok((event, ts, snippet))
+        Ok(Some((event, ts, snippet)))
     }
 
     fn reader(&self) -> Result<Pooled<'_>> {
@@ -1392,6 +1523,40 @@ struct Pass {
     /// an id is its latest version; older duplicates (earlier streaming states) are skipped.
     seen: HashSet<String>,
     max_pos: Option<u64>,
+    /// The session was never indexed (or an upgrade reset it).
+    never: bool,
+    /// Counted as pending in `progress`: finishing it advances `done`.
+    counted: bool,
+    /// Consecutive failed tries at the current page.
+    failures: u32,
+}
+
+/// A cold session whose history is fully read, waiting to be written with others in one unit.
+struct ColdJob {
+    key: String,
+    events: Vec<Event>,
+    upd: i64,
+    pos: Option<u64>,
+    never: bool,
+    counted: bool,
+}
+
+enum Step {
+    /// More pages to go (or the current one is to be retried).
+    More,
+    Done,
+    /// Read to the end; [`Writer::flush_cold`] writes it and does the bookkeeping `Done` would.
+    Deferred,
+    /// Given up after repeated failures; the session is backed off.
+    Abandoned,
+}
+
+/// Why a unit of work did not run to completion.
+enum Fail {
+    /// The write transaction could not be opened: nothing was attempted.
+    Begin(anyhow::Error),
+    /// The unit failed and was rolled back on its own.
+    Unit(anyhow::Error),
 }
 
 struct Writer {
@@ -1403,7 +1568,8 @@ struct Writer {
     pass: Option<Pass>,
     next_reconcile: Instant,
     reader_version: i64,
-    /// Reconcile at the next turn: the broadcast lagged or a write was rolled back.
+    /// Reconcile at the next turn and drop the in-flight pass: the broadcast lagged or the
+    /// write transaction was lost as a whole.
     lagged: Cell<bool>,
     /// Start of the open write transaction.
     tx_since: Cell<Option<Instant>>,
@@ -1416,6 +1582,21 @@ struct Writer {
     compact_check: bool,
     /// Run `incremental_vacuum` at the next idle turn.
     vacuum_check: bool,
+    /// `PRAGMA data_version` as of this writer's last look: while it holds the write lease any
+    /// other value means another process committed to the index.
+    data_version: Cell<Option<i64>>,
+    /// A foreign commit was seen: reconcile soon.
+    foreign: Cell<bool>,
+    /// Sessions whose last unit of work failed: skipped until the deadline, then tried again.
+    backoff: RefCell<HashMap<String, (Instant, u32)>>,
+    /// Sessions in the queue that were never indexed, as of the last reconcile (throttle choice).
+    never_left: Cell<usize>,
+    /// The earliest moment a backed-off session may be tried again: the writer reconciles then.
+    retry_at: Cell<Option<Instant>>,
+    /// Cold sessions read to the end and not yet written (see [`COLD_BATCH_ROWS`]).
+    cold_batch: Vec<ColdJob>,
+    cold_rows: usize,
+    cold_since: Option<Instant>,
 }
 
 impl Writer {
@@ -1449,9 +1630,22 @@ impl Writer {
                     continue;
                 }
             }
+            if self.tx_since.get().is_none() {
+                self.check_foreign();
+            }
             let busy = self.follow() | self.commands();
             if self.lagged.get() {
                 self.pass = None;
+            }
+            if self.foreign.take() {
+                // What the other process changed shows in the session map now; look at the
+                // engine's list again within a second instead of after the full interval.
+                self.next_reconcile = self.next_reconcile.min(Instant::now() + Duration::from_secs(1));
+                self.drop_orphaned_pass();
+            }
+            if self.retry_at.get().is_some_and(|t| Instant::now() >= t) {
+                self.retry_at.set(None);
+                self.next_reconcile = Instant::now();
             }
             if self.lagged.get() || Instant::now() >= self.next_reconcile {
                 self.reconcile();
@@ -1462,16 +1656,26 @@ impl Writer {
             match self.pass.take() {
                 Some(mut p) => {
                     let t0 = Instant::now();
-                    if self.step(&mut p) {
-                        let mut sh = self.inner.shared.lock().unwrap();
-                        sh.progress.done = (sh.progress.done + 1).min(sh.progress.total);
-                    } else {
-                        self.pass = Some(p);
+                    match self.step(&mut p) {
+                        Step::More => self.pass = Some(p),
+                        Step::Done => {
+                            if p.never {
+                                self.never_left.set(self.never_left.get().saturating_sub(1));
+                            }
+                            if p.counted {
+                                self.inner.shared.lock().unwrap().finished();
+                            }
+                        }
+                        Step::Deferred | Step::Abandoned => {}
+                    }
+                    if self.cold_due() {
+                        self.flush_cold();
                     }
                     self.commit(false);
-                    self.nap(t0.elapsed().mul_f32(self.inner.opts.pause));
+                    self.nap(t0.elapsed().mul_f32(self.pause()));
                 }
                 None => {
+                    self.flush_cold();
                     self.commit(true);
                     self.settle();
                     if self.inner.park_when_idle.load(Ordering::Acquire)
@@ -1496,7 +1700,74 @@ impl Writer {
                 }
             }
         }
+        self.flush_cold();
         self.commit(true);
+    }
+
+    /// The backfill throttle: `pause x` the time a page took. A bulk build (many sessions never
+    /// indexed: a first start, or the refresh after an upgrade) runs at a third of that, since
+    /// nothing is waiting on the machine but the index itself.
+    fn pause(&self) -> f32 {
+        let base = self.inner.opts.pause;
+        if self.never_left.get() >= BULK_BACKLOG { base * BULK_PAUSE } else { base }
+    }
+
+    fn back_off(&self, key: &str) {
+        let mut bo = self.backoff.borrow_mut();
+        let fails = bo.get(key).map_or(0, |(_, n)| *n) + 1;
+        let wait = BACKOFF_BASE.saturating_mul(1 << fails.min(7)).min(BACKOFF_MAX);
+        let until = Instant::now() + wait;
+        bo.insert(key.to_owned(), (until, fails));
+        self.retry_at.set(Some(self.retry_at.get().map_or(until, |t| t.min(until))));
+    }
+
+    fn backed_off(&self, key: &str) -> bool {
+        self.backoff.borrow().get(key).is_some_and(|(until, _)| *until > Instant::now())
+    }
+
+    /// A session's retries are over once one of its units goes through.
+    fn recovered(&self, key: &str) {
+        self.backoff.borrow_mut().remove(key);
+    }
+
+    fn note_data_version(&self) {
+        if let Ok(v) = self.conn.pragma_query_value(None, "data_version", |r| r.get::<_, i64>(0)) {
+            self.data_version.set(Some(v));
+        }
+    }
+
+    /// Another process committed to the index since this writer last looked (an older Uniflo that
+    /// ignores the lease, or a SQL shell). The session map no longer describes the file: reload it
+    /// and reconcile, so what the other process removed or changed is indexed again.
+    fn check_foreign(&self) {
+        let Ok(v) = self.conn.pragma_query_value(None, "data_version", |r| r.get::<_, i64>(0)) else { return };
+        let prev = self.data_version.replace(Some(v));
+        if prev.is_none_or(|p| p == v) {
+            return;
+        }
+        let first = {
+            let mut sh = self.inner.shared.lock().unwrap();
+            sh.foreign_writes += 1;
+            sh.foreign_writes == 1
+        };
+        if first {
+            tracing::warn!(
+                "another process is writing the full-text index {}; stop older uniflo processes (see fts.foreign_writers in /v1/stats)",
+                self.inner.opts.path.display()
+            );
+        }
+        self.reload();
+        self.foreign.set(true);
+    }
+
+    /// An in-flight pass whose session row the other process removed would carry on from a state
+    /// that no longer exists: start it over.
+    fn drop_orphaned_pass(&mut self) {
+        let Some(p) = &self.pass else { return };
+        let gone = p.before.is_some() && !self.inner.shared.lock().unwrap().sessions.contains_key(&p.session.key);
+        if gone {
+            self.pass = None;
+        }
     }
 
     fn claim_writer(&mut self) -> Result<bool> {
@@ -1505,6 +1776,7 @@ impl Writer {
         let (conn, _, migrating) = open_writer(&self.inner.opts.path, &tag)?;
         self.conn = conn;
         self.lease = Some(lease);
+        self.note_data_version();
         self.inner.shared.lock().unwrap().migrating = migrating;
         self.inner.shared.lock().unwrap().merging = true;
         self.reload();
@@ -1552,10 +1824,12 @@ impl Writer {
         }
         // The progress reset above (or a failed session's rollback) changed `sess`.
         self.reload();
+        self.note_data_version();
         {
             let mut sh = inner.shared.lock().unwrap();
             sh.migrating = false;
             sh.progress.done = 0;
+            sh.floor = 0;
         }
         if !inner.stop.load(Ordering::Relaxed) {
             self.reconcile();
@@ -1573,7 +1847,7 @@ impl Writer {
                 sh.remember(&k, r);
             }
             if let Some(expected) = expected {
-                sh.sync_progress(&expected);
+                sh.sync_progress(&expected, Instant::now());
             }
         }
         if let Ok(n) = store::count_docs(&self.conn) {
@@ -1593,12 +1867,16 @@ impl Writer {
     }
 
     fn settle(&mut self) {
+        // A session that keeps failing stays pending until its retries run out of backoff.
+        let waiting = self.backoff.borrow().values().any(|(until, _)| *until > Instant::now());
         let mut sh = self.inner.shared.lock().unwrap();
-        if !sh.indexing {
+        sh.working = false;
+        if waiting || !sh.indexing {
             return;
         }
         sh.indexing = false;
         sh.progress.done = sh.progress.total;
+        sh.floor = 0;
         self.merge_check = true;
         self.compact_check = true;
         if let Some(t0) = self.build.take() {
@@ -1629,7 +1907,7 @@ impl Writer {
         };
         let t0 = Instant::now();
         let mut more = false;
-        let res = self.transaction(|_, tx| {
+        let res = self.unit_delta("merge", |_, tx| {
             more = store::merge_step(tx, !started, MERGE_PAGES)?;
             Ok(0)
         });
@@ -1654,20 +1932,26 @@ impl Writer {
         }
         self.compact_check = true; // re-check every idle turn, not just once
         let Some(sid) = self.compaction_candidate() else { return false };
-        let t0 = Instant::now();
-        let res = self.transaction(|_, tx| {
-            let rows = store::drop_hot(tx, sid)?;
-            let delta = -(rows.len() as i64);
-            cold_ify(tx, sid, rows)?;
-            Ok(delta)
-        });
         // Two separate locks, deliberately not nested in one condition: holding the guard from
         // the first across the second would self-deadlock (`Mutex` is not reentrant).
-        let key = self.inner.shared.lock().unwrap().keys.get(&sid).cloned();
-        if let Some(key) = key
-            && let Some(r) = self.inner.shared.lock().unwrap().sessions.get_mut(&key)
-        {
-            r.cold = true;
+        let key = self.inner.shared.lock().unwrap().keys.get(&sid).cloned().unwrap_or_default();
+        let t0 = Instant::now();
+        let res = self.unit_delta(&format!("compact {key}"), |_, tx| {
+            let rows = store::drop_hot(tx, sid)?;
+            let before = cold::delete_blocks(tx, sid)?;
+            if before.0 != 0 {
+                store::bump_cold(tx, -before.0, -before.1)?;
+            }
+            cold_ify(tx, sid, rows)?;
+            Ok(-before.0)
+        });
+        if res.is_ok() {
+            if let Some(r) = self.inner.shared.lock().unwrap().sessions.get_mut(&key) {
+                r.cold = true;
+            }
+            self.recovered(&key);
+        } else {
+            self.back_off(&key);
         }
         self.commit(true);
         self.nap(t0.elapsed().mul_f32(self.inner.opts.pause));
@@ -1684,7 +1968,11 @@ impl Writer {
         sh.sessions
             .iter()
             .filter(|(k, r)| {
-                !r.pinned && !r.cold && current.as_deref() != Some(k.as_str()) && !in_queue.contains(k.as_str())
+                !r.pinned
+                    && !r.cold
+                    && current.as_deref() != Some(k.as_str())
+                    && !in_queue.contains(k.as_str())
+                    && !self.backed_off(k)
             })
             .filter_map(|(k, r)| {
                 let upd = live.get(k).copied().or(r.done_upd)?;
@@ -1717,59 +2005,120 @@ impl Writer {
         }
     }
 
+    /// Repair sessions found in both tiers (or flagged for one while holding the other's rows):
+    /// what a half-applied promotion or a foreign writer leaves. The session becomes hot with the
+    /// union of its events, and compaction moves it back down once it is old enough.
+    fn heal_tiers(&mut self) {
+        let Ok(sids) = store::dual_tier_sessions(&self.conn) else { return };
+        for sid in sids {
+            let key = self.inner.shared.lock().unwrap().keys.get(&sid).cloned();
+            let label = key.clone().unwrap_or_else(|| format!("#{sid}"));
+            if key.as_deref().is_some_and(|k| self.backed_off(k)) {
+                continue;
+            }
+            let res = self.unit_delta(&format!("repair {label}"), |_, tx| {
+                cold::promote(tx, sid)?;
+                Ok(0)
+            });
+            match res {
+                Ok(()) => {
+                    tracing::warn!("full-text index: {label} was in both tiers; merged into the hot tier");
+                    if let Some(key) = &key
+                        && let Some(r) = self.inner.shared.lock().unwrap().sessions.get_mut(key)
+                    {
+                        r.cold = false;
+                    }
+                    if let Ok(n) = store::count_docs(&self.conn) {
+                        self.inner.shared.lock().unwrap().progress.events = n;
+                    }
+                }
+                Err(_) => {
+                    if let Some(key) = &key {
+                        self.back_off(key);
+                    }
+                }
+            }
+        }
+    }
+
     /// Diff the engine's sessions against recorded progress: queue what changed, drop what is gone.
     fn reconcile(&mut self) {
+        self.flush_cold();
         self.lagged.set(false);
         self.next_reconcile = Instant::now() + self.inner.opts.reconcile;
         let sessions = self.inner.engine.sessions();
+        self.heal_tiers();
         let current = self.pass.as_ref().map(|p| p.session.key.clone());
-        let (gone, pinned_only) = {
+        let gone: Vec<(String, i64)> = {
             let sh = self.inner.shared.lock().unwrap();
             let present: HashSet<&str> = sessions.iter().map(|s| s.key.as_str()).collect();
-            let gone: Vec<(String, i64)> = sh
-                .sessions
+            sh.sessions
                 .iter()
                 .filter(|(k, r)| !r.pinned && !present.contains(k.as_str()))
                 .map(|(k, r)| (k.clone(), r.sid))
-                .collect();
-            let pinned_only = sh.sessions.iter().filter(|(k, r)| r.pinned && !present.contains(k.as_str())).count();
-            (gone, pinned_only)
+                .collect()
         };
         if !gone.is_empty() {
-            let _ = self.transaction(|w, tx| {
+            let remove = |w: &Self, tx: &Connection, items: &[(String, i64)]| -> Result<i64> {
                 let mut removed = 0;
-                for (key, sid) in &gone {
+                for (key, sid) in items {
                     removed += remove_everywhere(tx, *sid)? as i64;
                     w.inner.shared.lock().unwrap().forget(key);
                 }
                 Ok(-removed)
-            });
+            };
+            match self.unit_quiet(|w, tx| remove(w, tx, &gone)) {
+                Ok(delta) => self.add_events(delta),
+                Err(Fail::Begin(e)) => self.inner.note_error(format!("write: {e:#}")),
+                // One session cannot be removed: take the others out one by one.
+                Err(Fail::Unit(_)) => {
+                    for item in &gone {
+                        let _ = self.unit_delta(&format!("remove {}", item.0), |w, tx| {
+                            remove(w, tx, std::slice::from_ref(item))
+                        });
+                    }
+                }
+            }
         }
-        let total = sessions.len() + pinned_only;
+        let now = Instant::now();
         {
             let sh = self.inner.shared.lock().unwrap();
+            let waiting = self.backoff.borrow();
             self.queue = sessions
-                .into_iter()
+                .iter()
                 .filter(|s| current.as_deref() != Some(s.key.as_str()))
                 .filter(|s| sh.sessions.get(&s.key).is_none_or(|r| !r.pinned && r.done_upd != Some(s.updated_at)))
+                .filter(|s| waiting.get(&s.key).is_none_or(|(until, _)| *until <= now))
+                .cloned()
                 .collect();
+            let never =
+                self.queue.iter().filter(|s| sh.sessions.get(&s.key).is_none_or(|r| r.done_upd.is_none())).count();
+            self.never_left.set(never + usize::from(self.pass.as_ref().is_some_and(|p| p.never)));
         }
-        let pending = self.queue.len() + usize::from(self.pass.is_some());
         let mut sh = self.inner.shared.lock().unwrap();
-        sh.progress.total = total;
-        sh.progress.done = total.saturating_sub(pending);
-        sh.indexing = pending > 0;
+        sh.sync_progress(&sessions, now);
+        sh.working = !self.queue.is_empty() || self.pass.is_some();
+    }
+
+    fn add_events(&self, delta: i64) {
+        let mut sh = self.inner.shared.lock().unwrap();
+        sh.progress.events = sh.progress.events.saturating_add_signed(delta);
     }
 
     fn next_pass(&mut self) -> Option<Pass> {
         while let Some(session) = self.queue.pop_front() {
-            let (row, cutoff) = {
+            if self.backed_off(&session.key) {
+                continue;
+            }
+            let (row, cutoff, stale) = {
                 let sh = self.inner.shared.lock().unwrap();
-                (sh.sessions.get(&session.key).cloned(), self.inner.cutoff())
+                let stale = sh.changed_since.get(&session.key).is_some_and(|t| t.elapsed() > CHANGE_GRACE);
+                (sh.sessions.get(&session.key).cloned(), self.inner.cutoff(), stale)
             };
             if row.as_ref().is_some_and(|r| r.pinned) {
                 continue;
             }
+            let never = row.as_ref().is_none_or(|r| r.done_upd.is_none());
             let old = session.updated_at < cutoff;
             let mode = match &row {
                 // Existing cold session: promote if it is active again, else stay cold (and
@@ -1778,11 +2127,15 @@ impl Writer {
                     if old {
                         PassMode::Cold { collected: Vec::new() }
                     } else {
-                        if let Err(e) = self.transaction(|_, tx| {
-                            cold::promote(tx, r.sid)?;
+                        let sid = r.sid;
+                        let promoted = self.unit_delta(&format!("promote {}", session.key), |_, tx| {
+                            cold::promote(tx, sid)?;
                             Ok(0)
-                        }) {
-                            self.inner.note_error(format!("promote {}: {e:#}", session.key));
+                        });
+                        if promoted.is_err() {
+                            // Left exactly as it was (cold, blocks intact); try again later.
+                            self.back_off(&session.key);
+                            continue;
                         }
                         if let Some(row) = self.inner.shared.lock().unwrap().sessions.get_mut(&session.key) {
                             row.cold = false;
@@ -1799,14 +2152,29 @@ impl Writer {
                 None if old => PassMode::Cold { collected: Vec::new() },
                 None => PassMode::Hot,
             };
-            let stop = row.filter(|r| r.done_upd.is_some() && !r.cold).and_then(|r| r.done_pos);
-            return Some(Pass { session, mode, stop, before: None, seen: HashSet::new(), max_pos: None });
+            // A promoted session holds all the rows its blocks did, so a catch-up from the last
+            // complete pass is as valid as for a session that never left the hot tier.
+            let stop = match mode {
+                PassMode::Hot => row.filter(|r| r.done_upd.is_some()).and_then(|r| r.done_pos),
+                PassMode::Cold { .. } => None,
+            };
+            return Some(Pass {
+                session,
+                mode,
+                stop,
+                before: None,
+                seen: HashSet::new(),
+                max_pos: None,
+                never,
+                counted: never || stale,
+                failures: 0,
+            });
         }
         None
     }
 
-    /// Index one history page of the pass. Returns true when the pass is complete.
-    fn step(&mut self, p: &mut Pass) -> bool {
+    /// Index one history page of the pass.
+    fn step(&mut self, p: &mut Pass) -> Step {
         let key = p.session.key.clone();
         let q = HistoryQuery { before: p.before, limit: self.inner.opts.page.max(1) };
         let page = match self.inner.engine.history(&key, &q) {
@@ -1816,9 +2184,10 @@ impl Writer {
                     // Still there but unreadable: record it as done so it is retried only once it changes.
                     self.inner.note_error(format!("{key}: {err:#}"));
                     let upd = p.session.updated_at;
-                    let _ = self.transaction(|w, tx| {
+                    let max_pos = p.max_pos;
+                    let _ = self.unit_delta(&key, |w, tx| {
                         let sid = w.sid(tx, &key)?;
-                        store::finish_pass(tx, sid, upd, p.max_pos)?;
+                        store::finish_pass(tx, sid, upd, max_pos)?;
                         w.inner
                             .shared
                             .lock()
@@ -1829,7 +2198,7 @@ impl Writer {
                         Ok(0)
                     });
                 }
-                return true;
+                return Step::Done;
             }
         };
         let first = page.first().and_then(|e| e.pos);
@@ -1847,61 +2216,156 @@ impl Writer {
                         collected.push(e.clone());
                     }
                 }
-                if done {
-                    // Give up on error the same way the hot branch below does (`rollback` already
-                    // logged it): there is no partial state worth retrying within this pass.
-                    let _ = self.transaction(|w, tx| {
-                        let sid = w.sid(tx, &key)?;
-                        let delta = finalize_cold_pass(tx, sid, std::mem::take(collected))?;
-                        let pos = p.max_pos.max(p.stop);
-                        store::finish_pass(tx, sid, p.session.updated_at, pos)?;
-                        if let Some(r) = w.inner.shared.lock().unwrap().sessions.get_mut(&key) {
-                            r.done_upd = Some(p.session.updated_at);
-                            r.done_pos = pos;
-                            r.cold = true;
-                        }
-                        Ok(delta)
-                    });
-                    return true;
+                if !done {
+                    p.before = first;
+                    return Step::More;
                 }
-                p.before = first;
-                false
+                self.cold_rows += collected.len();
+                self.cold_since.get_or_insert_with(Instant::now);
+                self.cold_batch.push(ColdJob {
+                    key,
+                    events: std::mem::take(collected),
+                    upd: p.session.updated_at,
+                    pos: p.max_pos.max(p.stop),
+                    never: p.never,
+                    counted: p.counted,
+                });
+                Step::Deferred
             }
             PassMode::Hot => {
-                let res = self.transaction(|w, tx| {
+                let mut fresh: Vec<String> = Vec::new();
+                let mut max_pos = p.max_pos;
+                let (seen, stop, upd) = (&p.seen, p.stop, p.session.updated_at);
+                let res = self.unit_delta(&format!("index {key}"), |w, tx| {
                     let sid = w.sid(tx, &key)?;
                     let mut delta = 0;
+                    let mut written: HashSet<&str> = HashSet::new();
                     for e in page.iter().rev() {
                         if let Some(pos) = e.pos {
-                            p.max_pos = Some(p.max_pos.map_or(pos, |m| m.max(pos)));
+                            max_pos = Some(max_pos.map_or(pos, |m| m.max(pos)));
                         }
-                        if p.seen.insert(e.id.clone()) {
+                        if !seen.contains(&e.id) && written.insert(e.id.as_str()) {
                             delta += store::upsert(tx, sid, e)?;
+                            fresh.push(e.id.clone());
                         }
                     }
                     if done {
-                        let pos = p.max_pos.max(p.stop);
-                        store::finish_pass(tx, sid, p.session.updated_at, pos)?;
+                        let pos = max_pos.max(stop);
+                        store::finish_pass(tx, sid, upd, pos)?;
                         if let Some(r) = w.inner.shared.lock().unwrap().sessions.get_mut(&key) {
-                            r.done_upd = Some(p.session.updated_at);
+                            r.done_upd = Some(upd);
                             r.done_pos = pos;
                         }
                     }
                     Ok(delta)
                 });
-                match res {
-                    Ok(_) if !done => {
+                if res.is_ok() {
+                    p.seen.extend(fresh);
+                    p.max_pos = max_pos;
+                    if !done {
                         p.before = first;
-                        false
                     }
-                    _ => true,
                 }
+                self.settle_step(p, &key, res.is_ok(), done)
             }
         }
     }
 
+    fn cold_due(&self) -> bool {
+        self.cold_rows >= COLD_BATCH_ROWS || self.cold_since.is_some_and(|t| t.elapsed() >= COMMIT_EVERY)
+    }
+
+    /// Write the waiting cold sessions as one unit. If that unit fails, each session is tried on
+    /// its own, so only the one that cannot be written is backed off (it is read again later).
+    fn flush_cold(&mut self) {
+        if self.cold_batch.is_empty() {
+            return;
+        }
+        let jobs = std::mem::take(&mut self.cold_batch);
+        self.cold_rows = 0;
+        self.cold_since = None;
+        let write = |w: &Self, tx: &Connection, job: &ColdJob| -> Result<i64> {
+            let sid = w.sid(tx, &job.key)?;
+            let (delta, cold) = finalize_cold_pass(tx, sid, &job.events)?;
+            store::finish_pass(tx, sid, job.upd, job.pos)?;
+            if let Some(r) = w.inner.shared.lock().unwrap().sessions.get_mut(&job.key) {
+                r.done_upd = Some(job.upd);
+                r.done_pos = job.pos;
+                r.cold = cold;
+            }
+            Ok(delta)
+        };
+        let mut written = vec![false; jobs.len()];
+        let grouped = if jobs.len() == 1 {
+            None
+        } else {
+            match self.unit_quiet(|w, tx| {
+                let mut delta = 0;
+                for job in &jobs {
+                    delta += write(w, tx, job)?;
+                }
+                Ok(delta)
+            }) {
+                Ok(delta) => {
+                    self.add_events(delta);
+                    written.fill(true);
+                    Some(())
+                }
+                Err(Fail::Begin(e)) => {
+                    // Nothing was attempted: keep them for the next turn.
+                    self.inner.note_error(format!("write: {e:#}"));
+                    self.cold_rows = jobs.iter().map(|j| j.events.len()).sum();
+                    self.cold_since = Some(Instant::now());
+                    self.cold_batch = jobs;
+                    return;
+                }
+                Err(Fail::Unit(_)) => None,
+            }
+        };
+        if grouped.is_none() {
+            for (job, done) in jobs.iter().zip(written.iter_mut()) {
+                match self.unit_delta(&format!("index {}", job.key), |w, tx| write(w, tx, job)) {
+                    Ok(()) => *done = true,
+                    Err(_) => self.back_off(&job.key),
+                }
+            }
+        }
+        for (job, done) in jobs.iter().zip(written) {
+            if !done {
+                continue;
+            }
+            self.recovered(&job.key);
+            if job.never {
+                self.never_left.set(self.never_left.get().saturating_sub(1));
+            }
+            if job.counted {
+                self.inner.shared.lock().unwrap().finished();
+            }
+        }
+    }
+
+    /// What follows a page's unit: a failed one is tried again (the page is read afresh, nothing
+    /// of it was kept), up to [`PAGE_RETRIES`] times, then the session is backed off.
+    fn settle_step(&self, p: &mut Pass, key: &str, ok: bool, done: bool) -> Step {
+        if ok {
+            p.failures = 0;
+            self.recovered(key);
+            return if done { Step::Done } else { Step::More };
+        }
+        p.failures += 1;
+        if p.failures >= PAGE_RETRIES {
+            self.back_off(key);
+            return Step::Abandoned;
+        }
+        Step::More
+    }
+
     /// Apply live envelopes from the engine. Returns whether there were any.
     fn follow(&mut self) -> bool {
+        enum Op<'a> {
+            Events(String, Vec<&'a Event>),
+            Removed(String),
+        }
         let mut batch: Vec<Arc<Envelope>> = Vec::new();
         loop {
             match self.rx.try_recv() {
@@ -1910,35 +2374,127 @@ impl Writer {
                         batch.push(env);
                     }
                 }
-                Err(TryRecvError::Lagged(_)) => self.lagged.set(true),
+                Err(TryRecvError::Lagged(_)) => {
+                    // Envelopes were lost: no session can be assumed current from live writes alone.
+                    self.lagged.set(true);
+                    self.inner.shared.lock().unwrap().live_upd.clear();
+                }
                 Err(TryRecvError::Empty | TryRecvError::Closed) => break,
             }
         }
         if batch.is_empty() {
             return false;
         }
-        let _ = self.transaction(|w, tx| {
-            let mut delta = 0;
-            for env in &batch {
-                match &**env {
-                    Envelope::Event { event, .. } => {
-                        let sid = w.sid(tx, &event.session)?;
-                        w.ensure_hot(tx, sid)?;
-                        delta += store::upsert(tx, sid, event)?;
+        // A session waiting in the cold batch is written first, so a later live write or removal
+        // is not overtaken by older content.
+        let waiting = |key: &str| self.cold_batch.iter().any(|j| j.key == key);
+        if batch.iter().any(|env| match &**env {
+            Envelope::Event { event, .. } => waiting(&event.session),
+            Envelope::Removed { key, .. } => waiting(key),
+            _ => false,
+        }) {
+            self.flush_cold();
+        }
+        // One unit per session: a session that cannot be written does not take the others down.
+        let mut ops: Vec<Op> = Vec::new();
+        let mut open: HashMap<&str, usize> = HashMap::new();
+        for env in &batch {
+            match &**env {
+                Envelope::Event { event, .. } => {
+                    // A backed-off session is caught up by its pass once the backoff ends.
+                    if self.backed_off(&event.session) {
+                        continue;
                     }
-                    Envelope::Removed { key, .. } => {
-                        let sid = w.inner.shared.lock().unwrap().sessions.get(key).filter(|r| !r.pinned).map(|r| r.sid);
-                        if let Some(sid) = sid {
-                            delta -= remove_everywhere(tx, sid)? as i64;
-                            w.inner.shared.lock().unwrap().forget(key);
+                    match open.get(event.session.as_str()) {
+                        Some(&i) => {
+                            if let Op::Events(_, evs) = &mut ops[i] {
+                                evs.push(event);
+                            }
+                        }
+                        None => {
+                            open.insert(event.session.as_str(), ops.len());
+                            ops.push(Op::Events(event.session.clone(), vec![event]));
                         }
                     }
-                    _ => {}
+                }
+                Envelope::Removed { key, .. } => {
+                    open.remove(key.as_str());
+                    ops.push(Op::Removed(key.clone()));
+                }
+                _ => {}
+            }
+        }
+        let apply = |w: &Self, tx: &Connection, op: &Op| -> Result<i64> {
+            match op {
+                Op::Events(key, events) => {
+                    let sid = w.sid(tx, key)?;
+                    w.ensure_hot(tx, sid)?;
+                    let mut delta = 0;
+                    for e in events {
+                        delta += store::upsert(tx, sid, e)?;
+                    }
+                    Ok(delta)
+                }
+                Op::Removed(key) => {
+                    let sid = w.inner.shared.lock().unwrap().sessions.get(key).filter(|r| !r.pinned).map(|r| r.sid);
+                    let mut delta = 0;
+                    if let Some(sid) = sid {
+                        delta -= remove_everywhere(tx, sid)? as i64;
+                        w.inner.shared.lock().unwrap().forget(key);
+                    }
+                    Ok(delta)
                 }
             }
+        };
+        let applied = |w: &Self, op: &Op| {
+            if let Op::Events(key, events) = op {
+                let newest = events.iter().map(|e| e.ts).max().unwrap_or(0);
+                w.mark_live(key, newest);
+                w.recovered(key);
+            }
+        };
+        match self.unit_quiet(|w, tx| {
+            let mut delta = 0;
+            for op in &ops {
+                delta += apply(w, tx, op)?;
+            }
             Ok(delta)
-        });
+        }) {
+            Ok(delta) => {
+                self.add_events(delta);
+                ops.iter().for_each(|op| applied(self, op));
+            }
+            Err(Fail::Begin(e)) => {
+                // Nothing was written: the sessions are caught up by the next reconcile.
+                self.inner.note_error(format!("write: {e:#}"));
+                self.next_reconcile = self.next_reconcile.min(Instant::now() + Duration::from_secs(1));
+            }
+            Err(Fail::Unit(_)) => {
+                for op in &ops {
+                    let label = match op {
+                        Op::Events(key, _) | Op::Removed(key) => format!("follow {key}"),
+                    };
+                    match self.unit_delta(&label, |w, tx| apply(w, tx, op)) {
+                        Ok(()) => applied(self, op),
+                        Err(_) => {
+                            if let Op::Events(key, _) = op {
+                                self.back_off(key);
+                            }
+                        }
+                    }
+                }
+            }
+        }
         true
+    }
+
+    /// Live events up to `ts` of an already indexed session are in the index.
+    fn mark_live(&self, key: &str, ts: i64) {
+        let mut sh = self.inner.shared.lock().unwrap();
+        if sh.sessions.get(key).is_some_and(|r| r.done_upd.is_some() && !r.pinned) {
+            let slot = sh.live_upd.entry(key.to_owned()).or_insert(ts);
+            *slot = (*slot).max(ts);
+        }
     }
 
     fn commands(&mut self) -> bool {
@@ -1947,63 +2503,95 @@ impl Writer {
             return false;
         }
         let cutoff = self.inner.cutoff();
+        self.flush_cold();
         if !self.commit(true) {
             self.requeue_commands(cmds);
             return true;
         }
-        let result = self.transaction(|w, tx| {
+        let apply = |w: &Self, tx: &Connection, cmd: &Cmd| -> Result<i64> {
             let mut delta = 0;
-            for cmd in &cmds {
-                match cmd {
-                    Cmd::Index(session, events) => {
-                        let existing = w.inner.shared.lock().unwrap().sessions.get(&session.key).cloned();
-                        let mut seen = HashSet::new();
-                        let fresh: Vec<&Event> = events.iter().rev().filter(|e| seen.insert(e.id.as_str())).collect();
-                        match existing {
-                            // New, already-old pinned session: write straight to cold.
-                            None if session.updated_at < cutoff => {
-                                let sid = w.sid(tx, &session.key)?;
-                                let rows: Vec<Event> = fresh.into_iter().cloned().collect();
-                                delta += finalize_cold_pass(tx, sid, rows)?;
-                                store::pin(tx, sid, session)?;
-                                if let Some(r) = w.inner.shared.lock().unwrap().sessions.get_mut(&session.key) {
-                                    r.pinned = true;
-                                    r.cold = true;
-                                    r.done_upd = Some(session.updated_at);
-                                    r.meta = Some((**session).clone());
-                                }
+            match cmd {
+                Cmd::Index(session, events) => {
+                    let existing = w.inner.shared.lock().unwrap().sessions.get(&session.key).cloned();
+                    let mut seen = HashSet::new();
+                    let fresh: Vec<&Event> = events.iter().rev().filter(|e| seen.insert(e.id.as_str())).collect();
+                    match existing {
+                        // New, already-old pinned session: write straight to cold.
+                        None if session.updated_at < cutoff => {
+                            let sid = w.sid(tx, &session.key)?;
+                            let rows: Vec<Event> = fresh.into_iter().cloned().collect();
+                            delta += finalize_cold_pass(tx, sid, &rows)?.0;
+                            store::pin(tx, sid, session)?;
+                            if let Some(r) = w.inner.shared.lock().unwrap().sessions.get_mut(&session.key) {
+                                r.pinned = true;
+                                r.cold = store::is_cold(tx, sid)?;
+                                r.done_upd = Some(session.updated_at);
+                                r.meta = Some((**session).clone());
                             }
-                            other => {
-                                let sid = w.sid(tx, &session.key)?;
-                                if other.is_some_and(|r| r.cold) {
-                                    w.ensure_hot(tx, sid)?;
-                                }
-                                for e in fresh {
-                                    delta += store::upsert(tx, sid, e)?;
-                                }
-                                store::pin(tx, sid, session)?;
-                                if let Some(r) = w.inner.shared.lock().unwrap().sessions.get_mut(&session.key) {
-                                    r.pinned = true;
-                                    r.cold = false;
-                                    r.done_upd = Some(session.updated_at);
-                                    r.meta = Some((**session).clone());
-                                }
+                        }
+                        other => {
+                            let sid = w.sid(tx, &session.key)?;
+                            if other.is_some_and(|r| r.cold) {
+                                w.ensure_hot(tx, sid)?;
+                            }
+                            for e in fresh {
+                                delta += store::upsert(tx, sid, e)?;
+                            }
+                            store::pin(tx, sid, session)?;
+                            if let Some(r) = w.inner.shared.lock().unwrap().sessions.get_mut(&session.key) {
+                                r.pinned = true;
+                                r.cold = false;
+                                r.done_upd = Some(session.updated_at);
+                                r.meta = Some((**session).clone());
                             }
                         }
                     }
-                    Cmd::Remove(key) => {
-                        let sid = w.inner.shared.lock().unwrap().sessions.get(key).map(|r| r.sid);
-                        if let Some(sid) = sid {
-                            delta -= remove_everywhere(tx, sid)? as i64;
-                            w.inner.shared.lock().unwrap().forget(key);
-                        }
+                }
+                Cmd::Remove(key) => {
+                    let sid = w.inner.shared.lock().unwrap().sessions.get(key).map(|r| r.sid);
+                    if let Some(sid) = sid {
+                        delta -= remove_everywhere(tx, sid)? as i64;
+                        w.inner.shared.lock().unwrap().forget(key);
                     }
                 }
             }
             Ok(delta)
-        });
-        if result.is_ok() && self.commit(true) {
-            self.inner.pending_commands.fetch_sub(cmds.len(), Ordering::Release);
+        };
+        // Every command is a unit of its own; the ones that fail are put back, in order.
+        let mut done: Vec<bool> = Vec::with_capacity(cmds.len());
+        let mut begin_failed = false;
+        for cmd in &cmds {
+            if begin_failed {
+                done.push(false);
+                continue;
+            }
+            let label = match cmd {
+                Cmd::Index(session, _) => format!("index {}", session.key),
+                Cmd::Remove(key) => format!("remove {key}"),
+            };
+            match self.unit_quiet(|w, tx| apply(w, tx, cmd)) {
+                Ok(delta) => {
+                    self.add_events(delta);
+                    done.push(true);
+                }
+                Err(Fail::Begin(e)) => {
+                    self.inner.note_error(format!("write: {e:#}"));
+                    begin_failed = true;
+                    done.push(false);
+                }
+                Err(Fail::Unit(e)) => {
+                    self.inner.note_error(format!("{label}: {e:#}"));
+                    done.push(false);
+                }
+            }
+        }
+        if self.commit(true) {
+            let ok = done.iter().filter(|d| **d).count();
+            self.inner.pending_commands.fetch_sub(ok, Ordering::Release);
+            let failed: Vec<Cmd> = cmds.into_iter().zip(done).filter(|(_, d)| !d).map(|(c, _)| c).collect();
+            if !failed.is_empty() {
+                self.requeue_commands(failed);
+            }
         } else {
             self.requeue_commands(cmds);
         }
@@ -2044,31 +2632,72 @@ impl Writer {
         Ok(())
     }
 
-    /// Run `f` inside the rolling write transaction; `f` returns the change in event rows.
-    ///
-    /// Writes are batched across pages and sessions and committed by [`Writer::commit`] at most
-    /// every [`COMMIT_EVERY`]: each commit makes FTS5 flush its pending terms into a new segment
-    /// (merge work later), and each BEGIN/COMMIT takes SQLite's process-wide shm lock, which
-    /// adapters reading their own SQLite stores in this process contend for.
-    fn transaction(&self, f: impl FnOnce(&Self, &Connection) -> Result<i64>) -> Result<()> {
-        let res = (|| {
-            if self.tx_since.get().is_none() {
-                self.conn.execute_batch("BEGIN IMMEDIATE")?;
-                self.tx_since.set(Some(Instant::now()));
-            }
-            f(self, &self.conn)
-        })();
+    /// Open the rolling write transaction if none is open. Writes are batched across pages and
+    /// sessions and committed by [`Writer::commit`] at most every [`COMMIT_EVERY`]: each commit
+    /// makes FTS5 flush its pending terms into a new segment (merge work later), and each
+    /// BEGIN/COMMIT takes SQLite's process-wide shm lock, which adapters reading their own SQLite
+    /// stores in this process contend for.
+    fn begin(&self) -> Result<()> {
+        if self.tx_since.get().is_none() {
+            self.conn.execute_batch("BEGIN IMMEDIATE")?;
+            self.tx_since.set(Some(Instant::now()));
+            // The write lock is ours now, so nothing can slip in between this look and the unit.
+            self.check_foreign();
+        }
+        Ok(())
+    }
+
+    /// Run `f` as one unit of work inside the rolling transaction, isolated by a SAVEPOINT: if it
+    /// fails only its own writes are undone (and the in-memory session map reloaded to match);
+    /// everything else the transaction holds stays. `f` returns the change in event rows.
+    fn unit_quiet<T>(&self, f: impl FnOnce(&Self, &Connection) -> Result<T>) -> Result<T, Fail> {
+        self.begin().map_err(Fail::Begin)?;
+        self.conn.execute_batch("SAVEPOINT unit").map_err(|e| Fail::Unit(e.into()))?;
+        let res = f(self, &self.conn)
+            .and_then(|v| self.conn.execute_batch("RELEASE unit").map(|()| v).map_err(anyhow::Error::from));
         match res {
-            Ok(delta) => {
-                let mut sh = self.inner.shared.lock().unwrap();
-                sh.progress.events = sh.progress.events.saturating_add_signed(delta);
-                Ok(())
-            }
-            Err(err) => {
-                self.rollback(&err);
-                Err(err)
+            Ok(v) => Ok(v),
+            Err(e) => {
+                self.abort_unit();
+                Err(Fail::Unit(e))
             }
         }
+    }
+
+    /// Undo the failed unit. If SQLite already rolled the whole transaction back (disk full, I/O
+    /// error) nothing else is left to save: the pass in flight is dropped and the next turn
+    /// reconciles.
+    fn abort_unit(&self) {
+        let undone = self.conn.execute_batch("ROLLBACK TO unit; RELEASE unit").is_ok();
+        if !undone || self.conn.is_autocommit() {
+            if self.tx_since.take().is_some() {
+                let _ = self.conn.execute_batch("ROLLBACK");
+            }
+            self.lagged.set(true);
+        }
+        self.reload();
+    }
+
+    /// [`Writer::unit_quiet`], recording one error when the unit fails.
+    fn unit<T>(&self, label: &str, f: impl FnOnce(&Self, &Connection) -> Result<T>) -> Result<T> {
+        match self.unit_quiet(f) {
+            Ok(v) => Ok(v),
+            Err(Fail::Begin(e)) => {
+                self.inner.note_error(format!("write: {e:#}"));
+                Err(e)
+            }
+            Err(Fail::Unit(e)) => {
+                self.inner.note_error(format!("{label}: {e:#}"));
+                Err(anyhow::anyhow!("{e:#}"))
+            }
+        }
+    }
+
+    /// A unit that returns the change in event rows, which is folded into `progress.events`.
+    fn unit_delta(&self, label: &str, f: impl FnOnce(&Self, &Connection) -> Result<i64>) -> Result<()> {
+        let delta = self.unit(label, f)?;
+        self.add_events(delta);
+        Ok(())
     }
 
     fn commit(&self, force: bool) -> bool {
@@ -2102,19 +2731,32 @@ impl Writer {
 
 /// Write freshly-collected rows (from a `PassMode::Cold` pass, or a brand-new pinned session) as
 /// cold blocks, comparing against the existing fingerprint so an unchanged session is not
-/// rewritten. Returns the change in row count.
-fn finalize_cold_pass(tx: &Connection, sid: i64, events: Vec<Event>) -> Result<i64> {
+/// rewritten. Returns the change in row count and whether the session is cold afterwards.
+///
+/// A session a live write promoted to the hot tier while the pass was collecting stays hot: its
+/// history is merged into the hot rows instead, so no session is ever left in both tiers.
+fn finalize_cold_pass(tx: &Connection, sid: i64, events: &[Event]) -> Result<(i64, bool)> {
+    if store::has_hot(tx, sid)? {
+        if store::is_cold(tx, sid)? {
+            cold::promote(tx, sid)?;
+        }
+        let mut delta = 0;
+        for e in events {
+            delta += store::upsert(tx, sid, e)?;
+        }
+        return Ok((delta, false));
+    }
     let rows: Vec<store::Row> = events
-        .into_iter()
+        .iter()
         .enumerate()
         .filter_map(|(seq, e)| {
-            let (kind, text) = store::doc(&e)?;
+            let (kind, text) = store::doc(e)?;
             if text.is_empty() {
                 return None;
             }
             Some(store::Row {
                 id: store::row_id(sid, seq as i64, kind),
-                event: e.id,
+                event: e.id.clone(),
                 ts: e.ts,
                 pos: e.pos.map(|p| p as i64),
                 text,
@@ -2123,7 +2765,7 @@ fn finalize_cold_pass(tx: &Connection, sid: i64, events: Vec<Event>) -> Result<i
         .collect();
     let fp = cold::fingerprint(&rows);
     if store::fingerprint_of(tx, sid)? == Some(fp) {
-        return Ok(0); // unchanged: skip rewriting (e.g. a version-bump refresh, or a repeat index_session).
+        return Ok((0, true)); // unchanged: skip rewriting (e.g. a version-bump refresh, or a repeat `index_session`).
     }
     let (old_rows, old_tokens) = cold::delete_blocks(tx, sid)?;
     store::bump_cold(tx, -old_rows, -old_tokens)?;
@@ -2131,7 +2773,7 @@ fn finalize_cold_pass(tx: &Connection, sid: i64, events: Vec<Event>) -> Result<i
     store::bump_cold(tx, stats.rows, stats.tokens)?;
     store::set_cold(tx, sid, true)?;
     store::set_fingerprint(tx, sid, fp)?;
-    Ok(stats.rows - old_rows)
+    Ok((stats.rows - old_rows, true))
 }
 
 /// Compaction's write half: `rows` are hot rows already removed by [`store::drop_hot`].

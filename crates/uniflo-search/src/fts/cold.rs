@@ -307,16 +307,25 @@ pub fn delete_blocks(c: &Connection, sid: i64) -> Result<(i64, i64)> {
 
 /// Promote a cold session back to hot: decompress its blocks, reinsert the rows under their
 /// original ids, and drop the cold blocks. Bumps both tiers' counters and `sess.cold`.
+///
+/// Tolerates a session that already has hot rows (see [`store::merge_hot_row`]): those stay, the
+/// cold copies of the same events are dropped, and nothing is lost or duplicated.
 pub fn promote(c: &Connection, sid: i64) -> Result<()> {
     let rows = read_blocks(c, sid)?;
     let (cold_rows, cold_tokens) = delete_blocks(c, sid)?;
-    store::bump_cold(c, -cold_rows, -cold_tokens)?;
-    let mut hot_tokens = 0i64;
-    for r in &rows {
-        store::insert_hot_row(c, sid, r)?;
-        hot_tokens += store::token_count(&r.text);
+    if cold_rows != 0 {
+        store::bump_cold(c, -cold_rows, -cold_tokens)?;
     }
-    store::bump_hot(c, rows.len() as i64, hot_tokens)?;
+    let (mut hot_rows, mut hot_tokens) = (0i64, 0i64);
+    for r in &rows {
+        if let Some(tokens) = store::merge_hot_row(c, sid, r)? {
+            hot_rows += 1;
+            hot_tokens += tokens;
+        }
+    }
+    if hot_rows != 0 {
+        store::bump_hot(c, hot_rows, hot_tokens)?;
+    }
     store::set_cold(c, sid, false)?;
     Ok(())
 }
