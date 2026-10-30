@@ -8,7 +8,7 @@
 
 [开发者站](https://crosery.github.io/uniflo/) · [快速开始](#快速开始) · [网页控制台](docs/console.md) · [网关 API](docs/api.md) · [Rust SDK](docs/sdk.md) · [Agent 接入](docs/agents.md) · [llms.txt](https://crosery.github.io/uniflo/llms.txt)
 
-[0.2.4 发布说明](docs/releases/v0.2.4.md)：会话详情分成对话、链路、用量、子代理、信息五个 tab，父会话合计子代理费用，会话页精简，守护进程内存和 CPU 明显下降，并修复全文索引的冷热双层与建库进度问题。
+[0.2.5 发布说明](docs/releases/v0.2.5.md)：全文索引空闲时不再持续占用 CPU，冷查询更快，建库后新增会话如实显示进度，MCP 切回守护进程后归还内存。
 
 ![会话视图](docs/assets/demo.png)
 
