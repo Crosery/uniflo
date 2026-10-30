@@ -67,6 +67,11 @@ const DEFAULT_TOTAL_BUDGET: Duration = Duration::from_millis(250);
 const K1_PLUS_1: f64 = 2.2;
 
 const IDLE: Duration = Duration::from_millis(100);
+/// How often an idle writer looks for a session to compact and for free pages to reclaim.
+const UPKEEP: Duration = Duration::from_secs(1);
+/// A session seen for the first time in live events gets its first pass after this delay, so the
+/// sessions a burst brings are queued together.
+const FIRST_SIGHT: Duration = Duration::from_secs(1);
 /// Writes accumulate in one transaction for at most this long (see [`Writer::transaction`]).
 const COMMIT_EVERY: Duration = Duration::from_millis(500);
 const HITS_PER_SESSION: usize = 3;
@@ -486,6 +491,9 @@ impl Fts {
             merge: None,
             compact_check: true,
             vacuum_check: true,
+            upkeep_at: Instant::now(),
+            seen_seq: Cell::new(None),
+            unqueued: false,
             data_version: Cell::new(None),
             foreign: Cell::new(false),
             backoff: RefCell::new(HashMap::new()),
@@ -1582,6 +1590,12 @@ struct Writer {
     compact_check: bool,
     /// Run `incremental_vacuum` at the next idle turn.
     vacuum_check: bool,
+    /// When the idle turn next re-arms `compact_check` and `vacuum_check` (see [`UPKEEP`]).
+    upkeep_at: Instant,
+    /// The engine's envelope `seq` at the last full reconcile; `None` forces the next one.
+    seen_seq: Cell<Option<u64>>,
+    /// A never-indexed session came in through live events and waits for the next reconcile.
+    unqueued: bool,
     /// `PRAGMA data_version` as of this writer's last look: while it holds the write lease any
     /// other value means another process committed to the index.
     data_version: Cell<Option<i64>>,
@@ -1645,6 +1659,7 @@ impl Writer {
             }
             if self.retry_at.get().is_some_and(|t| Instant::now() >= t) {
                 self.retry_at.set(None);
+                self.seen_seq.set(None);
                 self.next_reconcile = Instant::now();
             }
             if self.lagged.get() || Instant::now() >= self.next_reconcile {
@@ -1692,6 +1707,11 @@ impl Writer {
                             }
                             Err(e) => self.inner.note_error(format!("release writer: {e:#}")),
                         }
+                    }
+                    if Instant::now() >= self.upkeep_at {
+                        self.upkeep_at = Instant::now() + UPKEEP;
+                        self.compact_check = true;
+                        self.vacuum_check = true;
                     }
                     let did_idle_work = self.merge_step() || self.compact_step() || self.vacuum_step();
                     if !did_idle_work && !busy {
@@ -1838,6 +1858,7 @@ impl Writer {
 
     /// Reload the in-memory session map and row count from the database.
     fn reload(&self) {
+        self.seen_seq.set(None);
         if let Ok(rows) = store::load_sessions(&self.conn) {
             let expected = self.lease.is_none().then(|| self.inner.engine.sessions());
             let mut sh = self.inner.shared.lock().unwrap();
@@ -1871,7 +1892,7 @@ impl Writer {
         let waiting = self.backoff.borrow().values().any(|(until, _)| *until > Instant::now());
         let mut sh = self.inner.shared.lock().unwrap();
         sh.working = false;
-        if waiting || !sh.indexing {
+        if waiting || self.unqueued || !sh.indexing {
             return;
         }
         sh.indexing = false;
@@ -1930,7 +1951,6 @@ impl Writer {
         if !std::mem::take(&mut self.compact_check) {
             return false;
         }
-        self.compact_check = true; // re-check every idle turn, not just once
         let Some(sid) = self.compaction_candidate() else { return false };
         // Two separate locks, deliberately not nested in one condition: holding the guard from
         // the first across the second would self-deadlock (`Mutex` is not reentrant).
@@ -1950,6 +1970,8 @@ impl Writer {
                 r.cold = true;
             }
             self.recovered(&key);
+            // Others may be due too: look again at the next idle turn.
+            self.compact_check = true;
         } else {
             self.back_off(&key);
         }
@@ -1958,27 +1980,33 @@ impl Writer {
         res.is_ok()
     }
 
+    /// Judged by the index's own record of each session's last activity, then confirmed with the
+    /// engine for the picked one only: cloning the engine's whole session list on every idle turn
+    /// was most of an idle daemon's CPU.
     fn compaction_candidate(&self) -> Option<i64> {
         let cutoff = self.inner.cutoff();
-        let live: HashMap<String, i64> =
-            self.inner.engine.sessions().into_iter().map(|s| (s.key, s.updated_at)).collect();
-        let current = self.pass.as_ref().map(|p| p.session.key.clone());
+        let current = self.pass.as_ref().map(|p| p.session.key.as_str());
         let in_queue: HashSet<&str> = self.queue.iter().map(|s| s.key.as_str()).collect();
-        let sh = self.inner.shared.lock().unwrap();
-        sh.sessions
-            .iter()
-            .filter(|(k, r)| {
-                !r.pinned
-                    && !r.cold
-                    && current.as_deref() != Some(k.as_str())
-                    && !in_queue.contains(k.as_str())
-                    && !self.backed_off(k)
-            })
-            .filter_map(|(k, r)| {
-                let upd = live.get(k).copied().or(r.done_upd)?;
-                (upd < cutoff).then_some(r.sid)
-            })
-            .next()
+        let due: Vec<(String, i64)> = {
+            let sh = self.inner.shared.lock().unwrap();
+            sh.sessions
+                .iter()
+                .filter(|(k, r)| {
+                    !r.pinned
+                        && !r.cold
+                        && current != Some(k.as_str())
+                        && !in_queue.contains(k.as_str())
+                        && !self.backed_off(k)
+                })
+                .filter_map(|(k, r)| {
+                    let upd = r.done_upd?.max(sh.live_upd.get(k).copied().unwrap_or(0));
+                    (upd < cutoff).then(|| (k.clone(), r.sid))
+                })
+                .collect()
+        };
+        due.into_iter()
+            .find(|(k, _)| self.inner.engine.session(k).is_none_or(|s| s.updated_at < cutoff))
+            .map(|(_, sid)| sid)
     }
 
     /// Reclaim free pages once they exceed 5% of the file, bounded per idle turn.
@@ -1986,7 +2014,6 @@ impl Writer {
         if !std::mem::take(&mut self.vacuum_check) {
             return false;
         }
-        self.vacuum_check = true;
         match store::free_ratio(&self.conn) {
             Ok(r) if r > 0.05 => {
                 let t0 = Instant::now();
@@ -1994,6 +2021,7 @@ impl Writer {
                     self.inner.note_error(format!("incremental_vacuum: {e:#}"));
                     return false;
                 }
+                self.vacuum_check = true;
                 self.nap(t0.elapsed().mul_f32(self.inner.opts.pause));
                 true
             }
@@ -2044,8 +2072,17 @@ impl Writer {
     /// Diff the engine's sessions against recorded progress: queue what changed, drop what is gone.
     fn reconcile(&mut self) {
         self.flush_cold();
-        self.lagged.set(false);
+        let forced = self.lagged.replace(false);
         self.next_reconcile = Instant::now() + self.inner.opts.reconcile;
+        // Every change to the engine's sessions is published as an envelope. With none since the
+        // last pass, nothing failed or reloaded since, and no change inside its grace period, the
+        // diff would come out the same: skip cloning the whole list.
+        let seq = self.inner.engine.seq();
+        if !forced && self.seen_seq.get() == Some(seq) && self.inner.shared.lock().unwrap().changed_since.is_empty() {
+            return;
+        }
+        self.seen_seq.set(Some(seq));
+        self.unqueued = false;
         let sessions = self.inner.engine.sessions();
         self.heal_tiers();
         let current = self.pass.as_ref().map(|p| p.session.key.clone());
@@ -2446,13 +2483,14 @@ impl Writer {
                 }
             }
         };
-        let applied = |w: &Self, op: &Op| {
-            if let Op::Events(key, events) = op {
-                let newest = events.iter().map(|e| e.ts).max().unwrap_or(0);
-                w.mark_live(key, newest);
-                w.recovered(key);
-            }
+        // Whether the session still waits for its first pass.
+        let applied = |w: &Self, op: &Op| -> bool {
+            let Op::Events(key, events) = op else { return false };
+            let newest = events.iter().map(|e| e.ts).max().unwrap_or(0);
+            w.recovered(key);
+            !w.mark_live(key, newest)
         };
+        let mut unindexed = false;
         match self.unit_quiet(|w, tx| {
             let mut delta = 0;
             for op in &ops {
@@ -2462,11 +2500,14 @@ impl Writer {
         }) {
             Ok(delta) => {
                 self.add_events(delta);
-                ops.iter().for_each(|op| applied(self, op));
+                for op in &ops {
+                    unindexed |= applied(self, op);
+                }
             }
             Err(Fail::Begin(e)) => {
                 // Nothing was written: the sessions are caught up by the next reconcile.
                 self.inner.note_error(format!("write: {e:#}"));
+                self.seen_seq.set(None);
                 self.next_reconcile = self.next_reconcile.min(Instant::now() + Duration::from_secs(1));
             }
             Err(Fail::Unit(_)) => {
@@ -2475,7 +2516,7 @@ impl Writer {
                         Op::Events(key, _) | Op::Removed(key) => format!("follow {key}"),
                     };
                     match self.unit_delta(&label, |w, tx| apply(w, tx, op)) {
-                        Ok(()) => applied(self, op),
+                        Ok(()) => unindexed |= applied(self, op),
                         Err(_) => {
                             if let Op::Events(key, _) = op {
                                 self.back_off(key);
@@ -2485,15 +2526,36 @@ impl Writer {
                 }
             }
         }
+        if unindexed {
+            self.first_sight();
+        }
         true
     }
 
-    /// Live events up to `ts` of an already indexed session are in the index.
-    fn mark_live(&self, key: &str, ts: i64) {
+    /// Live events up to `ts` of an already indexed session are in the index. Returns whether
+    /// the session is indexed (or pinned); one that is not still needs its first pass.
+    fn mark_live(&self, key: &str, ts: i64) -> bool {
         let mut sh = self.inner.shared.lock().unwrap();
-        if sh.sessions.get(key).is_some_and(|r| r.done_upd.is_some() && !r.pinned) {
-            let slot = sh.live_upd.entry(key.to_owned()).or_insert(ts);
-            *slot = (*slot).max(ts);
+        let Some(r) = sh.sessions.get(key) else { return false };
+        if r.pinned {
+            return true;
+        }
+        if r.done_upd.is_none() {
+            return false;
+        }
+        let slot = sh.live_upd.entry(key.to_owned()).or_insert(ts);
+        *slot = (*slot).max(ts);
+        true
+    }
+
+    /// A session never indexed before came in through live events: it counts as pending from now
+    /// on (`indexing` until its first pass is done), and the reconcile that queues it comes soon.
+    fn first_sight(&mut self) {
+        self.seen_seq.set(None);
+        self.next_reconcile = self.next_reconcile.min(Instant::now() + FIRST_SIGHT);
+        if !std::mem::replace(&mut self.unqueued, true) && !self.inner.shared.lock().unwrap().indexing {
+            let expected = self.inner.engine.sessions();
+            self.inner.shared.lock().unwrap().sync_progress(&expected, Instant::now());
         }
     }
 

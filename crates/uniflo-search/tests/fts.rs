@@ -1705,6 +1705,43 @@ async fn live_appends_do_not_report_the_index_as_building() {
     assert_eq!(building, 0, "indexing was reported in {building} of {samples} samples");
 }
 
+/// Scenario: 进度只反映未建部分. A session that appears after the build is part of the backlog
+/// until its first pass: `indexing` turns true for a moment at the daemon's default reconcile
+/// interval, then back to false, and `progress.done` never goes down meanwhile.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_new_session_after_the_build_reports_indexing_briefly() {
+    let env = Env::new();
+    let t = now_ms() - 60_000;
+    std::fs::write(env.path("claude/-w-demo/old.jsonl"), user("u0", t, "first message")).unwrap();
+    let engine = env.engine();
+    let fts = tokio::task::block_in_place(|| {
+        let fts = env.fts(&engine, FtsOptions::default());
+        idle(&fts);
+        fts
+    });
+    let fresh = env.path("claude/-w-demo/fresh.jsonl");
+    std::fs::write(&fresh, user("n0", now_ms(), "a session started after the build freshmarker")).unwrap();
+    engine.notify_path(fresh.clone()).await;
+    let (mut seen, mut last, mut after) = (0, 0, None);
+    let t0 = Instant::now();
+    while t0.elapsed() < Duration::from_secs(10) {
+        let st = tokio::task::block_in_place(|| fts.status());
+        assert!(st.progress.done >= last, "done went from {last} to {}: {st:?}", st.progress.done);
+        last = st.progress.done;
+        if st.indexing {
+            seen += 1;
+        } else if seen > 0 {
+            after = Some(st);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(seen > 0, "indexing never turned true for the new session");
+    let st = after.expect("indexing went back to false");
+    assert_eq!((st.progress.done, st.progress.total), (2, 2), "{st:?}");
+    assert_eq!(search(&fts, "freshmarker").total, 1);
+}
+
 /// Scenario: 进度只反映未建部分. During a build, `progress.done` only goes up, even when sessions
 /// that were already indexed grow and new ones appear.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
