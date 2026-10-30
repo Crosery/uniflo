@@ -75,6 +75,12 @@ Uniflo 统计每次模型调用（一步）的 token 用量与费用，并对外
   - `last_context_tokens`、`context_limit`。
 - `last_context_tokens` 是最后一步的 `input + cache_read + cache_write`；`context_limit` 来自模型目录。
 - 有新的 usage 事件时，这些字段实时更新，并通过 `session` envelope 推送。
+- `Session` 新增可选字段 `family`，即本会话加上全部后代会话（经 `parent` 链递归，子代理的子代理也算）的合计：
+  - `sessions`：后代会话数，不含本会话；
+  - `steps`、`input`、`output`、`cache_read`、`cache_write`、`reasoning`、`unpriced_steps`：各会话之和；
+  - `cost_usd`：已定价金额之和，全部未定价时为 null。
+  - 只在至少有一个后代会话时输出；后代的用量尚未索引时按 0 计，`usage` 也缺失的会话不计入。
+- 任一后代会话的 `usage` 变化时，其所有祖先会话的 `family` 随之更新，并通过 `session` envelope 推送祖先会话。
 
 ## 接口
 
@@ -95,7 +101,36 @@ Uniflo 统计每次模型调用（一步）的 token 用量与费用，并对外
   - 默认的时间窗口是全部历史。
 - `GET /v1/sessions/{key}/usage`：返回每一步的明细和按回合汇总。
   - 每步：`{event, ts, model, input, output, cache_read, cache_write, reasoning, cost_usd, cost_source, context_tokens, context_limit, context_pct}`。
+  - 每步新增可选字段：
+    - `cost_parts {input, output, cache_read, cache_write}`：按类拆分的金额，单位 USD，四项之和等于 `cost_usd`；
+    - `price {input, output, cache_read, cache_write, tier_above?}`：这一步实际采用的单价，单位 USD / 百万 token，已应用价格段和分档，cache_write 缺价时为 input×1.25。
+    - 只在 `cost_source` 为 `catalog` 或 `approx` 时输出；harness 自报金额和未定价的步骤不输出。
   - 按回合：每回合的 token 与费用合计。
+- `GET /v1/sessions/{key}/trajectory`：会话链路，用于逐轮、逐步查看调用链。未知 key 返回 404。响应 `SessionTrajectory`：
+  - `session`：会话 key。
+  - `turns[]`：每个由真人用户消息开启的回合（harness 注入的 synthetic 消息不开新回合）。
+    - 回合字段：`{turn, event?, started_at, ended_at, prompt?, steps[], items[]}`。
+    - `prompt` 是用户消息的前 300 个字符。
+    - `items` 放在回合内第一步之前，或在没有 usage 的回合里出现的记录。
+  - `steps[]`：每个 usage 事件是一步。
+    - 字段：`{index, event, started_at, ts, model, input, output, cache_read, cache_write, reasoning, cost_usd, cost_source, cost_parts?, price?, context_tokens, context_pct, items[]}`。
+    - 数值与 `/usage` 的同一步完全一致。
+    - `index` 在整个会话内从 1 开始编号。
+    - `started_at` 取上一步的最后一条记录结束时间或回合开始时间；`ts` 是 usage 事件时间。
+  - `items[]`：本步的记录，按出现顺序：
+    - `kind=reasoning`：带 `chars`。
+    - `kind=text`：带 `chars` 和前 200 个字符的 `preview`。
+    - `kind=tool`：
+      - 带 `name`、`call_id`、参数摘要 `input_preview`（前 200 个字符）；
+      - 有结果时带 `ended_at`、`is_error`、输出摘要 `output_preview`（前 200 个字符）；
+      - 没有结果时 `running`。
+      - 由这次调用启动的子会话列在 `children`（会话 key 数组）。
+    - `kind=system`：带 `subtype`。
+    - 每条都带来源事件的 `event` 和 `ts`。
+  - `children[]`：本会话的直接子会话 `{key, title, model, status, started_at, updated_at, usage?, family?, call_id?, step?}`。
+    - `call_id` 和 `step` 表示该子会话挂在哪次调用、哪一步。
+    - 挂接规则：Claude 子代理按 `subagents/agent-<id>.meta.json` 的 `toolUseId` 精确对应；其他 harness 取开始时间之前最近的一次名称像子代理（含 agent、task、spawn）且尚未挂接的工具调用；仍找不到时按开始时间挂到所在的步骤。
+- 记录按步骤归组的规则：两个 usage 事件之间出现的思考、回复、工具调用归后一个 usage 那一步；工具结果按 `call_id` 回填到对应的调用；回合末尾还没有 usage 的记录放在回合的 `items` 里。
 - `GET /v1/models`：列出会话中出现过的模型，每个模型带 `{model, match, catalog_id, prices, context_limit, output_limit, sessions, steps, cost_usd}`。
 - **CLI**：
   - `uniflo usage [--by <group>] [--since 7d] [--under <dir>] [查询…] [--json]`：表格输出，与 REST 数值一致。
@@ -162,6 +197,32 @@ Uniflo 统计每次模型调用（一步）的 token 用量与费用，并对外
 - GIVEN 守护进程运行中，客户端订阅了 `/v1/stream`
 - WHEN 向一个合成会话文件追加一条 usage 记录
 - THEN 2 秒内客户端收到该会话的 `session` envelope，其中 `usage.steps` 加 1，`cost_usd` 已更新
+
+### Scenario: 父会话的家族合计
+- GIVEN 合成数据：父会话 P 有子代理 C1、C2，C1 自己又有子代理 C11；四个会话都有已定价的 usage，另有一个没有子代理的会话 S
+- WHEN 请求 `GET /v1/sessions`，订阅 `/v1/stream` 后向 C11 的会话文件追加一条 usage 记录
+- THEN P 的 `family.sessions` 为 3，`family.cost_usd` 等于四个会话 `usage.cost_usd` 之和，各类 token 同理
+- AND C1 的 `family.sessions` 为 1；C2、C11、S 没有 `family`
+- AND 追加后 2 秒内客户端收到 C11、C1、P 的 `session` envelope，C1 与 P 的 `family` 已包含新增的金额
+
+### Scenario: 每步费用拆分
+- GIVEN 测试价格目录中的模型 M：input 3、output 15、cache_read 0.3，没有 cache_write 价，另有一档 `above=200000`；合成会话含 M 的普通一步、超档的一步，以及自带 `cost_usd` 的一步
+- WHEN 请求 `GET /v1/sessions/{key}/usage`
+- THEN 前两步带 `cost_parts` 和 `price`，`cost_parts` 四项之和与 `cost_usd` 的差小于 1e-9
+- AND 普通一步的 `price.cache_write` 为 3.75，超档一步的 `price` 是档内价格且带 `tier_above=200000`
+- AND 自报金额的一步没有 `cost_parts` 和 `price`
+
+### Scenario: 会话链路
+- GIVEN 合成 claude 会话：
+  - 第一回合：两步。第一步有思考、一段回复和一次成功的 Bash 调用。第二步启动一个子代理，子代理目录里的 `meta.json` 的 `toolUseId` 指向这次调用，该调用结果为错误。
+  - 第二回合：一步，另有一条 harness 注入的用户消息。
+  - 最后一次工具调用还没有结果。
+- WHEN 请求 `GET /v1/sessions/{key}/trajectory`
+- THEN 返回两个回合，注入的消息没有开启新回合，三步的 `index` 依次为 1、2、3，各步数值与 `/usage` 一致
+- AND 第一步的 `items` 依次为 reasoning、text、tool，Bash 调用带 `ended_at`、`is_error=false`
+- AND 第二步那次调用的 `children` 含子代理 key、`is_error=true`，`children[]` 中该子代理的 `call_id` 与 `step` 指向它
+- AND 没有结果的那次调用 `running=true`
+- AND 未知 key 返回 404
 
 ### Scenario: CLI 与 REST 一致
 - GIVEN 同一份合成数据
