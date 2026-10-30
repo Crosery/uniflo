@@ -281,6 +281,10 @@ impl LineDecoder for PiFamily {
                 let text = string_of(v, "shortSummary").or_else(|| string_of(v, "summary")).unwrap_or_default();
                 cx.emit(lid, t, Body::System { subtype: "compact".into(), text });
             }
+            // omp's context reset: what came before no longer reaches the model, as after a compaction.
+            "reset_boundary" => {
+                cx.emit(lid, t, Body::System { subtype: "reset_boundary".into(), text: String::new() });
+            }
             "custom_message" => {
                 let sub = string_of(v, "customType").unwrap_or_else(|| "custom".into());
                 cx.emit(lid, t, Body::System { subtype: sub, text: text_of(v.get("content").unwrap_or(&Value::Null)) });
@@ -485,6 +489,24 @@ mod tests {
         assert!(matches!(&r.events[3].body, Body::Usage(u)
             if (u.output, u.reasoning) == (7, 5) && u.cost_usd == Some(0.0125) && u.model.as_deref() == Some("glm-5")));
         assert!(r.unknown.is_empty(), "{:?}", r.unknown);
+    }
+
+    #[test]
+    fn reset_boundary_marks_a_context_reset() {
+        let fx = Fixture::new();
+        let a = fam(&fx);
+        let mut s = l(
+            json!({"type":"message","id":"u1","timestamp":"2026-10-30T01:00:00Z","message":{"role":"user","content":[{"type":"text","text":"go"}]}}),
+        );
+        s += &l(
+            json!({"type":"reset_boundary","id":"rb","parentId":"u1","timestamp":"2026-10-30T01:00:05Z","runtime":{"version":"18.13.3"}}),
+        );
+        let p = fx.write("-p/2026-10-30T01-00-00-000Z_rb.jsonl", &s);
+        let r = fx.index(&a, &p);
+        assert!(r.unknown.is_empty(), "{:?}", r.unknown);
+        assert!(
+            matches!(&r.events.last().unwrap().body, Body::System { subtype, text } if subtype == "reset_boundary" && text.is_empty())
+        );
     }
 
     #[test]

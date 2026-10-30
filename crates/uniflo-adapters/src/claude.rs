@@ -73,6 +73,7 @@ const IGNORED: &[&str] = &[
     "api-request",
     "api-request-blob",
     "api-request-shape",
+    "tools-used",
 ];
 
 /// Leading markers of user-role text that the harness injected rather than a human typed.
@@ -524,6 +525,7 @@ mod tests {
         s += &line(
             json!({"type":"api-request-shape","sessionId":"s3","shapeHash":"sh","shape":{"system":[],"tools":[]}}),
         );
+        s += &line(json!({"type":"tools-used","tools":["Bash","Read"],"sessionId":"s3"}));
         let p = fx.write("-w/s3.jsonl", &s);
         let r = fx.index(&a, &p);
         assert!(matches!(&r.events[0].body, Body::System { subtype, .. } if subtype == "api_error"));

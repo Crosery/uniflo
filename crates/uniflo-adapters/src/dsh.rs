@@ -683,6 +683,7 @@ fn decode(v: &Value, pos: usize, idx: usize, ev: &mut EventD, st: &mut State) {
         | "subagent/descriptor"
         | "workspace/changes"
         | "deliverables/presented"
+        | "image/offload"
         | "command/done"
         | "web/deepseek-search-llm-request" => {}
         other => ev.unknown(other),
@@ -1092,6 +1093,17 @@ mod tests {
         let r = fx.index(&a, &p);
         assert!(r.unknown.is_empty(), "{:?}", r.unknown);
         assert_eq!(r.bad_lines, 0);
+        assert!(r.events.is_empty(), "{:?}", kinds(&r.events));
+    }
+
+    #[test]
+    fn image_offload_records_are_ignored() {
+        let fx = Fixture::new();
+        let a = dsh(&fx);
+        let offload = json!({"targets":[{"seq":2,"imageIndexes":[0]},{"seq":5,"imageIndexes":[0,1]}]});
+        let p = session(&fx, "session.jsonl.zstd", &frames(&[header("s1"), rec("image/offload", 6, offload)]));
+        let r = fx.index(&a, &p);
+        assert!(r.unknown.is_empty(), "{:?}", r.unknown);
         assert!(r.events.is_empty(), "{:?}", kinds(&r.events));
     }
 
