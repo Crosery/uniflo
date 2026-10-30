@@ -87,6 +87,42 @@ writeFileSync(
     line({ type: "assistant", uuid: "t2", isSidechain: true, timestamp: iso(tr + 13_000), message: { id: "m-t2", model: "demo-model", content: [{ type: "text", text: "Added demo_page_is_served." }], stop_reason: "end_turn" } }),
 );
 
+// Trajectory: two turns, a failed call, a running call, two sub-agents tied to their Task calls by
+// the meta.json sidecar (toolUseId).
+const TRAJ_DIR = join(home, ".claude/projects/-w-traj");
+mkdirSync(join(TRAJ_DIR, "traj-1/subagents"), { recursive: true });
+const tt = Date.now() - 50 * 60_000;
+const cr = (uuid, ts, id, content, isError = false) => cu(uuid, ts, [{ type: "tool_result", tool_use_id: id, content, ...(isError ? { is_error: true } : {}) }], "/w/traj");
+let traj = cu("tj-u1", tt, "把每步用量改成链路视图，并核对费用拆分", "/w/traj");
+traj += ca("tj-a1", tt + 4_000, [{ type: "thinking", thinking: "先读现有的每步用量表。" }, { type: "text", text: "先看现在的用量表怎么画。" },
+  { type: "tool_use", id: "toolu_tj_bash", name: "Bash", input: { command: "rg -n steps-panel examples/web", description: "Find the steps panel" } }], "tool_use", "claude-sonnet-4-5", cuse([12, 420, 18000, 2400]));
+traj += cr("tj-r1", tt + 5_200, "toolu_tj_bash", "examples/web/index.html:1121: <div class=\"steps\" id=\"steps-panel\" hidden></div>");
+traj += ca("tj-a2", tt + 9_000, [{ type: "tool_use", id: "toolu_tj_task1", name: "Task", input: { description: "审查链路接口", prompt: "Review the trajectory route", subagent_type: "general-purpose" } }], "tool_use", "claude-sonnet-4-5", cuse([8, 260, 20400, 900]));
+traj += cr("tj-r2", tt + 40_000, "toolu_tj_task1", "Agent stopped: interrupted", true);
+traj += ca("tj-a3", tt + 44_000, [{ type: "tool_use", id: "toolu_tj_fail", name: "Bash", input: { command: "cargo test -p gateway trajectory" } },
+  { type: "tool_use", id: "toolu_tj_task2", name: "Task", input: { description: "补链路测试", prompt: "Write the trajectory test" } }], "tool_use", "claude-sonnet-4-5", cuse([6, 310, 21300, 1100]));
+traj += cr("tj-r3", tt + 47_000, "toolu_tj_fail", "error: test failed, to rerun pass `-p gateway --test trajectory`", true);
+traj += cr("tj-r4", tt + 70_000, "toolu_tj_task2", "Added trajectory_links_children.");
+traj += ca("tj-a4", tt + 75_000, [{ type: "text", text: "链路视图已就绪，失败的测试已修。" }], "end_turn", "claude-sonnet-4-5", cuse([5, 180, 22600, 600]));
+traj += cu("tj-u2", tt + 300_000, "再跑一遍全部测试", "/w/traj");
+traj += ca("tj-a5", tt + 304_000, [{ type: "tool_use", id: "toolu_tj_run", name: "Bash", input: { command: "scripts/verify.sh" } }], "tool_use", "claude-sonnet-4-5", cuse([4, 90, 23800, 300]));
+traj += line({ type: "ai-title", aiTitle: "链路视图与费用拆分" });
+writeFileSync(join(TRAJ_DIR, "traj-1.jsonl"), traj);
+const trajSub = (id, toolUseId, ts, title, steps) => {
+  const side = (v) => line({ ...v, isSidechain: true });
+  let s = side({ type: "user", uuid: `${id}-u`, timestamp: iso(ts), cwd: "/w/traj", message: { role: "user", content: title } });
+  steps.forEach((u, i) => {
+    const last = i === steps.length - 1, at = ts + 2_000 + i * 3_000;
+    s += side({ type: "assistant", uuid: `${id}-a${i}`, timestamp: iso(at), message: { id: `m-${id}-a${i}`, model: "claude-haiku-4-5", stop_reason: last ? "end_turn" : "tool_use", usage: cuse(u),
+      content: last ? [{ type: "text", text: "完成。" }] : [{ type: "tool_use", id: `toolu_${id}_${i}`, name: "Read", input: { file_path: "/w/traj/src/lib.rs" } }] } });
+    if (!last) s += side({ type: "user", uuid: `${id}-r${i}`, timestamp: iso(at + 800), cwd: "/w/traj", message: { role: "user", content: [{ type: "tool_result", tool_use_id: `toolu_${id}_${i}`, content: "pub fn trajectory() {}" }] } });
+  });
+  writeFileSync(join(TRAJ_DIR, `traj-1/subagents/agent-${id}.jsonl`), s);
+  writeFileSync(join(TRAJ_DIR, `traj-1/subagents/agent-${id}.meta.json`), JSON.stringify({ agentType: "general-purpose", toolUseId }));
+};
+trajSub("trajsub1", "toolu_tj_task1", tt + 10_000, "审查链路接口", [[3, 200, 9000, 800], [2, 150, 9800, 300]]);
+trajSub("trajsub2", "toolu_tj_task2", tt + 45_000, "补链路测试", [[4, 260, 8800, 700], [3, 120, 9500, 200], [2, 90, 9700, 100]]);
+
 // A Codex session that is still working (turn started, not completed).
 const codexDir = join(home, ".codex/sessions/2026/10/02");
 mkdirSync(codexDir, { recursive: true });
@@ -451,7 +487,9 @@ async function runUpgrade() {
   const url1 = await waitFor(`window.__upgradeMark === undefined && document.readyState === "complete" && daemonVersion !== null ? location.search : null`, 8_000, "reload").catch(() => null);
   const why = url1 ? url1 : JSON.stringify(await cdp.eval(`({ mark: window.__upgradeMark, v: daemonVersion, ss: sessionStorage.getItem("uniflo.reloadedFor"), href: location.href, api: API, origin: location.origin })`).catch((e) => String(e)));
   report("[upgrade] a daemon of another version reloads the page with its URL intact", !!url1 && url1.includes("view=usage") && url1.includes("token="), why);
-  await cdp.eval(`window.__upgradeMark = 2; noteVersion("0.0.0-e2e")`);
+  // Restore the real version at once: otherwise the 5 s /v1/health poll may see it "change" back
+  // during the wait and rightly reload.
+  await cdp.eval(`window.__upgradeMark = 2; { const real = daemonVersion; noteVersion("0.0.0-e2e"); daemonVersion = real; } true`);
   await sleep(800);
   report("[upgrade] the same version never reloads the page twice", (await cdp.eval("window.__upgradeMark")) === 2);
 }
@@ -567,8 +605,20 @@ async function runTree() {
     JSON.stringify(relevantRoots(rootsAfterRework)) === '["claude:busy","claude:cleanme","claude:sess-1"]',
     JSON.stringify(rootsAfterRework));
 
+  // The sidebar has no heading or counts; the quick filters live in the 筛选 menu and write the query.
+  const side = await cdp.eval(`({ head: !!document.querySelector('.side-h, #q-info, #quick'), groups: document.querySelectorAll('#list .group-h').length, counts: document.querySelectorAll('#list .group-h .n').length,
+    meta: [...document.querySelectorAll('#list .row-meta')].some((m) => m.querySelector('.mono, .pid')), oneLine: document.querySelector('#filter-btn').getBoundingClientRect().top === document.querySelector('#harnesses').getBoundingClientRect().top })`);
+  report("[sidebar] no 会话 heading, counts, model or pid; harness and 筛选 share one line",
+    !side.head && side.groups > 0 && !side.counts && !side.meta && side.oneLine, JSON.stringify(side));
+  await click("#filter-btn");
+  await waitFor(`!document.querySelector('#menu').hidden`, 3_000, "filter menu");
+  const fm = await cdp.eval(`[...document.querySelectorAll('#menu [role=menuitemcheckbox]')].map((b) => b.dataset.tok)`);
+  await click('#menu [data-tok="s:work"]');
   // Pure structured s:work filter maintains stable working queue order without churn
-  await cdp.eval(`$('#q').value = 's:work'; $('#q').dispatchEvent(new Event('input'))`);
+  const fon = await waitFor(`$('#q').value === 's:work' && document.querySelector('#menu [data-tok="s:work"]').getAttribute('aria-checked') === 'true' && document.querySelector('#filter-btn .n').textContent`, 3_000, "filter on").catch(() => "");
+  report("[sidebar] the 筛选 menu offers the five quick filters; ticking 工作中 writes s:work and counts 1 active filter",
+    JSON.stringify(fm) === '["s:work","is:live","is:root","since:1d","is:archived"]' && fon === "1", JSON.stringify({ fm, fon }));
+  await cdp.eval(`document.body.click(); true`);
   await waitFor(`document.querySelector('.row[data-key="claude:agent-sub2"]') && !document.querySelector('.row[data-key="claude:sess-1"]')`, 8_000, "s:work filter results");
   const filteredBefore = await cdp.eval(`[...document.querySelectorAll('#list .row[data-key]')].map((r) => r.dataset.key)`);
   report("[tree] pure structured s:work filter maintains stable working queue order without churn",
@@ -629,37 +679,54 @@ async function runTree() {
 }
 
 async function runDetail() {
-  const key = "claude:proj-0";
+  const key = "claude:traj-1";
   await cdp.send("Browser.grantPermissions", { permissions: ["clipboardReadWrite", "clipboardSanitizedWrite"], origin: api }).catch(() => {});
   await load(`${api}/demo?token=${TOKEN}&select=${enc(key)}`);
-  await waitFor(`!!document.querySelector('#steps-toggle') && !!document.querySelector('#ctx-bar')`, 8_000, "detail head");
-  await click("#steps-toggle");
-  const detail = await apiJson(api, `/v1/sessions/${enc(key)}/usage`);
-  await waitFor(`document.querySelectorAll('#steps-table tbody tr').length === ${detail.steps.length}`, 5_000, "steps table");
-  const dom = await cdp.eval(`[...document.querySelectorAll('#steps-table tbody tr')].map((tr) => [tr.dataset.event, Object.fromEntries([...tr.querySelectorAll('td[data-k]')].map((td) => [td.dataset.k, td.dataset.v]))])`);
-  const bad = [];
-  dom.forEach(([ev, v], i) => {
-    const s = detail.steps[i];
-    if (ev !== s.event) bad.push(`#${i}.event`);
-    for (const k of ["input", "output", "cache_read", "cache_write", "reasoning"]) if (Number(v[k]) !== s[k]) bad.push(`#${i}.${k}`);
-    for (const k of ["cost_usd", "context_pct"]) if (Math.abs(Number(v[k]) - s[k]) > 1e-9) bad.push(`#${i}.${k}`);
-  });
-  report("[detail] per-step table equals /v1/sessions/{key}/usage", detail.steps.length >= 2 && bad.length === 0, bad.join(" ") || `${detail.steps.length} steps`);
-  const pct = Number(await cdp.eval(`document.querySelector('#ctx-bar').dataset.pct`));
-  const lastPct = detail.steps.at(-1).context_pct;
-  report("[detail] context bar shows the last step's share", Math.abs(pct - lastPct) < 1e-9, `${pct.toFixed(2)}%`);
-  const head = await cdp.eval(`document.querySelector('#sh-usage').textContent`);
-  report('[detail] session totals show five token kinds and "API 等价成本"', ["输入", "输出", "缓存读", "缓存写", "思考", "API 等价成本"].every((t) => head.includes(t)));
+  await waitFor(`document.querySelectorAll('#vtabs .vtab').length === 5 && !!document.querySelector('#sh-cost')`, 8_000, "detail head");
+  const tabs = await cdp.eval(`({ shown: [...document.querySelectorAll('#vtabs .vtab:not([hidden])')].map((b) => b.dataset.tab + ':' + b.textContent.trim()),
+    old: !!document.querySelector('#steps-toggle, #insp, #insp-toggle, #steps-panel') || [...document.querySelectorAll('button')].some((b) => b.textContent.includes('每步用量')) })`);
+  report("[detail] five view tabs under the header; no 每步用量 button or side inspector",
+    JSON.stringify(tabs.shown.map((t) => t.split(":")[0])) === '["chat","traj","usage","subs","info"]' && !tabs.old, tabs.shown.join(" | "));
+  const s = await apiJson(api, `/v1/sessions/${enc(key)}`);
+  const kids = await apiJson(api, `/v1/sessions?q=${enc(`parent:${key}`)}`);
+  const head = await cdp.eval(`({ v: Number(document.querySelector('#sh-cost').dataset.v), t: document.querySelector('#sh-cost').textContent.trim(), tip: document.querySelector('#sh-cost').title })`);
+  report("[detail] header shows the family total as one amount; the split is in its tooltip",
+    s.family?.sessions === 2 && Math.abs(head.v - s.family.cost_usd) < 1e-9 && /^\$[\d.]+$/.test(head.t) && /本会话 .* \+ 2 个子代理/.test(head.tip), `${head.t} · ${head.tip}`);
+  report("[detail] only 子代理 carries a number in its tab label",
+    JSON.stringify(tabs.shown) === '["chat:对话","traj:链路","usage:用量","subs:子代理2","info:信息"]', tabs.shown.join(" | "));
+  await click("#vt-usage");
+  await waitFor(`!!document.querySelector('#u-total .big') && !!document.querySelector('.sbars .col')`, 8_000, "usage tab");
+  const usage = await apiJson(api, `/v1/sessions/${enc(key)}/usage`);
+  const ut = await cdp.eval(`({ all: Number(document.querySelector('#u-total .big').dataset.v), self: Number(document.querySelector('#u-self').dataset.v), ctx: Number(document.querySelector('#u-ctx').dataset.v), url: location.search })`);
+  report("[detail] 用量 tab: total = family.cost_usd, own part = usage.cost_usd, context = last /usage step",
+    Math.abs(ut.all - s.family.cost_usd) < 1e-9 && Math.abs(ut.self - s.usage.cost_usd) < 1e-9 && Math.abs(ut.ctx - usage.steps.at(-1).context_pct) < 1e-9 && ut.url.includes("tab=usage"), JSON.stringify(ut));
+  await click("#vt-subs");
+  await waitFor(`document.querySelectorAll('#subs-list .srow').length === 2`, 8_000, "subs tab");
+  const subs = await cdp.eval(`[...document.querySelectorAll('#subs-list .srow')].map((r) => [r.dataset.key, Number(r.querySelector('.n.c').dataset.v)])`);
+  const subBad = subs.filter(([k, v]) => Math.abs(v - (kids.find((x) => x.key === k)?.usage?.cost_usd ?? NaN)) > 1e-9);
+  report("[detail] 子代理 tab lists both sub-agents with their usage.cost_usd", subs.length === 2 && kids.length === 2 && !subBad.length, JSON.stringify(subs));
+  await cdp.send("Page.reload");
+  await waitFor(`document.readyState === 'complete' && document.querySelector('#vt-subs')?.getAttribute('aria-selected') === 'true' && !document.querySelector('#p-subs').hidden && document.querySelectorAll('#subs-list .srow').length === 2`, 8_000, "reload keeps tab").catch(() => {});
+  const kept = await cdp.eval(`({ tab: document.querySelector('#vtabs [aria-selected=true]')?.dataset.tab, url: location.search, chat: document.querySelector('#timeline').hidden })`);
+  report("[detail] a reload keeps the tab (URL tab=)", kept.tab === "subs" && kept.url.includes("tab=subs") && kept.chat, JSON.stringify(kept));
+  await click("#vt-info");
+  await waitFor(`!!document.querySelector('#info-resume [data-act="copy-resume-quick"]') && document.querySelector('#info-kv').textContent.includes('源文件')`, 8_000, "info tab");
+  await cdp.send("Emulation.setFocusEmulationEnabled", { enabled: true }).catch(() => {});
+  await click('#info-resume [data-act="copy-resume-quick"]');
+  await sleep(300);
+  const resume = await apiJson(api, `/v1/sessions/${enc(key)}/resume`);
+  const clip0 = await cdp.eval(`navigator.clipboard.readText()`).catch((e) => "ERR " + e.message);
+  const mac = process.platform === "darwin";
+  const termBtn = await cdp.eval(`document.querySelector('#info-resume [data-act="open-term"]')?.textContent || ''`);
+  report("[detail] 信息 tab: session info, \"复制恢复命令\" copies the resume command, terminal button on macOS",
+    clip0 === resume.command && !!resume.command && (mac ? termBtn.includes("终端") : !termBtn), `${clip0} · ${termBtn.trim()}`);
   await click("#resume-btn");
   await waitFor(`!document.querySelector('#menu').hidden`, 3_000, "resume menu");
   const items = await cdp.eval(`[...document.querySelectorAll('#menu button')].map((b) => b.textContent.trim())`);
-  const mac = process.platform === "darwin";
   report("[detail] resume menu offers \"在终端打开\" on macOS", mac ? items.includes("在 Terminal 中打开") : !items.some((t) => t.includes("终端")), items.join(" / "));
-  await cdp.send("Emulation.setFocusEmulationEnabled", { enabled: true }).catch(() => {});
   await click('#menu [data-act="copy-resume"]');
   await sleep(300);
   const clip = await cdp.eval(`navigator.clipboard.readText()`).catch((e) => "ERR " + e.message);
-  const resume = await apiJson(api, `/v1/sessions/${enc(key)}/resume`);
   report("[detail] copy resume command puts the resume command on the clipboard", clip === resume.command && !!resume.command, clip);
   // Never open a real terminal window: intercept the write request inside the page.
   await cdp.eval(`window.__term = []; const f0 = window.fetch; window.fetch = (u, o) => { if (String(u).includes('/open-terminal')) {
@@ -692,6 +759,110 @@ async function runDetail() {
   }
   await shot("detail.png");
   report("[detail] no page errors", cdp.errors.length === 0, cdp.errors.slice(0, 3).join(" | "));
+}
+
+// 链路 tab: turn → step → record rows agree with /trajectory and /usage, sub-agents expand in place,
+// the record pane explains the cost, j/k/Esc walk and close it; the parent's family total follows
+// a sub-agent's new usage live.
+async function runTraj() {
+  const key = "claude:traj-1", ek = enc(key);
+  await viewport(1480, 920);
+  await load(`${api}/demo?token=${TOKEN}&select=${ek}&tab=traj`);
+  await waitFor(`document.querySelectorAll('#tt tbody tr[data-sel]').length > 2`, 8_000, "trajectory table");
+  const traj = await apiJson(api, `/v1/sessions/${ek}/trajectory`);
+  const usage = await apiJson(api, `/v1/sessions/${ek}/usage`);
+  const steps = traj.turns.flatMap((t) => t.steps);
+  await click(`#tt tr[data-sel="t:1"] [data-tw]`);
+  await waitFor(`document.querySelectorAll('#tt tr.r-step:not(.r-sub)').length === ${steps.length}`, 5_000, "all steps").catch(() => {});
+  const cols = await cdp.eval(`[...document.querySelectorAll('#tt thead th')].map((th) => th.dataset.col || 'rec')`);
+  const rows = await cdp.eval(`[...document.querySelectorAll('#tt tr.r-step:not(.r-sub)')].map((tr) => ({ id: tr.dataset.sel, tok: Number(tr.children[${cols.indexOf("tok")}]?.dataset.v), cost: Number(tr.querySelector('td.cost')?.dataset.v) }))`);
+  const bad = [];
+  rows.forEach((r, i) => {
+    const s = steps[i], u = usage.steps[i];
+    if (!s || r.id !== `s:${key}#${s.index}` || s.index !== i + 1) bad.push(`#${i}.id`);
+    if (Math.abs(r.cost - s.cost_usd) > 1e-9 || Math.abs(s.cost_usd - u.cost_usd) > 1e-9) bad.push(`#${i}.cost`);
+    if (r.tok !== s.input + s.cache_read + s.cache_write + s.output) bad.push(`#${i}.tok`);
+    for (const k of ["input", "cache_read", "cache_write", "output"]) if (s[k] !== u[k]) bad.push(`#${i}.${k}≠usage`);
+  });
+  report("[traj] columns are 时长 / Token / 费用", JSON.stringify(cols) === '["rec","dur","tok","cost"]', cols.join(","));
+  report("[traj] step rows equal /trajectory and /usage (index, token total, cost)", rows.length === steps.length && steps.length === usage.steps.length && !bad.length, bad.join(" ") || `${rows.length} steps`);
+  const t1 = traj.turns[0], k1 = traj.children.filter((c) => t1.steps.some((s) => s.index === c.step));
+  const want1 = t1.steps.reduce((a, s) => a + s.cost_usd, 0) + k1.reduce((a, c) => a + (c.family?.cost_usd ?? c.usage?.cost_usd ?? 0), 0);
+  const turn1 = await cdp.eval(`Number(document.querySelector('#tt tr[data-sel="t:1"] td.cost').dataset.v)`);
+  report("[traj] turn row cost includes the sub-agents it started", k1.length === 2 && Math.abs(turn1 - want1) < 1e-9, `${turn1} vs ${want1}`);
+  const tools = await cdp.eval(`({ failed: [...document.querySelectorAll('#tt tr.r-item')].filter((tr) => tr.querySelector('.bad')).map((tr) => tr.querySelector('.nm').textContent),
+    running: document.querySelectorAll('#tt tr.r-item .spin').length, timed: [...document.querySelectorAll('#tt tr.r-item')].filter((tr) => tr.querySelector('.ok') && /\\d(ms|s)/.test(tr.textContent)).length,
+    agents: [...document.querySelectorAll('#tt tr.r-agent')].map((tr) => tr.dataset.sel) })`);
+  report("[traj] tool rows show duration, the failed call is marked, the running call spins",
+    tools.failed.includes("Bash") && tools.running === 1 && tools.timed >= 1, JSON.stringify(tools));
+  const sub1 = "claude:agent-trajsub1";
+  const sub1s = await apiJson(api, `/v1/sessions/${enc(sub1)}`);
+  await click(`#tt tr[data-sel="a:${sub1}"] [data-tw]`);
+  await waitFor(`document.querySelectorAll('#tt tr.r-sub.r-step').length >= 2`, 5_000, "sub-agent steps").catch(() => {});
+  const sub = await cdp.eval(`({ steps: document.querySelectorAll('#tt tr.r-sub.r-step').length, tools: document.querySelectorAll('#tt tr.r-sub.r-item').length, cost: Number(document.querySelector('#tt tr[data-sel="a:${sub1}"] td.cost').dataset.v),
+    agentFailed: !!document.querySelector('#tt tr[data-sel="a:${sub1}"] .bad') })`);
+  report("[traj] a sub-agent expands in place with its own steps and tools; its cost = its usage.cost_usd",
+    sub.steps === sub1s.usage.steps && sub.tools >= 1 && Math.abs(sub.cost - sub1s.usage.cost_usd) < 1e-9 && tools.agents.length === 2 && sub.agentFailed, JSON.stringify(sub));
+  const lanes = await cdp.eval(`['m', 't', 'a'].map((l) => document.querySelectorAll('.ov-lane.' + l + ' .b').length)`);
+  report("[traj] the time overview has model, tool and sub-agent bars", lanes.every((n) => n > 0), lanes.join("/"));
+  await cdp.eval(`document.querySelector('#tt tr[data-sel="s:${key}#1"] td:nth-child(2)').click(); true`);
+  await waitFor(`!!document.querySelector('#ti h3') && !!document.querySelector('#ti-formula')`, 5_000, "record pane");
+  const s1 = steps[0];
+  const pane = await cdp.eval(`({ parts: [...document.querySelectorAll('#ti-formula [data-part]')].map((n) => [n.dataset.part, Number(n.dataset.v)]),
+    req: Object.fromEntries([...document.querySelectorAll('#ti [data-k]')].map((n) => [n.dataset.k, Number(n.dataset.v)])),
+    tabs: document.querySelectorAll('#ti [role=tab]').length, extra: !!document.querySelector('#ti [data-cum]') || /会话累计|吞吐|TTFT/.test(document.querySelector('#ti').textContent),
+    cols: [...document.querySelectorAll('#tt th[data-col]')].map((th) => th.dataset.col) })`);
+  const sum = pane.parts.reduce((a, [, v]) => a + v, 0);
+  const partsOk = pane.parts.length === 4 && pane.parts.every(([k, v]) => Math.abs(v - s1.cost_parts[k]) < 1e-12);
+  const reqOk = ["input", "cache_read", "cache_write", "output"].every((k) => pane.req[k] === s1[k]) && Math.abs(pane.req.cost_usd - s1.cost_usd) < 1e-12;
+  report("[traj] record pane: token × unit price per category sums to the step cost and equals the API",
+    partsOk && Math.abs(sum - s1.cost_usd) < 1e-4 && reqOk, `Σ ${sum} vs ${s1.cost_usd} · ${JSON.stringify(pane.req)}`);
+  report("[traj] the record pane is one scroll (no inner tabs, no 会话累计 / 吞吐) and the table keeps its three columns",
+    pane.tabs === 0 && !pane.extra && pane.cols.length === 3, JSON.stringify({ tabs: pane.tabs, extra: pane.extra, cols: pane.cols }));
+  await shot("traj-detail.png");
+  const order = await cdp.eval(`[...document.querySelectorAll('#tt tbody tr[data-sel]')].map((tr) => tr.dataset.sel)`);
+  const press = (k) => cdp.eval(`document.body.dispatchEvent(new KeyboardEvent('keydown', { key: '${k}', bubbles: true })); document.querySelector('#tt tr.sel')?.dataset.sel || ''`);
+  const i1 = order.indexOf(`s:${key}#1`);
+  const afterJ = await press("j"), afterK = await press("k");
+  await press("Escape");
+  await sleep(100);
+  const closed = await cdp.eval(`({ pane: !!document.querySelector('#ti h3') && getComputedStyle(document.querySelector('#ti')).display !== 'none', cols: document.querySelectorAll('#tt th[data-col]').length })`);
+  report("[traj] j/k move the selection to the adjacent rows; Esc closes the pane",
+    afterJ === order[i1 + 1] && afterK === order[i1] && !closed.pane && closed.cols === 3, `${afterJ} · ${afterK} · ${JSON.stringify(closed)}`);
+  await cdp.eval(`(() => { const q = document.querySelector('#t-q'); q.value = 'verify.sh'; q.dispatchEvent(new Event('input', { bubbles: true })); return true; })()`);
+  await sleep(400);
+  const found = await cdp.eval(`[...document.querySelectorAll('#tt tbody tr[data-sel]')].map((tr) => tr.dataset.sel)`);
+  await cdp.eval(`(() => { const q = document.querySelector('#t-q'); q.value = ''; q.dispatchEvent(new Event('input', { bubbles: true })); return true; })()`);
+  report("[traj] 搜索链路 keeps only matching records and their turn and step", found.length === 3 && found[0] === "t:2" && found[1] === `s:${key}#5` && found[2].startsWith(`i:${key}#5:`), found.join(" "));
+  await sleep(300);
+  await click('[data-tact="equal"]');
+  const eq = await cdp.eval(`!!document.querySelector('.ov-axis.eq') && document.querySelector('[data-tact="equal"]').getAttribute('aria-pressed') === 'true'`);
+  await click('[data-tact="real"]');
+  report("[traj] 实际时长 / 等宽 switches the overview scale", eq);
+  await click("#vt-usage");
+  await waitFor(`!!document.querySelector('.sbars .col')`, 5_000, "usage bars");
+  await click(`.sbars .col[data-goto="s:${key}#2"]`);
+  const jumped = await waitFor(`!document.querySelector('#p-traj').hidden && document.querySelector('#tt tr.sel')?.dataset.sel`, 3_000, "bar jump").catch(() => "");
+  report("[traj] clicking a 每步费用 bar opens that step in 链路", jumped === `s:${key}#2`, jumped);
+  await shot("traj.png");
+  // Family total follows a sub-agent's new usage, without a reload.
+  const sub1File = join(home, ".claude/projects/-w-traj/traj-1/subagents/agent-trajsub1.jsonl");
+  const before = (await apiJson(api, `/v1/sessions/${ek}`)).family.cost_usd;
+  const rowV = `Number(document.querySelector('.row[data-key="${key}"] .row-cost')?.dataset.v)`;
+  const row0 = await cdp.eval(rowV);
+  const t0 = Date.now();
+  appendFileSync(sub1File, line({ type: "assistant", uuid: "trajsub1-live", isSidechain: true, timestamp: iso(t0), message: { id: "m-trajsub1-live", model: "claude-haiku-4-5", stop_reason: "end_turn", usage: cuse([5, 400, 10000, 2000]), content: [{ type: "text", text: "再补一句。" }] } }));
+  const seen = await waitFor(`${rowV} !== ${row0} && Number(document.querySelector('#sh-cost')?.dataset.v) !== ${before} && Date.now()`, 6_000, "family live").catch(() => 0);
+  const after = (await apiJson(api, `/v1/sessions/${ek}`)).family.cost_usd;
+  await click(`.node.fam:has(> .row[data-key="${key}"]) > .kids > .kh .kid-tog`);
+  await waitFor(`!!document.querySelector('.row[data-key="${sub1}"] .row-cost')`, 3_000, "kid row").catch(() => {});
+  const dom = await cdp.eval(`({ row: ${rowV}, head: Number(document.querySelector('#sh-cost').dataset.v), tip: document.querySelector('.row[data-key="${key}"] .row-cost').title, kid: Number(document.querySelector('.row[data-key="${sub1}"] .row-cost')?.dataset.v ?? -1) })`);
+  const kidNow = (await apiJson(api, `/v1/sessions/${enc(sub1)}`)).usage.cost_usd;
+  report("[traj] a sub-agent's new usage moves the parent's family total in the list and header within 3 s",
+    !!seen && seen - t0 < 3_000 && after > before && Math.abs(dom.row - after) < 1e-9 && Math.abs(dom.head - after) < 1e-9 && /本会话 .* \+ 2 个子代理/.test(dom.tip),
+    `${seen ? seen - t0 : "-"} ms · ${before} → ${after} · ${JSON.stringify(dom)}`);
+  report("[traj] an unfolded sub-agent row keeps its own cost", Math.abs(dom.kid - kidNow) < 1e-9, `${dom.kid} vs ${kidNow}`);
+  report("[traj] no page errors", cdp.errors.length === 0, cdp.errors.slice(0, 3).join(" | "));
 }
 
 async function runFts() {
@@ -1199,7 +1370,7 @@ async function runApi() {
   report("[api] no page errors", cdp.errors.length === 0, cdp.errors.slice(0, 3).join(" | "));
 }
 
-// Console chrome added with the redesign: inspector glide, command palette, diagnostics drawer, theme
+// Console chrome added with the redesign: session tab keys, command palette, diagnostics drawer, theme
 // switch, insights scope filters and detail card, whole-row selection in manage.
 async function runDesign() {
   const key = "claude:proj-0", dir = join(SHOTS, "visual");
@@ -1207,19 +1378,15 @@ async function runDesign() {
   await viewport(1480, 920);
   await scheme("dark");
   await load(`${api}/demo?token=${TOKEN}&select=${enc(key)}`);
-  await waitFor(`document.querySelectorAll('#timeline [data-id]').length > 3 && !!document.querySelector('#insp-toggle')`, 8_000, "detail");
-  const docked = await cdp.eval(`getComputedStyle(document.querySelector('#insp')).display !== 'none' && !document.querySelector('#app').classList.contains('no-insp')`);
-  await click("#insp-toggle");
-  await sleep(120);
-  const mid = await cdp.eval(`({ moving: document.querySelector('#app').classList.contains('insp-moving'), anims: document.getAnimations().filter((a) => a.playState === 'running' && a.effect?.getKeyframes().some((k) => k.transform)).length })`);
-  await sleep(500);
-  const closed = await cdp.eval(`({ hidden: getComputedStyle(document.querySelector('#insp')).display === 'none', settled: !document.querySelector('#app').classList.contains('insp-moving'), pressed: document.querySelector('#insp-toggle').getAttribute('aria-expanded') })`);
-  await click("#insp-toggle");
-  await sleep(650);
-  const reopened = await cdp.eval(`({ shown: getComputedStyle(document.querySelector('#insp')).display !== 'none', w: Math.round(document.querySelector('#insp').getBoundingClientRect().width), thread: document.querySelector('#thread').style.width })`);
-  report("[design] inspector glides closed and open with transform animations, then settles",
-    docked && mid.moving && mid.anims >= 2 && closed.hidden && closed.settled && closed.pressed === "false" && reopened.shown && reopened.w === 312 && reopened.thread === "",
-    JSON.stringify({ docked, mid, closed, reopened }));
+  await waitFor(`document.querySelectorAll('#timeline [data-id]').length > 3 && !!document.querySelector('#vtabs')`, 8_000, "detail");
+  // ] / [ cycle the session tabs, arrows move inside the tab bar; 子代理 is skipped without sub-agents.
+  const key1 = (k) => cdp.eval(`document.body.dispatchEvent(new KeyboardEvent('keydown', { key: '${k}', bubbles: true })); document.querySelector('#vtabs [aria-selected=true]')?.dataset.tab`);
+  const cyc = [await key1("]"), await key1("]"), await key1("]"), await key1("[")];
+  await cdp.eval(`document.querySelector('#vt-usage').focus(); document.querySelector('#vt-usage').dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true })); true`);
+  const arrow = await cdp.eval(`({ tab: document.querySelector('#vtabs [aria-selected=true]')?.dataset.tab, focus: document.activeElement?.id, subs: document.querySelector('#vt-subs').hidden })`);
+  await click("#vt-chat");
+  report("[design] ] / [ cycle the session tabs; arrows move within the tab bar",
+    JSON.stringify(cyc) === '["traj","usage","info","usage"]' && arrow.tab === "info" && arrow.focus === "vt-info" && arrow.subs, JSON.stringify({ cyc, arrow }));
   // ⌘K opens the palette; typing filters; Enter runs the first match.
   await cdp.eval(`(document.activeElement || document.body).dispatchEvent(new KeyboardEvent('keydown', { key: 'k', metaKey: true, bubbles: true })); true`);
   const pal = await waitFor(`!document.querySelector('#palette').hidden && document.activeElement?.id === 'pal-q' && document.querySelectorAll('#pal-list .pal-item').length`, 3_000, "palette").catch(() => 0);
@@ -1292,33 +1459,37 @@ async function runDesign() {
   await click("#m-clear2");
   const cleared = await cdp.eval(`document.querySelector('#m-selbar').hidden && !document.querySelector('#m-table .cb:checked')`);
   report("[design] manage rows toggle on click and the bulk bar appears only with a selection", before && after.picked && after.bar && cleared, after.info);
-  // Mid width: the inspector is a sheet under the header, closed by default, dismissed by the scrim.
+  // Mid width: the record pane floats over the right of the table; the table drops columns instead of overflowing.
   await viewport(1000, 800);
-  await load(`${api}/demo?token=${TOKEN}&select=${enc(key)}`);
-  await waitFor(`document.querySelectorAll('#timeline [data-id]').length > 3`, 8_000, "mid detail");
-  const start = await cdp.eval(`getComputedStyle(document.querySelector('#insp')).display`);
-  await click("#insp-toggle");
-  await sleep(450);
-  const sheet = await cdp.eval(`({ pos: getComputedStyle(document.querySelector('#insp')).position, top: Math.round(document.querySelector('#insp').getBoundingClientRect().top), head: Math.round(document.querySelector('#detail-head').getBoundingClientRect().bottom), scrim: getComputedStyle(document.querySelector('#insp-scrim')).display })`);
-  await shot(join("visual", "design-sheet-1000-dark.png"));
+  await load(`${api}/demo?token=${TOKEN}&select=${enc("claude:traj-1")}&tab=traj`);
+  await waitFor(`document.querySelectorAll('#tt tbody tr[data-sel]').length > 2`, 8_000, "mid trajectory");
+  await cdp.eval(`document.querySelector('#tt tr.r-step td:nth-child(2)').click(); true`);
+  await waitFor(`!!document.querySelector('#ti h3')`, 3_000, "mid record pane");
+  await sleep(200);
+  const mid = await cdp.eval(`({ pane: Math.round(document.querySelector('#ti').getBoundingClientRect().width), pos: getComputedStyle(document.querySelector('#ti')).position, rec: Math.round(document.querySelector('#tt thead th').getBoundingClientRect().width),
+    cols: [...document.querySelectorAll('#tt th[data-col]')].map((th) => th.dataset.col) })`);
+  await shot(join("visual", "design-traj-1000-dark.png"));
   const audit = await cdp.eval(`__e2e.audit('#app')`);
-  await click("#insp-scrim");
-  await sleep(400);
-  const back = await cdp.eval(`getComputedStyle(document.querySelector('#insp')).display`);
-  report("[design] at 1000 px the inspector is a sheet below the header, closed by default, dismissed by the scrim",
-    start === "none" && sheet.pos === "fixed" && sheet.top === sheet.head + 8 && sheet.scrim === "block" && back === "none" && !audit.overflow.length && !audit.overlap.length && !audit.contrast.length,
-    JSON.stringify({ start, sheet, back, issues: [...audit.overflow, ...audit.overlap, ...audit.contrast].slice(0, 3) }));
+  report("[design] at 1000 px the record pane floats over a readable table without overflow or overlap",
+    mid.pane === 320 && mid.pos === "absolute" && mid.rec >= 240 && mid.cols.includes("cost") && !audit.overflow.length && !audit.overlap.length && !audit.contrast.length,
+    JSON.stringify({ mid, issues: [...audit.overflow, ...audit.overlap, ...audit.contrast].slice(0, 3) }));
   await viewport(1480, 920);
   await scheme(null);
   report("[design] no page errors", cdp.errors.length === 0, cdp.errors.slice(0, 3).join(" | "));
 }
 
 // Every view, wide and narrow, dark and light: screenshots plus overflow / overlap / contrast audits.
+const TAB_READY = {
+  traj: `document.querySelectorAll('#tt tbody tr[data-sel]').length > 2 && document.querySelectorAll('.ov-lane .b').length > 2`,
+  usage: `!!document.querySelector('#u-total .big') && !!document.querySelector('.sbars .col')`,
+  subs: `document.querySelectorAll('#subs-list .srow').length === 2`,
+  info: `!!document.querySelector('#info-resume .cmd, #info-resume .muted')`,
+};
 async function runVisual() {
   const dir = join(SHOTS, "visual");
   mkdirSync(dir, { recursive: true });
   const ready = {
-    sessions: `document.querySelectorAll('#timeline [data-id]').length > 3 && !!document.querySelector('#sh-usage .us-cost')`,
+    sessions: `document.querySelectorAll('#timeline [data-id]').length > 3 && !!document.querySelector('#sh-cost')`,
     usage: `!!document.querySelector('#u-chart svg') && document.querySelectorAll('#u-table tbody tr').length > 1`,
     search: `document.querySelectorAll('.hit').length > 2`,
     manage: `document.querySelectorAll('#m-table tbody tr[data-eligible="true"], #m-table tbody tr[data-eligible="false"]').length > 3`,
@@ -1341,11 +1512,25 @@ async function runVisual() {
         const audit = await cdp.eval(`__e2e.audit('${v === "sessions" ? "#app" : "#v-" + v}')`);
         for (const k of Object.keys(issues)) for (const x of audit[k]) issues[k].push(`${v}@${w}/${theme}: ${x}`);
       }
+      for (const t of ["traj", "traj+sel", "usage", "subs", "info"]) {
+        const tab = t.split("+")[0];
+        await load(`${api}/demo?token=${TOKEN}&select=${enc("claude:traj-1")}&tab=${tab}`);
+        await waitFor(TAB_READY[tab], 10_000, `${t} ready`).catch(() => {});
+        if (t === "traj+sel") {
+          await cdp.eval(`document.querySelector('#tt tr.r-step td:nth-child(2)')?.click(); true`);
+          await waitFor(`!!document.querySelector('#ti h3')`, 3_000, "record pane").catch(() => {});
+        }
+        await sleep(400);
+        await shot(join("visual", `tab-${t.replace("+", "-")}-${w}-${theme}.png`));
+        n++;
+        const audit = await cdp.eval(`__e2e.audit('#app')`);
+        for (const k of Object.keys(issues)) for (const x of audit[k]) issues[k].push(`tab:${t}@${w}/${theme}: ${x}`);
+      }
     }
   }
   await viewport(1480, 920);
   await scheme(null);
-  report("[visual] screenshots: 6 views × 1480/390 px × dark/light", n === 24, dir);
+  report("[visual] screenshots: 6 views and 5 session tabs (链路 with and without the record pane) × 1480/390 px × dark/light", n === 44, dir);
   report("[visual] no horizontal overflow", issues.overflow.length === 0, issues.overflow.slice(0, 5).join(" | "));
   report("[visual] no overlapping elements in bars, toolbars and tiles", issues.overlap.length === 0, issues.overlap.slice(0, 5).join(" | "));
   report("[visual] text contrast meets WCAG AA", issues.contrast.length === 0, issues.contrast.slice(0, 6).join(" | "));
@@ -1382,7 +1567,7 @@ const AUDIT = `window.__e2e = (() => {
       const need = fs >= 24 || (fs >= 18.66 && bold) ? 3 : 4.5;
       if (c < need - 0.005) out.contrast.push(desc(el) + ' ' + c.toFixed(2) + ' "' + el.textContent.trim().slice(0, 16) + '"');
     }
-    for (const box of document.querySelectorAll('.top, ' + ['.toolbar', '.page-h', '.kpi-grid', '.ch-title', '.ch-meta', '.ch-actions', '.bulkbar', '.row-main', '.row-meta', '.row-side', '.legend', '.big-search', '.hint-row', '.stat-strip', '.card-h', '.h-actions'].map((s) => rootSel + ' ' + s).join(', '))) {
+    for (const box of document.querySelectorAll('.top, ' + ['.toolbar', '.page-h', '.kpi-grid', '.ch-title', '.ch-meta', '.ch-actions', '.vtabs', '.ttools', '.ti-h', '.rec', '.srow', '.bulkbar', '.row-main', '.row-meta', '.row-side', '.legend', '.big-search', '.hint-row', '.stat-strip', '.card-h', '.h-actions'].map((s) => rootSel + ' ' + s).join(', '))) {
       const kids = [...box.children].map((k) => [k, k.getBoundingClientRect()]).filter(([k, r]) => r.width && r.height && getComputedStyle(k).position !== 'absolute');
       for (let i = 0; i < kids.length; i++) for (let j = i + 1; j < kids.length; j++) {
         const [a, ra] = kids[i], [b, rb] = kids[j];
@@ -1474,7 +1659,7 @@ try {
     for (const transport of ["sse", "ws", "ndjson"]) await runTransport(transport);
     await runCrossOrigin();
   }
-  for (const step of [runIdentity, runIcons, runUsage, runUsageControls, runTree, runUpgrade, runDetail, runFts, runSearchHelp, runInsights, runNotify, runVisual, runDesign, runApi, runManage, runReadOnly, runRedact]) {
+  for (const step of [runIdentity, runIcons, runUsage, runUsageControls, runTree, runUpgrade, runDetail, runTraj, runFts, runSearchHelp, runInsights, runNotify, runVisual, runDesign, runApi, runManage, runReadOnly, runRedact]) {
     if (only.length && !only.includes(step.name)) continue;
     try { await step(); } catch (e) { report(`${step.name}`, false, String(e.message || e)); }
   }

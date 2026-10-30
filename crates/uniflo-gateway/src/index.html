@@ -48,7 +48,7 @@
   --fs-2xs: 11px; --fs-xs: 12px; --fs-sm: 13px; --fs-base: 14px; --fs-md: 15px; --fs-lg: 17px; --fs-xl: 22px; --fs-2xl: 28px;
   --r-xs: 3px; --r-sm: 5px; --r-md: 7px; --r-lg: 10px; --r-xl: 14px;
   --dur: 140ms; --ease: cubic-bezier(.2, .8, .2, 1);
-  --rail-w: 68px; --list-w: 340px; --insp-w: 312px;
+  --rail-w: 68px; --list-w: 340px;
 
   --bg: light-dark(#ffffff, #0f0f11); --bg-rail: light-dark(#f3f3f5, #0a0a0b); --bg-side: light-dark(#fafafa, #131315);
   --bg-raised: light-dark(#ffffff, #18181b); --bg-overlay: light-dark(#ffffff, #1d1d21); --panel: light-dark(#ffffff, #131315);
@@ -270,36 +270,26 @@ input[type=checkbox].cb:disabled { opacity: .35; cursor: not-allowed; }
 [data-state=live] > .dot { background: var(--work); box-shadow: 0 0 0 3px var(--work-bg); }
 [data-state=connecting] > .dot, [data-state=retry] > .dot { background: var(--warn); animation: breathe 1.2s infinite; }
 
-/* ---------- sessions: list | conversation | inspector ---------- */
-.app { display: grid; grid-template-columns: var(--list-w) minmax(0, 1fr) var(--insp-w); min-height: 0; min-width: 0; position: relative; overflow: clip; }
-.app.no-insp { grid-template-columns: var(--list-w) minmax(0, 1fr) 0; }
-.app.no-insp .inspector { display: none; }
-@media (min-width: 1181px) {
-  .app.insp-moving { grid-template-columns: var(--list-w) minmax(0, 1fr) 0; }
-  .app.insp-moving .inspector { display: block; position: absolute; top: 0; right: 0; bottom: 0; width: var(--insp-w); z-index: 5; box-shadow: -12px 0 32px -20px rgba(0, 0, 0, .4); }
-}
-.app.insp-moving .inspector, .app.insp-moving #thread, .app.insp-moving .ch-actions, .app.insp-moving .insp-scrim { will-change: transform, opacity; }
-.app.insp-moving #timeline { overflow-x: hidden; }
-.insp-scrim { display: none; }
-@property --pane { syntax: "<color>"; inherits: true; initial-value: transparent; }
-#insp-toggle { --pane: transparent; transition: --pane .2s var(--ease), background var(--dur), color var(--dur); }
-#insp-toggle.on { --pane: color-mix(in srgb, currentColor 30%, transparent); }
+/* ---------- sessions: list | conversation ---------- */
+.app { display: grid; grid-template-columns: var(--list-w) minmax(0, 1fr); min-height: 0; min-width: 0; position: relative; overflow: clip; }
 .side { display: flex; flex-direction: column; min-height: 0; min-width: 0; background: var(--bg-side); border-right: 1px solid var(--border); }
-.side-h { display: flex; align-items: baseline; gap: 8px; padding: 16px 16px 10px; }
-.side-h h2 { margin: 0; font-size: var(--fs-md); font-weight: 600; letter-spacing: -.01em; }
-#q-info { margin-left: auto; font-size: var(--fs-2xs); color: var(--text-3); font-variant-numeric: tabular-nums; white-space: nowrap; }
-#q-info b { color: var(--text-2); font-weight: 500; }
-.side .search-box { margin: 0 12px; flex: none; }
+.side .search-box { margin: 14px 12px 0; flex: none; }
 #q { font-family: var(--font-mono); font-size: 12.5px; }
 #q::placeholder { font-family: var(--font-sans); font-size: var(--fs-sm); }
-.filter-row { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--border); flex: none; }
-.harness-filter { min-width: 0; }
+.filter-row { display: flex; align-items: flex-start; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--border); flex: none; }
+.harness-filter { flex: 1; min-width: 0; }
 #harness-state { font-size: var(--fs-xs); color: var(--danger); }
-.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+#filter-btn { flex: none; height: 32px; }
+#filter-btn.on { background: var(--accent-bg); border-color: var(--accent-border); color: var(--accent); }
+#filter-btn .n { min-width: 16px; height: 16px; padding: 0 4px; border-radius: 999px; background: var(--accent-solid); color: #fff; font-size: 10.5px; line-height: 16px; text-align: center; font-variant-numeric: tabular-nums; }
+.menu button[role=menuitemcheckbox] { min-height: 40px; }
+.menu .m-t { display: flex; flex-direction: column; flex: 1; min-width: 0; line-height: 1.35; }
+.menu .m-t small { color: var(--text-3); font-size: var(--fs-2xs); }
+.menu .ck { flex: none; visibility: hidden; }
+.menu [aria-checked=true] .ck { visibility: visible; color: var(--accent); }
 #list { flex: 1; min-height: 120px; overflow-y: auto; padding: 0 8px 16px; }
 .group-h { position: sticky; top: 0; z-index: 1; display: flex; align-items: center; gap: 7px; padding: 12px 8px 6px; font-size: var(--fs-2xs); font-weight: 600; letter-spacing: .02em; color: var(--text-3); background: linear-gradient(var(--bg-side) 75%, transparent); }
 .group-h.live { color: var(--work); }
-.group-h .n { margin-left: auto; font-weight: 500; font-variant-numeric: tabular-nums; }
 .group-h .dot { width: 6px; height: 6px; }
 .row { position: relative; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 11px; padding: 8px 9px; border-radius: 9px; cursor: pointer; transition: background var(--dur); }
 .row:hover { background: var(--hover); }
@@ -314,7 +304,6 @@ input[type=checkbox].cb:disabled { opacity: .35; cursor: not-allowed; }
 .row-meta > span { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .row-meta .cwd { flex: 0 1 auto; }
 .row-meta .sep { flex: none; }
-.row-meta .pid { flex: none; color: var(--work); }
 .row-meta .tag { height: 17px; padding: 0 5px; font-size: 10.5px; }
 .row-side { display: flex; flex-direction: column; align-items: flex-end; gap: 1px; font-size: var(--fs-2xs); color: var(--text-3); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .row-cost { color: var(--text-2); }
@@ -344,7 +333,8 @@ input[type=checkbox].cb:disabled { opacity: .35; cursor: not-allowed; }
 .kids > .node:is(.kh, .more)::after { content: ""; position: absolute; left: 0; top: -9px; width: 7px; height: calc(50% + 9px); border: solid var(--tree); border-width: 0 0 1.5px 1.5px; border-bottom-left-radius: 7px; pointer-events: none; }
 
 .conv { position: relative; display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--bg); }
-.conv-h { display: flex; align-items: flex-start; gap: 12px; padding: 14px 20px 12px 24px; border-bottom: 1px solid var(--border); flex: none; }
+.conv-h { display: flex; flex-direction: column; padding: 14px 20px 0 24px; border-bottom: 1px solid var(--border); flex: none; min-width: 0; }
+.ch-row { display: flex; align-items: flex-start; gap: 12px; min-width: 0; }
 .conv-h .back { display: none; }
 .ch-main { flex: 1; min-width: 0; }
 .ch-title { display: flex; align-items: center; gap: 10px; min-width: 0; }
@@ -358,10 +348,192 @@ button.mchip { border: 0; background: none; padding: 0; font-family: inherit; cu
 .parent-link:hover { color: var(--accent); }
 .parent-link .txt { color: var(--text-2); max-width: 22em; overflow: hidden; text-overflow: ellipsis; display: inline-block; vertical-align: bottom; }
 .ch-actions { display: flex; align-items: center; gap: 6px; flex: none; }
-#steps-toggle[aria-expanded=true] { background: var(--active); }
-.steps { margin: 0 20px 0 24px; border: 1px solid var(--border-2); border-top: 0; border-radius: 0 0 var(--r-lg) var(--r-lg); max-height: 300px; overflow: auto; flex: none; background: var(--panel); }
-.steps .dt th { position: sticky; top: 0; z-index: 1; }
-.steps .dt td { height: 34px; }
+/* session view tabs (dsh "对话 / 轨迹"): the header's bottom edge */
+.vtabs { display: flex; align-items: flex-end; gap: 4px; margin-top: 10px; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+.vtabs::-webkit-scrollbar { display: none; }
+.vtab { position: relative; flex: none; display: inline-flex; align-items: center; gap: 6px; height: 34px; padding: 0 10px; border: 0; background: none; color: var(--text-3); font-size: var(--fs-sm); font-weight: 500; white-space: nowrap; border-radius: 7px 7px 0 0; }
+.vtab svg.i { width: 14px; height: 14px; }
+.vtab:hover { color: var(--text); }
+.vtab[aria-selected=true] { color: var(--text); }
+.vtab[aria-selected=true]::after { content: ""; position: absolute; left: 8px; right: 8px; bottom: 0; height: 2px; border-radius: 2px; background: var(--text); }
+.vtab .n { font-size: var(--fs-2xs); font-weight: 500; color: var(--text-3); font-variant-numeric: tabular-nums; padding: 0 6px; height: 17px; line-height: 17px; border-radius: 99px; background: var(--hover); }
+.vtab[hidden] { display: none; }
+.mchip.cost { color: var(--text-2); font-variant-numeric: tabular-nums; }
+.mchip.cost b { font-weight: 600; color: var(--text); }
+.row-cost.fam { display: inline-flex; align-items: center; gap: 3px; }
+.row-cost.fam svg.i { width: 11px; height: 11px; color: var(--text-3); stroke-width: 2; }
+.vpanel { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.vpanel[hidden] { display: none !important; }
+.vscroll { display: block; overflow: auto; }
+.vempty { padding: 28px 24px; }
+.vempty h3 { margin: 0 0 6px; font-size: var(--fs-md); }
+.vempty p { margin: 0; color: var(--text-3); }
+
+/* 链路: toolbar, time overview, turn → step → record table, record pane */
+.traj { display: grid; grid-template-columns: minmax(0, 1fr) 344px; }
+.traj.nosel { grid-template-columns: minmax(0, 1fr); }
+.traj.nosel .ti { display: none; }
+.traj-main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.ttools { display: flex; align-items: center; gap: 8px; padding: 10px 16px 10px 24px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+.ttools .grow { flex: 1; }
+.ttools .seg button svg.i { width: 13px; height: 13px; }
+.tsearch { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 9px; width: 180px; border-radius: 7px; border: 1px solid var(--border-2); background: var(--bg-raised); color: var(--text-3); }
+.tsearch:focus-within { border-color: var(--accent-border); box-shadow: 0 0 0 3px var(--accent-bg); }
+.tsearch svg.i { width: 13px; height: 13px; flex: none; }
+.tsearch input { flex: 1; min-width: 0; border: 0; outline: 0; background: none; color: var(--text); font: inherit; font-size: var(--fs-xs); }
+.ov { position: relative; padding: 8px 16px 4px 24px; border-bottom: 1px solid var(--border); user-select: none; }
+.ov-grid { position: relative; margin-left: 52px; }
+.ov-lane { position: relative; height: 16px; margin: 2px 0; }
+.ov-lane .lbl { position: absolute; right: calc(100% + 10px); top: 0; font-size: 10.5px; line-height: 16px; color: var(--text-3); white-space: nowrap; }
+.ov-lane .b { position: absolute; top: 3px; height: 10px; min-width: 2px; border-radius: 2.5px; cursor: pointer; }
+.ov-lane.m .b { background: var(--c1); }
+.ov-lane.t .b { background: var(--c2); opacity: .85; }
+.ov-lane.t .b.err { background: var(--danger); opacity: 1; }
+.ov-lane.a .b { background: var(--c5); opacity: .9; }
+.ov-lane .b.live { background-image: repeating-linear-gradient(-45deg, transparent 0 3px, rgba(255, 255, 255, .35) 3px 6px); }
+.ov-lane .b.on { box-shadow: 0 0 0 1.5px var(--bg), 0 0 0 3px var(--accent); z-index: 1; }
+.ov-turns { position: relative; height: 14px; }
+.ov-turns span { position: absolute; top: 0; font-size: 10px; line-height: 14px; color: var(--text-3); white-space: nowrap; padding-left: 4px; }
+.ov-turns span.on { color: var(--accent); }
+.ov-turn { position: absolute; top: 0; bottom: 18px; width: 0; border-left: 1px dashed var(--border-strong); }
+.ov-axis { position: relative; height: 16px; margin-top: 2px; border-top: 1px solid var(--border); }
+.ov-axis span { position: absolute; top: 2px; transform: translateX(-50%); font: 10px var(--font-mono); color: var(--text-3); white-space: nowrap; }
+.ov-axis span:first-child { transform: none; }
+.ov-axis span:last-child:not(:first-child) { transform: translateX(-100%); }
+.ov-axis.eq span { position: static; transform: none; font-family: inherit; }
+.ov-sel { position: absolute; top: 14px; bottom: 18px; background: var(--accent-bg); box-shadow: inset 1px 0 0 var(--accent-border), inset -1px 0 0 var(--accent-border); border-radius: 3px; pointer-events: none; }
+.tt-wrap { flex: 1; min-height: 0; overflow: auto; }
+.tt { width: 100%; border-collapse: separate; border-spacing: 0; font-size: var(--fs-xs); font-variant-numeric: tabular-nums; table-layout: fixed; }
+.tt th { position: sticky; top: 0; z-index: 2; height: 30px; padding: 0 8px; text-align: right; font-weight: 500; font-size: var(--fs-2xs); color: var(--text-3); background: color-mix(in srgb, var(--bg) 92%, transparent); backdrop-filter: blur(8px); border-bottom: 1px solid var(--border-2); white-space: nowrap; }
+.tt th.l, .tt td.l { text-align: left; }
+.tt th:first-child, .tt td:first-child { padding-left: 24px; }
+.tt td { height: 32px; padding: 0 8px; text-align: right; border-bottom: 1px solid var(--border); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--text-2); }
+.tt tbody tr[data-sel] { cursor: default; }
+.tt tbody tr[data-sel]:hover td { background: var(--hover); }
+.tt tr.sel td { background: var(--accent-bg) !important; }
+.tt tr.sel td:first-child { box-shadow: inset 2px 0 0 var(--accent); }
+.tt td.z { color: var(--text-3); opacity: .55; }
+.tt td.cost { color: var(--text); font-weight: 500; }
+.tt td.dim { color: var(--text-3); }
+.tt td.warnc { color: var(--warn); }
+.tt td.sum { color: var(--text-2); font-weight: 500; }
+.tt td .spin { display: inline-block; vertical-align: -2px; }
+.rec { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.rec .indent { flex: none; display: inline-block; }
+.rec .tw { flex: none; width: 16px; height: 16px; display: grid; place-items: center; color: var(--text-3); border: 0; background: none; padding: 0; border-radius: 4px; }
+.rec .tw svg.i { width: 12px; height: 12px; transition: transform var(--dur) var(--ease); }
+.rec .tw[aria-expanded=true] svg.i { transform: rotate(90deg); }
+.rec .tw:hover { background: var(--hover); color: var(--text); }
+.rec .tw.ph { visibility: hidden; }
+.rec .ic { flex: none; width: 20px; height: 20px; display: grid; place-items: center; border-radius: 5px; background: var(--hover); color: var(--text-2); }
+.rec .ic svg.i { width: 12px; height: 12px; }
+.rec .ic.m { background: color-mix(in srgb, var(--c1) 14%, transparent); color: var(--c1); }
+.rec .ic.t { background: color-mix(in srgb, var(--c2) 14%, transparent); color: var(--c2); }
+.rec .ic.a { background: color-mix(in srgb, var(--c5) 16%, transparent); color: var(--c5); }
+.rec .ic.u { background: var(--active); color: var(--text); }
+.rec .nm { flex: none; font-weight: 500; color: var(--text); }
+.rec .ds { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--text-3); }
+.rec .ds.mono { font-family: var(--font-mono); font-size: 11.5px; }
+.rec .chip2 { flex: none; display: inline-flex; align-items: center; gap: 4px; height: 18px; padding: 0 6px; border-radius: 99px; background: var(--hover); color: var(--text-3); font-size: 10.5px; }
+.rec .chip2.mono { font-family: var(--font-mono); }
+.rec .ok { flex: none; display: inline-flex; color: var(--ok); }
+.rec .ok svg.i { width: 12px; height: 12px; }
+.rec .bad { flex: none; color: var(--danger); font-weight: 600; font-size: 10.5px; }
+tr.r-turn td { height: 36px; background: color-mix(in srgb, var(--hover) 80%, var(--bg)); border-bottom-color: var(--border-2); }
+tr.r-turn .nm, tr.r-step .nm { font-weight: 600; }
+tr.r-turn .ds { color: var(--text-2); }
+tr.r-item td { height: 30px; }
+tr.r-sub td:first-child { background-image: linear-gradient(90deg, transparent calc(var(--rail) - 1px), color-mix(in srgb, var(--c5) 45%, transparent) calc(var(--rail) - 1px), color-mix(in srgb, var(--c5) 45%, transparent) calc(var(--rail) + 1px), transparent calc(var(--rail) + 1px)); }
+tr.r-live .ds { color: var(--work); }
+tr.r-note td { height: 30px; color: var(--text-3); text-align: left; }
+.cbar { position: relative; display: inline-block; width: 30px; height: 4px; border-radius: 2px; background: var(--hover); overflow: hidden; box-shadow: inset 0 0 0 1px var(--border); }
+.cbar i { position: absolute; inset: 0 auto 0 0; background: var(--accent); border-radius: 2px; }
+.ti { min-height: 0; display: flex; flex-direction: column; border-left: 1px solid var(--border); background: var(--bg-side); }
+.ti-h { display: flex; align-items: flex-start; gap: 10px; padding: 14px 14px 0 18px; }
+.ti-h .t { flex: 1; min-width: 0; }
+.ti-h h3 { margin: 0; font-size: var(--fs-base); font-weight: 600; letter-spacing: -.01em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ti-h .sub { margin-top: 3px; font-size: var(--fs-2xs); color: var(--text-3); display: flex; gap: 8px; flex-wrap: wrap; }
+.ti-h .nav { display: flex; gap: 2px; }
+.ti-b { flex: 1; min-height: 0; overflow: auto; padding: 14px 18px 24px; font-size: var(--fs-xs); }
+.ti-sec + .ti-sec, .ti-sec + .cmd-actions { margin-top: 18px; }
+.ti-sec h4 { margin: 0 0 8px; font-size: var(--fs-2xs); font-weight: 600; letter-spacing: .02em; color: var(--text-3); display: flex; justify-content: space-between; gap: 8px; }
+.ti-sec h4 .bad { color: var(--danger); }
+.ti-text { margin: 0; line-height: 1.7; color: var(--text-2); white-space: pre-wrap; overflow-wrap: anywhere; }
+.ti .kv { grid-template-columns: 76px minmax(0, 1fr); }
+.cmp { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+.cmp th { font-weight: 500; font-size: 10.5px; color: var(--text-3); text-align: right; padding: 0 0 6px; }
+.cmp th:first-child, .cmp td:first-child { text-align: left; }
+.cmp td { padding: 5px 0; text-align: right; border-top: 1px solid var(--border); color: var(--text); }
+.cmp td:first-child { color: var(--text-2); }
+.cmp td .sw { margin-right: 6px; }
+.cmp tr.sub td { color: var(--text-3); }
+.cmp tr.sub td:first-child { padding-left: 14px; }
+.cmp tr.tot td { font-weight: 600; border-top-color: var(--border-strong); }
+.cmp td.dim { color: var(--text-3); }
+.formula { display: grid; grid-template-columns: auto 1fr auto; gap: 6px 10px; align-items: baseline; font-variant-numeric: tabular-nums; }
+.formula .k { color: var(--text-2); display: flex; align-items: center; gap: 6px; }
+.formula .f { color: var(--text-3); font-family: var(--font-mono); font-size: 11px; text-align: right; }
+.formula .v { color: var(--text); text-align: right; min-width: 56px; }
+.formula .tot { grid-column: 1 / -1; display: flex; justify-content: space-between; padding-top: 7px; border-top: 1px solid var(--border-strong); font-weight: 600; color: var(--text); }
+.src-note { margin: 8px 0 0; color: var(--text-3); font-size: 10.5px; line-height: 1.6; }
+.tl { position: relative; margin: 4px 0 0; padding-left: 14px; }
+.tl::before { content: ""; position: absolute; left: 4px; top: 6px; bottom: 6px; width: 1px; background: var(--border-2); }
+.tl div { position: relative; display: flex; justify-content: space-between; gap: 10px; padding: 4px 0; }
+.tl div::before { content: ""; position: absolute; left: -13px; top: 10px; width: 7px; height: 7px; border-radius: 50%; background: var(--bg-side); box-shadow: inset 0 0 0 1.5px var(--border-strong); }
+.tl div.m::before { box-shadow: inset 0 0 0 1.5px var(--c1); }
+.tl div.t::before { box-shadow: inset 0 0 0 1.5px var(--c2); }
+.tl div span:first-child { color: var(--text-2); }
+.tl div span:last-child { color: var(--text); font-family: var(--font-mono); font-size: 11px; }
+.code-blk { margin: 0; padding: 10px 12px; border-radius: 8px; background: var(--code-bg); border: 1px solid var(--border-2); font: 11.5px/1.6 var(--font-mono); color: var(--text-2); white-space: pre-wrap; word-break: break-word; }
+
+/* 用量 / 子代理 / 信息 tabs */
+.upage { max-width: 1080px; padding: 20px 24px 64px; display: flex; flex-direction: column; gap: 14px; }
+.ugrid { display: grid; grid-template-columns: 1.6fr 1fr; gap: 14px; }
+.card.uc { padding: 16px 18px; }
+.card.uc.kpi.hero { padding: 16px 18px; }
+.uc h3 { margin: 0 0 12px; font-size: var(--fs-sm); font-weight: 600; display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.uc h3 .sub { font-size: var(--fs-2xs); font-weight: 400; color: var(--text-3); text-align: right; }
+.big { font-size: 30px; font-weight: 650; letter-spacing: -.03em; line-height: 1.1; font-variant-numeric: tabular-nums; }
+.big-sub { margin-top: 4px; font-size: var(--fs-xs); color: var(--text-3); font-variant-numeric: tabular-nums; }
+.u-warn { margin: 10px 0 0; font-size: var(--fs-xs); color: var(--warn); }
+.split { display: flex; height: 8px; gap: 2px; margin: 14px 0 10px; border-radius: 4px; overflow: hidden; background: var(--hover); }
+.split i { display: block; }
+.legend { display: grid; grid-template-columns: auto 1fr auto; gap: 6px 8px; align-items: center; font-size: var(--fs-xs); font-variant-numeric: tabular-nums; }
+.legend .v { color: var(--text); font-weight: 500; text-align: right; }
+.legend .p { color: var(--text-3); font-weight: 400; }
+.sbars { display: flex; gap: 10px; height: 140px; border-bottom: 1px solid var(--border-2); }
+.sgrp { display: flex; align-items: flex-end; gap: var(--g, 3px); min-width: 0; position: relative; }
+.sgrp + .sgrp::before { content: ""; position: absolute; left: -6px; top: 0; bottom: 0; border-left: 1px dashed var(--border-2); }
+.sbars .col { flex: 1; max-width: 18px; min-width: 1px; height: 100%; display: flex; flex-direction: column; justify-content: flex-end; padding: 0; border: 0; background: none; cursor: pointer; }
+.sbars .col i { display: block; min-height: 2px; }
+.sbars .col i:first-child { border-radius: 2px 2px 0 0; }
+.sbars .col:hover i, .sbars .col:focus-visible i { filter: brightness(1.15); }
+.sbars-x { display: flex; gap: 10px; margin-top: 8px; }
+.sbars-x span { min-width: 0; font-size: 10.5px; color: var(--text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sbars-x b { color: var(--text-2); font-weight: 600; }
+.dt2-wrap { overflow-x: auto; }
+.dt2 { width: 100%; border-collapse: separate; border-spacing: 0; font-size: var(--fs-xs); font-variant-numeric: tabular-nums; }
+.dt2 th { text-align: right; font-weight: 500; font-size: var(--fs-2xs); color: var(--text-3); padding: 0 8px 8px; border-bottom: 1px solid var(--border-2); white-space: nowrap; }
+.dt2 td { text-align: right; padding: 8px; border-bottom: 1px solid var(--border); color: var(--text-2); white-space: nowrap; }
+.dt2 th.l, .dt2 td.l { text-align: left; }
+.dt2 tr:last-child td { border-bottom: 0; }
+.dt2 td.b { color: var(--text); font-weight: 600; }
+.shr { display: inline-flex; align-items: center; gap: 6px; }
+.shr .cbar { width: 48px; }
+.shead, .srow { display: grid; grid-template-columns: auto minmax(0, 1fr) 72px 72px auto; align-items: center; gap: 14px; }
+.shead { padding: 0 12px 6px; font-size: var(--fs-2xs); color: var(--text-3); border-bottom: 1px solid var(--border-2); margin-bottom: 4px; }
+.shead span { text-align: right; } .shead span:nth-child(2) { text-align: left; }
+.srow { padding: 10px 12px 10px calc(12px + var(--d, 0) * 22px); border-radius: 10px; }
+.srow:hover { background: var(--hover); }
+.srow .t { min-width: 0; }
+.srow .t b { display: block; font-weight: 500; font-size: var(--fs-sm); color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.srow .t > span { display: block; font-size: var(--fs-2xs); color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.srow .t .work { color: var(--work); }
+.srow .n { font-size: var(--fs-xs); color: var(--text-2); font-variant-numeric: tabular-nums; text-align: right; }
+.srow .n.c { color: var(--text); font-weight: 600; }
+.srow .acts { display: flex; gap: 6px; justify-content: flex-end; }
+.info-grid { display: grid; grid-template-columns: 1.3fr 1fr; gap: 14px; align-items: start; }
+.info-grid .kv { grid-template-columns: 84px minmax(0, 1fr); }
 #timeline { flex: 1; min-height: 0; overflow-y: auto; scroll-behavior: auto; }
 #thread { max-width: 800px; margin: 0 auto; padding: 28px 32px 32px; }
 #more, #newer { display: flex; align-items: center; gap: 6px; margin: 0 auto 14px; height: 28px; padding: 0 12px; border-radius: 999px; border: 1px solid var(--border-2); background: var(--bg-raised); color: var(--text-2); font-size: var(--fs-xs); }
@@ -379,7 +551,7 @@ button.mchip { border: 0; background: none; padding: 0; font-family: inherit; cu
 .flash { animation: flash 2.4s var(--ease); }
 
 .k-user_message:not(.syn) { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; margin: 24px 0 6px; }
-.k-user_message:not(.syn) .when { position: static; order: 2; margin: 0; padding-right: 4px; opacity: 1; }
+.k-user_message:not(.syn) .when { position: static; order: 2; margin: 0; padding-right: 4px; }
 .bubble { max-width: 84%; padding: 10px 14px; border-radius: 16px 16px 5px 16px; background: var(--active); color: var(--text); font-size: var(--fs-base); line-height: 1.6; white-space: pre-wrap; word-break: break-word; box-shadow: inset 0 0 0 1px var(--border); }
 .k-assistant_message { font-size: var(--fs-base); line-height: 1.72; }
 .k-assistant_message.partial .md > :last-child::after { content: ""; display: inline-block; width: 7px; height: 15px; margin-left: 3px; vertical-align: -2px; background: var(--work); animation: caret 1s steps(1) infinite; }
@@ -413,7 +585,6 @@ details[open] > summary .chev { transform: rotate(90deg); }
 .think > summary, .note > summary { display: flex; align-items: center; gap: 7px; min-height: 26px; padding: 2px 0; min-width: 0; font-size: var(--fs-sm); color: var(--text-3); user-select: none; }
 .think > summary:hover, .note > summary:hover { color: var(--text-2); }
 .think .lbl { white-space: nowrap; flex: none; }
-.think .cnt { font-size: var(--fs-2xs); color: var(--text-3); white-space: nowrap; font-variant-numeric: tabular-nums; }
 .think-body { margin: 6px 0 2px 6px; padding: 2px 0 2px 14px; border-left: 2px solid var(--border-2); color: var(--text-2); font-size: var(--fs-sm); line-height: 1.7; white-space: pre-wrap; word-break: break-word; max-height: 420px; overflow: auto; }
 .note-label { flex: none; max-width: 45%; overflow-wrap: anywhere; }
 .note .pv { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; color: var(--text-3); }
@@ -451,6 +622,7 @@ details[open] > summary .chev { transform: rotate(90deg); }
 .k-turn_start { display: none; }
 .k-turn_end { display: flex; justify-content: flex-end; margin: 14px 0 6px !important; padding: 2px 2px 10px; border-bottom: 1px dashed var(--border-2); font-size: var(--fs-2xs); color: var(--text-3); font-variant-numeric: tabular-nums; }
 .k-turn_end > span { min-width: 0; overflow-wrap: anywhere; text-align: right; }
+.k-turn_end .warn { font-weight: 500; color: var(--warn); }
 .k-usage { display: none; }   /* summed onto the turn divider instead */
 .shimmer { background: linear-gradient(90deg, var(--work) 0%, color-mix(in srgb, var(--work) 35%, var(--text-3)) 40%, var(--work) 80%); background-size: 200% 100%; -webkit-background-clip: text; background-clip: text; color: transparent; animation: shim 2.2s linear infinite; font-weight: 500; }
 .empty { height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; color: var(--text-3); text-align: center; padding: 24px; }
@@ -461,22 +633,9 @@ details[open] > summary .chev { transform: rotate(90deg); }
 .keys span { display: inline-flex; gap: 5px; align-items: center; }
 .sk { border-radius: var(--r-sm); background: linear-gradient(90deg, var(--hover) 25%, var(--active) 50%, var(--hover) 75%); background-size: 200% 100%; animation: sk 1.2s linear infinite; }
 
-/* inspector */
-.inspector { min-height: 0; overflow: auto; background: var(--bg-side); border-left: 1px solid var(--border); padding: 6px 0 24px; }
-.insp-sec { padding: 16px 18px; border-bottom: 1px solid var(--border); }
-.insp-sec:last-child { border-bottom: 0; }
 .insp-h { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 10px; font-size: var(--fs-xs); font-weight: 600; color: var(--text-2); }
 .insp-h .ok { color: var(--ok); font-weight: 500; font-variant-numeric: tabular-nums; }
 .insp-h .ok.bad { color: var(--danger); }
-.insp-empty { padding: 24px 18px; font-size: var(--fs-sm); color: var(--text-3); }
-.us-cost b { display: block; font-size: var(--fs-2xl); font-weight: 650; letter-spacing: -.03em; line-height: 1.1; font-variant-numeric: tabular-nums; }
-.us-cost span { display: block; margin-top: 4px; font-size: var(--fs-xs); color: var(--text-3); }
-.us-cost .warn { color: var(--warn); }
-.stackbar { display: flex; height: 6px; gap: 2px; margin: 14px 0 12px; border-radius: 3px; overflow: hidden; background: var(--hover); }
-.stackbar i { display: block; min-width: 3px; }
-.us-tok { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 14px; margin: 0; }
-.us-tok dt { display: flex; align-items: center; gap: 6px; font-size: var(--fs-2xs); color: var(--text-3); }
-.us-tok dd { margin: 1px 0 0; font-size: var(--fs-sm); font-weight: 500; font-variant-numeric: tabular-nums; }
 .sw { display: inline-block; width: 8px; height: 8px; border-radius: 2.5px; flex: none; }
 .meter { height: 6px; border-radius: 3px; background: var(--hover); box-shadow: inset 0 0 0 1px var(--border); overflow: hidden; margin-bottom: 6px; }
 .meter > i { display: block; height: 100%; min-width: 2px; border-radius: 3px; background: linear-gradient(90deg, var(--accent-solid), var(--accent)); }
@@ -492,10 +651,6 @@ details[open] > summary .chev { transform: rotate(90deg); }
 .kv dd.mono { font-size: 11.5px; }
 .kv .key { cursor: copy; border-bottom: 1px dashed var(--border-strong); }
 .live-pid { display: inline-flex; align-items: center; gap: 6px; color: var(--work); font-variant-numeric: tabular-nums; }
-.sub-row { display: flex; align-items: center; gap: 8px; width: 100%; padding: 7px 8px; border: 0; border-radius: 7px; background: none; font-size: var(--fs-xs); text-align: left; color: var(--text-2); }
-.sub-row:hover { background: var(--hover); color: var(--text); }
-.sub-row .t { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.sub-row svg.i { width: 14px; height: 14px; color: var(--text-3); }
 
 /* ---------- pages ---------- */
 .view { min-height: 0; min-width: 0; overflow-y: auto; overflow-x: hidden; position: relative; }
@@ -628,6 +783,7 @@ details[open] > summary .chev { transform: rotate(90deg); }
 #s-index:empty { display: none; }
 #s-index .notice { align-items: center; }
 #s-index .grow { flex: 1; min-width: 0; }
+#s-index > #fts-foreign { align-items: flex-start; margin-bottom: 8px; }
 #s-index > .status-line { display: inline-flex; align-items: center; gap: 7px; }
 #s-index > .status-line::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--ok); }
 .pbar { height: 4px; margin-top: 6px; border-radius: 2px; background: var(--hover); overflow: hidden; }
@@ -947,10 +1103,9 @@ body.redact .txt, body.redact pre, body.redact .md, body.redact .snip, body.reda
 
 /* ---------- responsive ---------- */
 @media (max-width: 1180px) {
-  .app, .app.no-insp { grid-template-columns: 300px minmax(0, 1fr) 0; }
-  .app .inspector { display: none; }
-  .app:not(.no-insp) .inspector, .app.insp-moving .inspector { display: block; position: fixed; top: var(--insp-top, 8px); right: 8px; bottom: 8px; width: var(--insp-w); max-width: calc(100vw - 16px); z-index: 20; border: 1px solid var(--border-2); border-radius: 14px; box-shadow: var(--shadow-pop); }
-  .app:not(.no-insp) .insp-scrim, .app.insp-moving .insp-scrim { display: block; position: absolute; left: 0; right: 0; bottom: 0; z-index: 3; background: color-mix(in srgb, var(--bg) 55%, transparent); }
+  .app { grid-template-columns: 300px minmax(0, 1fr); }
+  .traj, .traj.nosel { position: relative; grid-template-columns: minmax(0, 1fr); }
+  .ti { position: absolute; top: 0; right: 0; bottom: 0; width: 320px; z-index: 6; box-shadow: var(--shadow-pop); }
   .kpi-board { grid-template-columns: minmax(0, 1fr); }
   .ranks { grid-template-columns: minmax(0, 1fr); gap: 18px; }
 }
@@ -967,18 +1122,31 @@ body.redact .txt, body.redact pre, body.redact .md, body.redact .snip, body.reda
   .rail .logo, .rail-gap, #open-palette, #theme, #notify { display: none; }
   .rail-tabs { flex: 6; flex-direction: row; gap: 0; }
   .rail-item, .rail-conn { width: auto; flex: 1; margin: 0; }
-  .app, .app.no-insp { grid-template-columns: minmax(0, 1fr); }
+  .app { grid-template-columns: minmax(0, 1fr); }
   .app .conv { display: none; }
   .app.thread-open .side { display: none; }
   .app.thread-open .conv { display: flex; }
-  .app:not(.no-insp) .inspector, .app.insp-moving .inspector { bottom: 70px; }
-  .conv-h { padding: 10px 10px 10px 6px; gap: 6px; }
+  .conv-h { padding: 10px 10px 0 6px; }
+  .ch-row { gap: 6px; }
+  .vtabs { margin-top: 6px; gap: 0; }
+  .vtab { padding: 0 9px; }
+  .vtab .n { display: none; }
+  .traj, .traj.nosel { grid-template-columns: minmax(0, 1fr); }
+  .ti { position: fixed; left: 0; right: 0; bottom: 70px; height: min(62vh, 520px); z-index: 20; border: 1px solid var(--border-2); border-radius: 14px 14px 0 0; box-shadow: var(--shadow-pop); }
+  .ttools { padding: 8px 10px; }
+  .tsearch { width: auto; flex: 1; }
+  .ov { padding: 6px 10px 4px 10px; }
+  .tt th:first-child, .tt td:first-child { padding-left: 10px; }
+  .upage { padding: 14px 12px 48px; }
+  .ugrid, .info-grid { grid-template-columns: minmax(0, 1fr); }
+  .shead { display: none; }
+  .srow { grid-template-columns: auto minmax(0, 1fr) auto; }
+  .srow .n:not(.c) { display: none; }
+  .srow .acts { grid-column: 2 / -1; justify-content: flex-start; }
   .conv-h .back { display: inline-grid; }
   .ch-title h1 { font-size: var(--fs-md); }
   .ch-meta { gap: 4px 10px; }
   .ch-actions { gap: 2px; }
-  #steps-toggle { display: none; }
-  .steps { margin: 0 10px; }
   #resume-btn span { display: none; }
   #thread { padding: 16px 14px 24px; }
   .working-line { padding: 0 14px 48px; }
@@ -1094,7 +1262,6 @@ SOFTWARE.
 
 <div class="app" id="app" role="tabpanel" data-view="sessions">
   <aside class="side" id="session-list-panel">
-    <div class="side-h"><h2>会话</h2><span id="q-info"></span></div>
     <label class="search-box">
       <svg class="i" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
       <input id="q" aria-label="搜索会话、目录、标题" placeholder="搜索标题、目录，或 s:work h:claude" autocomplete="off" spellcheck="false">
@@ -1105,32 +1272,26 @@ SOFTWARE.
         <select id="harness-select" class="combo" disabled aria-label="Agent harness"><option value="">加载 harness…</option></select>
         <span id="harness-state" role="status" hidden></span>
       </div>
-      <div class="chips" id="quick">
-        <button class="chip" data-tok="s:work"><span class="dot work"></span>工作中</button>
-        <button class="chip" data-tok="is:live">有进程</button>
-        <button class="chip" data-tok="is:root">顶层</button>
-        <button class="chip" data-tok="since:1d">24 小时</button>
-        <button class="chip" data-tok="is:archived">已归档</button>
-      </div>
+      <button class="btn" id="filter-btn" aria-haspopup="menu" aria-expanded="false" title="按状态和时间筛选"><svg class="i" viewBox="0 0 24 24"><path d="M4 6h16M7 12h10M10 18h4"/></svg>筛选<span class="n" hidden></span></button>
     </div>
     <div id="list"></div>
   </aside>
 
   <main class="conv">
     <div class="conv-h" id="detail-head" hidden></div>
-    <div class="steps" id="steps-panel" hidden></div>
-    <div id="timeline">
+    <div id="timeline" role="tabpanel" aria-labelledby="vt-chat">
       <div class="empty" id="welcome">
         <svg viewBox="0 0 24 24" fill="none" stroke-width="1.6" stroke-linecap="round"><path d="M3 5.5c7 0 8 6.5 18 6.5M3 12h18M3 18.5c7 0 8-6.5 18-6.5" stroke="url(#g)"/></svg>
         <h3>选择一个会话</h3>
         <p>所有 harness 的会话都已归一成同一种事件流，实时更新。</p>
-        <div class="keys"><span><kbd>/</kbd>搜索</span><span><kbd>j</kbd><kbd>k</kbd>切换会话</span><span><kbd>1</kbd>–<kbd>5</kbd>切换视图</span><span><kbd id="k-pal">⌘K</kbd>命令面板</span><span><kbd>]</kbd>详情面板</span></div>
+        <div class="keys"><span><kbd>/</kbd>搜索</span><span><kbd>j</kbd><kbd>k</kbd>切换会话</span><span><kbd id="k-pal">⌘K</kbd>命令面板</span></div>
       </div>
     </div>
-    <div class="insp-scrim" id="insp-scrim"></div>
+    <section class="vpanel traj nosel" id="p-traj" data-panel="traj" role="tabpanel" aria-labelledby="vt-traj" hidden></section>
+    <section class="vpanel vscroll" id="p-usage" data-panel="usage" role="tabpanel" aria-labelledby="vt-usage" hidden></section>
+    <section class="vpanel vscroll" id="p-subs" data-panel="subs" role="tabpanel" aria-labelledby="vt-subs" hidden></section>
+    <section class="vpanel vscroll" id="p-info" data-panel="info" role="tabpanel" aria-labelledby="vt-info" hidden></section>
   </main>
-
-  <aside class="inspector" id="insp" aria-label="会话详情"><p class="insp-empty">选择会话后，这里显示费用、上下文、恢复命令和会话信息。</p></aside>
 </div>
 
 <section class="view" id="v-usage" role="tabpanel" data-view="usage" hidden>
@@ -2026,6 +2187,13 @@ const I = {
   chart: '<path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/>',
   grid: '<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>',
   arrow: '<path d="M5 12h14M13 6l6 6-6 6"/>',
+  chevUp: '<path d="m6 15 6-6 6 6"/>',
+  chevDown: '<path d="m6 9 6 6 6-6"/>',
+  route: '<circle cx="6" cy="19" r="2.5"/><circle cx="18" cy="5" r="2.5"/><path d="M8.5 19H15a3.5 3.5 0 0 0 0-7H9a3.5 3.5 0 0 1 0-7h6.5"/>',
+  user: '<circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/>',
+  spark: '<path d="M12 3v4M12 17v4M3 12h4M17 12h4M6 6l2.5 2.5M15.5 15.5 18 18M6 18l2.5-2.5M15.5 8.5 18 6"/>',
+  msg: '<path d="M4 5h16v11H8l-4 4z"/>',
+  brain: '<path d="M9 4a3 3 0 0 0-3 3v.5A3 3 0 0 0 4 10.3 3 3 0 0 0 5 15a3 3 0 0 0 3 4h1V4zM15 4a3 3 0 0 1 3 3v.5a3 3 0 0 1 2 2.8 3 3 0 0 1-1 4.7 3 3 0 0 1-3 4h-1V4z"/>',
 };
 const icon = (n, cls = "i") => `<svg class="${cls}" viewBox="0 0 24 24" aria-hidden="true">${I[n]}</svg>`;
 const HUES = { claude: 40, qoder: 190, qwen: 265, codex: 160, pi: 300, omp: 285, crosery: 330, commandcode: 15, gemini: 225,
@@ -2269,7 +2437,7 @@ function toastRecover(msg, command) {
 // ---------------------------------------------------------------- URL state
 // Every view and filter lives in the query string next to api/token/transport, so a refresh
 // or a shared link restores the same screen. Defaults are left out of the URL.
-const DEFAULTS = { view: "sessions", range: "30d", group: "harness", stack: "harness", metric: "sessions", rank: "cost", mtab: "list", prange: "365" };
+const DEFAULTS = { view: "sessions", tab: "chat", range: "30d", group: "harness", stack: "harness", metric: "sessions", rank: "cost", mtab: "list", prange: "365" };
 const getp = (k) => new URLSearchParams(location.search).get(k) ?? DEFAULTS[k] ?? "";
 function setp(patch, push = false) {
   const p = new URLSearchParams(location.search);
@@ -2340,7 +2508,7 @@ function renderList() {
         g.sort(name === "工作中"
           ? (a, b) => tree.fam.get(a.key).workSince - tree.fam.get(b.key).workSince || (a.key < b.key ? -1 : 1)
           : (a, b) => tree.fam.get(b.key).updated - tree.fam.get(a.key).updated || (a.key < b.key ? -1 : 1));
-        return `<div class="group-h${name === "工作中" ? " live" : ""}">${name === "工作中" ? '<span class="dot work"></span>' : ""}<span>${name}</span><span class="n">${g.length}</span></div>` + g.map((s) => nodeHtml(s, tree, out)).join("");
+        return `<div class="group-h${name === "工作中" ? " live" : ""}">${name === "工作中" ? '<span class="dot work"></span>' : ""}<span>${name}</span></div>` + g.map((s) => nodeHtml(s, tree, out)).join("");
       }).join("");
     }
     shown = out;
@@ -2350,7 +2518,6 @@ function renderList() {
     badge.textContent = work;
   });
 }
-const usageCost = (u) => (!u || !u.steps ? "" : u.cost_usd != null ? money(u.cost_usd) : "未定价");
 const tile = (id, cls = "") => `<span class="htile ${cls}" style="--h:${hue(id)}">${hicon(id)}</span>`;
 const workEntered = new Map(); // session key -> stable epoch ms when current work stint started
 function workSince(s) {
@@ -2476,14 +2643,14 @@ function kidAct(b) {
   renderList();
 }
 function rowHtml(s) {
-  const u = s.usage, cost = usageCost(u);
+  const u = s.usage, fam = famOf(s), v = fam ? fam.cost_usd : u?.cost_usd, cost = money(v);
   // a sub-agent whose parent is not in the list says so; nested ones show it through the tree lines
   const orphan = s.parent && !sessions.has(s.parent) ? '<span class="sub-i" title="子代理，父会话不在当前列表">↳ 子代理</span>' : "";
   return `<div class="row${s.key === selected ? " sel" : ""}${s.parent && sessions.has(s.parent) ? " kid" : ""}" data-key="${esc(s.key)}" data-status="${s.status}">
     <span class="ricon htile" style="--h:${hue(s.harness)}">${hicon(s.harness)}${s.status === "work" ? '<i class="live-ring"></i>' : ""}</span>
     <div class="row-main"><span class="row-title txt">${esc(label(s))}</span>
-      <div class="row-meta">${orphan}<span class="cwd txt">${esc(base(s.cwd) || s.harness)}</span>${s.model ? `<span class="sep">·</span><span class="mono">${esc(s.model)}</span>` : ""}${s.archived ? '<span class="tag acc" title="源文件已清理，内容来自精简归档">已归档</span>' : ""}${s.pid ? `<span class="pid" title="进程 ${s.pid}">⚡${s.pid}</span>` : ""}</div></div>
-    <div class="row-side"><span class="age" data-ts="${s.updated_at}">${age(s.updated_at)}</span>${cost ? `<span class="row-cost" title="API 等价成本 ${esc(cost)} · ${full(tokensOf(u))} token · ${u.steps} 步">${esc(cost)}</span>` : ""}</div>
+      <div class="row-meta">${orphan}<span class="cwd txt">${esc(base(s.cwd) || s.harness)}</span>${s.archived ? '<span class="tag acc" title="源文件已清理，内容来自精简归档">已归档</span>' : ""}</div></div>
+    <div class="row-side"><span class="age" data-ts="${s.updated_at}">${age(s.updated_at)}</span>${v >= 0.01 ? `<span class="row-cost${fam ? " fam" : ""}" title="${esc(fam ? familyTip(s) : `API 等价成本 ${cost}`)}" data-v="${v}">${esc(cost)}</span>` : ""}</div>
   </div>`;
 }
 function skeletonList() {
@@ -2500,7 +2667,6 @@ async function runSearch() {
   order = r.body.map((s) => s.key);
   for (const s of r.body) trackStatus(s);
   sortOrder();
-  $("#q-info").innerHTML = `<b>${r.body.length}</b> 条 · ${r.ms.toFixed(1)} ms`;
   syncFilters();
   renderList();
   return r;
@@ -2606,6 +2772,7 @@ document.addEventListener("scroll", (e) => { if (!e.target.closest?.(".ts-dropdo
 
 const harnessSelect = makeCombo("#harness-select", {
   empty: "没有匹配的 harness",
+  render: { item: comboItem },
   config: {
     placeholder: "搜索 harness…",
     onChange(value) {
@@ -2624,10 +2791,8 @@ $("#session-list-panel").addEventListener("scroll", () => harnessSelect.close(),
 function refreshHarnessOptions() {
   const value = queryHarness();
   const list = [...harnesses.values()].filter((x) => x.sessions > 0 || x.id === value).sort((a, b) => b.sessions - a.sessions);
-  const data = [{ value: "", text: "全部 harness", name: "全部 Agent harness", rank: 0, ico: "a",
-    sessions: [...harnesses.values()].reduce((n, x) => n + x.sessions, 0),
-    working: [...harnesses.values()].reduce((n, x) => n + x.working, 0) },
-    ...list.map((x, i) => ({ value: x.id, text: x.id, name: x.name, ico: "h", sessions: x.sessions, working: x.working, rank: i + 1 }))];
+  const data = [{ value: "", text: "全部 harness", name: "全部 Agent harness", rank: 0, ico: "a" },
+    ...list.map((x, i) => ({ value: x.id, text: x.id, name: x.name, ico: "h", sessions: x.sessions, rank: i + 1 }))];
   if (value && !data.some((x) => x.value === value)) data.push({ value, text: "查询：" + value, query: true, disabled: true, rank: -1, ico: "a" });
   syncCombo(harnessSelect, data, value);
 }
@@ -2680,9 +2845,16 @@ async function refreshMeta() {
     $("#uptime").textContent = age(Date.now() - s.uptime_ms);
   }
 }
+const FILTERS = [["s:work", "工作中", "正在执行回合"], ["is:live", "进程在运行", "harness 进程仍开着，含空闲等待输入"], ["is:root", "隐藏子代理", "只列主会话"],
+  ["since:1d", "最近 24 小时", "按最后活动时间"], ["is:archived", "已归档", "源文件已清理，只剩精简归档"]];
+const filterMenu = (toks) => FILTERS.map(([tok, name, tip]) => `<button role="menuitemcheckbox" aria-checked="${toks.has(tok)}" data-tok="${tok}"><span class="m-t"><span>${name}</span><small>${tip}</small></span>${icon("check", "i ck")}</button>`).join("");
 function syncFilters() {
   const toks = new Set($("#q").value.split(/\s+/));
-  document.querySelectorAll(".chip[data-tok]").forEach((c) => c.classList.toggle("on", toks.has(c.dataset.tok)));
+  const on = FILTERS.filter(([tok]) => toks.has(tok)).length, fb = $("#filter-btn");
+  fb.classList.toggle("on", on > 0);
+  fb.querySelector(".n").hidden = !on;
+  fb.querySelector(".n").textContent = on;
+  if (menuFor === fb) $$("#menu [data-tok]").forEach((b) => b.setAttribute("aria-checked", String(toks.has(b.dataset.tok))));
   if (!harnessSelect.isDisabled) refreshHarnessOptions();
 }
 // Read-only daemons answer every write with 403: hide what would write instead of failing late.
@@ -2693,31 +2865,40 @@ function applyReadOnly() {
   if (view === "manage") viewEnter.manage();
 }
 
-// ---------------------------------------------------------------- session detail head
+// ---------------------------------------------------------------- session detail: head + view tabs
+// dsh-style view tabs under the header. 对话 is the event stream (#timeline); 链路, 用量 and 子代理
+// render from /v1/sessions/{key}/trajectory plus the Session's usage and family totals.
+const TABS = [["chat", "chat", "对话"], ["traj", "route", "链路"], ["usage", "chart", "用量"], ["subs", "agent", "子代理"], ["info", "info", "信息"]];
+let vtab = TABS.some(([k]) => k === getp("tab")) ? getp("tab") : "chat";
+const famOf = (s) => (s?.family?.sessions ? s.family : null);
+const kidsOf = (s) => famOf(s)?.sessions || [...sessions.values()].filter((x) => x.parent === s.key).length;
+const money4 = (v) => (v == null ? "—" : "$" + v.toFixed(v >= 1 ? 2 : 4));
+// inside a session the exact sub-cent amount reads better than "<$0.01"
+const moneyFine = (v) => (v > 0 && v < 0.01 ? money4(v) : money(v));
+// a parent shows its family total (itself + every descendant); everything else its own usage
+function costSplit(s) {
+  const u = s?.usage, f = famOf(s), self = u?.cost_usd ?? null;
+  const all = f ? f.cost_usd ?? null : self;
+  return { u, f, self, all, kids: f ? (all ?? 0) - (self ?? 0) : 0 };
+}
+function familyTip(s) {
+  const { f, self, all, kids } = costSplit(s);
+  return f ? `合计 ${moneyFine(all)} = 本会话 ${moneyFine(self ?? 0)} + ${f.sessions} 个子代理 ${moneyFine(kids)}` : "";
+}
 let headFor = null;
 function renderHead(s, rebuild = false) {
   const head = $("#detail-head");
   head.hidden = false;
   if (headFor !== s.key || rebuild) {
     headFor = s.key;
-    const stepsOpen = getp("steps") === "1";
-    head.innerHTML = `<button class="icon-btn back" id="show-list" aria-controls="session-list-panel" aria-label="返回会话列表">${icon("left")}</button>
+    head.innerHTML = `<div class="ch-row"><button class="icon-btn back" id="show-list" aria-controls="session-list-panel" aria-label="返回会话列表">${icon("left")}</button>
       <div class="ch-main"><div class="ch-title"><h1 class="txt" id="sh-title"></h1><span id="sh-badge"></span></div><div class="ch-meta" id="sh-meta"></div></div>
       <div class="ch-actions">
-        <button class="btn sm ghost" id="steps-toggle" aria-expanded="${stepsOpen}" aria-controls="steps-panel">${icon("table")}每步用量</button>
         <button class="btn sm primary-soft" id="resume-btn" aria-haspopup="menu" aria-expanded="false">${icon("play")}<span>恢复</span></button>
         ${READ_ONLY || s.archived ? "" : `<button class="icon-btn" id="clean-btn" title="生成清理计划" aria-label="清理">${icon("trash")}</button>`}
-        <button class="icon-btn" id="insp-toggle" aria-controls="insp">${icon("panel")}</button>
-      </div>`;
-    syncInspToggle();
-    const steps = $("#steps-panel");
-    steps.hidden = !stepsOpen;
-    steps.innerHTML = "";
-    delete steps.dataset.seen;
-    $("#insp").innerHTML = `<div id="sh-usage"></div><section class="insp-sec" id="insp-resume" hidden></section>
-      <section class="insp-sec"><div class="insp-h"><span>会话信息</span></div><dl class="kv" id="insp-kv"></dl></section>
-      <section class="insp-sec" id="insp-subs" hidden></section>`;
-    if (stepsOpen) loadSteps(s.key);
+      </div></div>
+      <div class="vtabs" id="vtabs" role="tablist" aria-label="会话视图">${TABS.map(([k, ic, name]) =>
+        `<button class="vtab" role="tab" id="vt-${k}" data-tab="${k}" aria-controls="${k === "chat" ? "timeline" : "p-" + k}">${icon(ic)}<span>${name}</span><span class="n" hidden></span></button>`).join("")}</div>`;
   }
   const working = $("#working");
   if (working) working.hidden = s.status !== "work";
@@ -2725,153 +2906,643 @@ function renderHead(s, rebuild = false) {
   badge.className = `badge ${s.status}`;
   badge.innerHTML = `<i></i>${s.status === "work" ? "工作中" : "空闲"}`;
   $("#sh-title").textContent = label(s);
+  const { u, f, all } = costSplit(s);
   $("#sh-meta").innerHTML = `<span class="mchip">${tile(s.harness, "xs")}<span>${esc(hname(s.harness))}</span></span>
     ${s.model ? `<span class="mchip mono">${icon("cpu")}<span>${esc(s.model)}</span></span>` : ""}
     ${s.cwd ? `<span class="mchip mono" title="${esc(s.cwd)}">${icon("folder")}<span class="txt">${esc(shortPath(s.cwd))}</span></span>` : ""}
+    ${u?.steps || f ? `<span class="mchip cost" id="sh-cost" data-v="${all ?? ""}" title="${esc(f ? familyTip(s) : `API 等价成本 · ${u.steps} 步`)}"><b>${all != null ? money(all) : "未定价"}</b></span>` : ""}
     ${s.archived ? '<span class="tag acc" title="源文件已移入回收站，内容来自精简归档">已归档</span>' : ""}
     ${s.parent ? `<button class="mchip parent-link" data-open="${esc(s.parent)}" title="打开父会话 ${esc(s.parent)}">${icon("branch")}<span>子代理 · 父会话 <span class="txt">${esc(sessions.has(s.parent) ? label(sessions.get(s.parent)) : short(s.parent))}</span></span></button>` : ""}`;
-  renderInspector(s);
-  loadHeadResume(s.key);
-  renderUsageStrip(s.usage);
-  if (T?.steps && s.usage && s.usage.steps !== T.steps.totals?.steps) {
-    clearTimeout(T.stepsTimer);
-    T.stepsTimer = setTimeout(() => !$("#steps-panel")?.hidden && loadSteps(s.key), 600);
+  syncTabCounts(s);
+  syncTabs();
+  detailChanged(s);
+}
+function syncTabCounts(s) {
+  const kids = kidsOf(s);
+  const n = { subs: kids ? String(kids) : "" };
+  for (const b of $$("#vtabs .vtab")) {
+    const k = b.dataset.tab, el = b.querySelector(".n");
+    el.textContent = n[k] || "";
+    el.hidden = !n[k];
+    if (k === "subs") b.hidden = !kids;
   }
 }
-function renderInspector(s) {
+// 子代理 has no tab without sub-agents; the choice is kept for the next session that has some
+const shownTab = () => (vtab === "subs" && current && !kidsOf(current) ? "chat" : vtab);
+let chatPin = null; // where the conversation was while another tab hid it
+function syncTabs() {
+  const t = shownTab(), tl = $("#timeline");
+  for (const b of $$("#vtabs .vtab")) {
+    const on = b.dataset.tab === t;
+    b.setAttribute("aria-selected", String(on));
+    b.tabIndex = on ? 0 : -1;
+  }
+  if (t !== "chat" && !tl.hidden && !chatPin) chatPin = { bottom: tl.scrollHeight - tl.scrollTop - tl.clientHeight < 160, top: tl.scrollTop };
+  const back = t === "chat" && tl.hidden;
+  tl.hidden = t !== "chat";
+  for (const p of $$("#app .vpanel")) p.hidden = p.dataset.panel !== t;
+  if (back && chatPin) tl.scrollTop = chatPin.bottom ? tl.scrollHeight : chatPin.top;
+  if (t === "chat") chatPin = null;
+}
+function showTab(t, focus = false) {
+  if (!TABS.some(([k]) => k === t)) return;
+  vtab = t;
+  setp({ tab: t });
+  syncTabs();
+  renderTab();
+  if (focus) $(`#vt-${shownTab()}`)?.focus();
+}
+function cycleTab(d) {
+  const on = TABS.map(([k]) => k).filter((k) => !$(`#vt-${k}`)?.hidden);
+  showTab(on[(on.indexOf(shownTab()) + d + on.length) % on.length], true);
+}
+const needsTraj = (t) => t === "traj" || t === "usage" || t === "subs";
+function renderTab() {
+  if (!current) return;
+  const t = shownTab();
+  if (t === "info") return renderInfoTab();
+  if (!needsTraj(t)) return;
+  if (TR.key !== current.key) resetTraj(current.key);
+  if ((!TR.data || TR.stale) && !TR.busy) loadTraj(current.key);
+  paintTab(t);
+}
+function paintTab(t = shownTab()) {
+  if (t === "traj") renderTraj();
+  else if (t === "usage") renderUsageTab();
+  else if (t === "subs") renderSubsTab();
+}
+// The selected session changed (live envelope or a fresh select): totals repaint at once, the
+// trajectory is refetched at most every 1.2 s while the session keeps writing.
+const trajSig = (s) => `${s.updated_at}|${s.status}|${s.usage?.steps ?? 0}|${s.family?.steps ?? 0}|${s.family?.sessions ?? 0}`;
+function detailChanged(s) {
+  if (TR.key !== s.key) resetTraj(s.key);
+  const sig = trajSig(s);
+  if (sig !== TR.sig && TR.sig && (TR.data || TR.busy)) TR.stale = true;
+  TR.sig = sig;
+  const t = shownTab();
+  if (t === "info") return renderInfoTab();
+  if (!needsTraj(t)) return;
+  if (!TR.data && !TR.busy && !TR.err) loadTraj(s.key);
+  else if (TR.stale && !TR.timer && !document.hidden) {
+    // a live session refetches its whole trajectory: wait 4× the last load (1.2–15 s) so long sessions don't keep the daemon busy
+    TR.timer = setTimeout(() => { TR.timer = null; if (current?.key === TR.key && TR.stale && !TR.busy) loadTraj(TR.key); }, Math.min(15_000, Math.max(1200, (TR.ms || 0) * 4)));
+  }
+  if (!TR.data || (t === "usage" && usageSig(s) !== TR.usig)) paintTab(t);
+}
+const usageSig = (s) => `${s.usage?.steps}|${s.usage?.cost_usd}|${s.family?.steps}|${s.family?.cost_usd}|${s.usage?.last_context_tokens}`;
+document.addEventListener("visibilitychange", () => { if (!document.hidden && current && TR.stale) detailChanged(current); });
+
+// ---------------------------------------------------------------- trajectory data
+const TR = { key: null, seq: 0 };
+let trajEqual = localStorage.getItem("uniflo.trajEqual") === "1";
+function resetTraj(key) {
+  clearTimeout(TR.timer);
+  Object.assign(TR, { key, seq: TR.seq + 1, data: null, busy: false, stale: false, err: "", timer: null, sig: "", ms: 0,
+    open: new Set(), shut: new Set(), kidOpen: new Set(), kids: new Map(), sel: "", pendingSel: "", q: "", desc: null, descBusy: false, rows: [], index: new Map() });
+}
+async function loadTraj(key) {
+  if (TR.key !== key) resetTraj(key);
+  const mine = ++TR.seq;
+  TR.busy = true;
+  TR.stale = false;
+  const t0 = performance.now();
+  try {
+    const d = await getJson(`/v1/sessions/${encodeURIComponent(key)}/trajectory`);
+    if (TR.key !== key || mine !== TR.seq) return;
+    TR.ms = performance.now() - t0;
+    const lastBefore = TR.data?.turns.at(-1)?.turn;
+    if (!TR.data) { const last = d.turns.at(-1); if (last) TR.open.add(last.turn); }
+    else if (lastBefore != null && TR.open.has(lastBefore)) for (const t of d.turns) if (t.turn > lastBefore) TR.open.add(t.turn);
+    TR.data = d;
+    TR.err = "";
+    TR.desc = null;
+    for (const k of TR.kidOpen) loadKid(k, true);
+  } catch (e) {
+    if (TR.key !== key || mine !== TR.seq) return;
+    TR.err = e.message;
+  } finally {
+    if (mine === TR.seq) TR.busy = false;
+  }
+  if (current?.key !== key) return;
+  paintTab();
+  if (TR.pendingSel && TR.data && shownTab() === "traj") { const id = TR.pendingSel; TR.pendingSel = ""; trajSelect(id, true); }
+}
+async function loadKid(key, quiet = false) {
+  const owner = TR.key;
+  if (!quiet || !TR.kids.has(key)) TR.kids.set(key, "loading");
+  try {
+    const d = await getJson(`/v1/sessions/${encodeURIComponent(key)}/trajectory`);
+    if (TR.key === owner && TR.kidOpen.has(key)) TR.kids.set(key, d);
+  } catch (e) {
+    if (TR.key === owner) TR.kids.set(key, { error: e.message });
+  }
+  if (TR.key === owner && shownTab() === "traj") renderTraj();
+}
+
+// One node per table row: turn → step → item, sub-agents (with their own steps once expanded) in
+// place of the call that started them. Ids stay stable across refetches, so selection survives.
+const kidCost = (c) => (c.family?.sessions ? c.family.cost_usd : c.usage?.cost_usd) ?? null;
+const kidTok = (c) => (c.family?.sessions ? c.family : c.usage) || {};
+const sumCost = (xs) => xs.reduce((a, v) => (v == null ? a : (a ?? 0) + v), null);
+const sumOf = (xs, k) => xs.reduce((a, x) => a + (x[k] || 0), 0);
+function trajTree() {
+  const d = TR.data, owner = TR.key;
+  const by = new Map((d.children || []).map((c) => [c.key, c])), placed = new Set();
+  const turns = d.turns.map((t) => {
+    const n = { id: `t:${t.turn}`, kind: "turn", turn: t.turn, t, owner, depth: 0, kids: itemNodes(t.items, `i:${owner}#t${t.turn}`, owner, 1, by, placed, t.turn) };
+    for (const s of t.steps) n.kids.push(stepNode(s, owner, 1, by, placed, t.turn));
+    return n;
+  });
+  // sub-agents not tied to a call hang under the step they started in (the last one if unknown)
+  for (const c of d.children || []) {
+    if (placed.has(c.key)) continue;
+    const tn = turns.find((n) => n.t.steps.some((s) => s.index === c.step)) || turns.at(-1);
+    if (!tn) continue;
+    const sn = tn.kids.find((k) => k.kind === "step" && k.step.index === c.step) || tn.kids.filter((k) => k.kind === "step").at(-1) || tn;
+    sn.kids.push(agentNode(c, null, owner, sn.depth + 1, tn.turn));
+  }
+  return turns;
+}
+function stepNode(s, owner, depth, by, placed, turn) {
+  return { id: `s:${owner}#${s.index}`, kind: "step", step: s, owner, depth, turn, kids: itemNodes(s.items, `i:${owner}#${s.index}`, owner, depth + 1, by, placed, turn) };
+}
+function itemNodes(items, base, owner, depth, by, placed, turn) {
+  const out = [];
+  (items || []).forEach((x, i) => {
+    const kids = x.kind === "tool" ? (x.children || []).map((k) => by.get(k)).filter(Boolean) : [];
+    if (!kids.length) return out.push({ id: `${base}:${i}`, kind: "item", item: x, owner, depth, turn, kids: [] });
+    for (const c of kids) { placed.add(c.key); out.push(agentNode(c, x, owner, depth, turn)); }
+  });
+  return out;
+}
+function agentNode(c, call, owner, depth, turn) {
+  const n = { id: `a:${c.key}`, kind: "agent", child: c, call, owner, depth, turn, kids: [] };
+  const kd = TR.kids.get(c.key);
+  if (kd?.turns) {
+    const by = new Map((kd.children || []).map((x) => [x.key, x])), placed = new Set();
+    for (const t of kd.turns) {
+      n.kids.push(...itemNodes(t.items, `i:${c.key}#t${t.turn}`, c.key, depth + 1, by, placed, turn));
+      for (const s of t.steps) n.kids.push(stepNode(s, c.key, depth + 1, by, placed, turn));
+    }
+    const rail = (k) => { k.rail ??= depth; k.kids.forEach(rail); };
+    n.kids.forEach(rail);
+  }
+  return n;
+}
+const nodeText = (n) => n.kind === "turn" ? n.t.prompt : n.kind === "step" ? n.step.model : n.kind === "agent" ? `${n.child.title || ""} ${n.child.model || ""}`
+  : [n.item.name, n.item.input_preview, n.item.preview, n.item.output_preview, n.item.subtype].filter(Boolean).join(" ");
+// Visible rows in order (j/k walk these); `index` knows every node, shown or folded.
+function trajRows(tree) {
+  const rows = [], index = new Map(), q = TR.q.trim().toLowerCase();
+  const all = (n) => { index.set(n.id, n); n.kids.forEach(all); };
+  tree.forEach(all);
+  if (q) {
+    const keep = (n) => { n.hit = (nodeText(n) || "").toLowerCase().includes(q); n.under = n.kids.map(keep).some(Boolean); return n.hit || n.under; };
+    tree.forEach(keep);
+  }
+  const walk = (n) => {
+    if (q && !n.hit && !n.under) return;
+    n.open = q ? n.under : n.kind === "turn" ? TR.open.has(n.turn) : n.kind === "step" ? !TR.shut.has(n.id) : n.kind === "agent" && TR.kidOpen.has(n.child.key);
+    rows.push(n);
+    if (n.open) n.kids.forEach(walk);
+  };
+  tree.forEach(walk);
+  return { rows, index };
+}
+const agentsUnder = (n) => n.kids.flatMap((k) => (k.kind === "agent" ? [k] : agentsUnder(k)));
+// what the metric columns show for a node; missing keys stay blank
+function nodeMetrics(n) {
+  if (n.kind === "turn") {
+    const st = n.t.steps, kc = sumCost(agentsUnder(n).map((a) => kidCost(a.child)));
+    const own = sumCost(st.map((s) => s.cost_usd)), last = st.at(-1);
+    return { dur: n.t.ended_at - n.t.started_at, sum: true, input: sumOf(st, "input"), cr: sumOf(st, "cache_read"), cw: sumOf(st, "cache_write"), out: sumOf(st, "output"),
+      cost: st.length || kc != null ? sumCost([own, kc]) : undefined, costTip: kc ? `本轮 ${money(own ?? 0)} + 子代理 ${money(kc)}` : "" };
+  }
+  if (n.kind === "step") {
+    const s = n.step;
+    return { dur: s.started_at != null ? s.ts - s.started_at : undefined, input: s.input, cr: s.cache_read, cw: s.cache_write, out: s.output,
+      cost: s.cost_usd, costTip: s.cost_source ? `${SOURCE[s.cost_source] || s.cost_source}${s.price?.tier_above ? ` · 超过 ${tok(s.price.tier_above)} 档` : ""}` : "" };
+  }
+  if (n.kind === "agent") {
+    const c = n.child, u = kidTok(c), x = n.call;
+    return { dur: x?.ended_at ? x.ended_at - x.ts : c.started_at ? c.updated_at - c.started_at : undefined, live: c.status === "work",
+      input: u.input, cr: u.cache_read, cw: u.cache_write, out: u.output, cost: kidCost(c), costTip: c.family?.sessions ? `含它自己的 ${c.family.sessions} 个子代理` : "" };
+  }
+  const x = n.item;
+  if (x.kind !== "tool") return {};
+  return { dur: x.ended_at ? x.ended_at - x.ts : undefined, live: !!x.running };
+}
+
+// ---------------------------------------------------------------- 链路 view
+// [key, header, width]
+const TCOLS = [["dur", "时长", 64], ["tok", "Token", 72], ["cost", "费用", 72]];
+const midLayout = matchMedia("(max-width: 1180px)");
+function trajCols() {
+  const w = $("#p-traj").clientWidth - (TR.sel && !midLayout.matches ? 344 : 0), rec = narrowLayout.matches ? 200 : 250;
+  let cols = TCOLS;
+  // narrow panes drop the token total, then the duration; 费用 always stays
+  for (const k of ["tok", "dur"]) {
+    if (24 + rec + cols.reduce((a, c) => a + c[2], 0) <= w) break;
+    cols = cols.filter((c) => c[0] !== k);
+  }
+  return cols;
+}
+const toolIcon = (n = "") => /bash|shell|exec|command|terminal/i.test(n) ? "term" : /^(read|view|cat)/i.test(n) ? "file" : /edit|write|patch|apply/i.test(n) ? "edit"
+  : /grep|glob|search|find|^rg$/i.test(n) ? "search" : /web|fetch|http|browse/i.test(n) ? "globe" : /agent|task|spawn/i.test(n) ? "agent" : "tool";
+const shortModel = (m = "") => m.replace(/^claude-/, "").replace(/-\d{8}$/, "");
+function recHtml(n) {
+  const tw = n.kids.length || n.kind === "agent"
+    ? `<button class="tw" data-tw="${esc(n.id)}" aria-expanded="${!!n.open}" aria-label="${n.open ? "收起" : "展开"}">${icon("chev")}</button>` : '<span class="tw ph"></span>';
+  const cell = (ic, cls, nm, ds = "", mono = false, extra = "") =>
+    `<div class="rec"><span class="indent" style="width:${n.depth * 16}px"></span>${tw}<span class="ic ${cls}">${icon(ic)}</span><span class="nm">${nm}</span>${ds ? `<span class="ds${mono ? " mono" : ""}">${esc(ds)}</span>` : ""}${extra}</div>`;
+  if (n.kind === "turn") return cell("user", "u", `第 ${n.turn} 轮`, n.t.prompt || "（没有用户输入）");
+  if (n.kind === "step") {
+    const s = n.step;
+    const own = n.owner === TR.key ? current?.model : TR.data.children?.find((c) => c.key === n.owner)?.model;
+    return cell("spark", "m", `第 ${s.index} 步`, "", false, s.model && s.model !== own ? `<span class="chip2 mono">${esc(shortModel(s.model))}</span>` : "");
+  }
+  if (n.kind === "agent") {
+    const c = n.child;
+    return cell("agent", "a", "子代理", c.title || short(c.key), false, `${c.status === "work" ? '<span class="dot work pulse"></span>' : ""}${n.call?.is_error ? '<span class="bad">失败</span>' : ""}`);
+  }
+  const x = n.item;
+  if (x.kind === "reasoning") return cell("brain", "", "思考");
+  if (x.kind === "text") return cell("msg", "", "回复", x.preview || `${full(x.chars)} 字`);
+  if (x.kind === "system") return cell("info", "", "系统", x.subtype || "");
+  return cell(toolIcon(x.name), "t", esc(x.name || "工具"), x.input_preview || "", true, x.running ? "" : x.is_error ? '<span class="bad">失败</span>' : `<span class="ok">${icon("check")}</span>`);
+}
+function cellsHtml(cols, m) {
+  return cols.map(([k]) => {
+    if (k === "dur") return m.live ? '<td><span class="spin" title="运行中"></span></td>' : `<td class="${m.sum ? "sum" : ""}">${m.dur != null && m.dur >= 0 ? dur(m.dur) : ""}</td>`;
+    if (k === "tok") {
+      if (m.out === undefined) return "<td></td>";
+      const t = (m.input || 0) + (m.cr || 0) + (m.cw || 0) + (m.out || 0);
+      return `<td data-v="${t}" title="输入 ${full(m.input)} · 缓存读取 ${full(m.cr)} · 缓存写入 ${full(m.cw)} · 输出 ${full(m.out)}">${tok(t)}</td>`;
+    }
+    return m.cost === undefined ? "<td></td>" : m.cost == null ? '<td class="warnc" title="未定价">—</td>'
+      : `<td class="cost" data-v="${m.cost}"${m.costTip ? ` title="${esc(m.costTip)}"` : ""}>${moneyFine(m.cost)}</td>`;
+  }).join("");
+}
+function trajRowHtml(n, cols) {
+  const m = nodeMetrics(n), sub = n.owner !== TR.key;
+  const cls = `r-${n.kind}${sub ? " r-sub" : ""}${n.id === TR.sel ? " sel" : ""}${m.live ? " r-live" : ""}${n.kind === "item" && n.item.is_error ? " r-err" : ""}`;
+  let h = `<tr class="${cls}" data-sel="${esc(n.id)}"${sub ? ` style="--rail:${24 + n.rail * 16 + 7}px"` : ""}><td class="l">${recHtml(n)}</td>${cellsHtml(cols, m)}</tr>`;
+  if (n.kind === "agent" && n.open && !n.kids.length) {
+    const kd = TR.kids.get(n.child.key);
+    h += `<tr class="r-note"><td colspan="${cols.length + 1}" style="padding-left:${24 + (n.depth + 1) * 16 + 20}px">${kd?.error ? `加载子代理链路失败：${esc(kd.error)}` : kd?.turns ? "这个子代理还没有记录。" : "加载子代理链路…"}</td></tr>`;
+  }
+  return h;
+}
+// Overview: model / tool / sub-agent lanes on real time (or one equal slot per record).
+function overviewHtml(tree) {
+  const d = TR.data, recs = [], now = Date.now();
+  const add = (n) => {
+    if (n.owner !== TR.key) return;
+    if (n.kind === "step") recs.push({ lane: "m", a: n.step.started_at ?? n.step.ts, b: n.step.ts, id: n.id, turn: n.turn });
+    else if (n.kind === "agent") recs.push({ lane: "a", a: n.child.started_at ?? n.call?.ts ?? n.child.updated_at, b: Math.max(n.child.updated_at, n.call?.ended_at ?? 0), id: n.id, turn: n.turn, live: n.child.status === "work" });
+    else if (n.kind === "item" && n.item.kind === "tool") recs.push({ lane: "t", a: n.item.ts, b: n.item.ended_at ?? (n.item.running ? now : n.item.ts), id: n.id, turn: n.turn, err: n.item.is_error, live: n.item.running });
+    n.kids.forEach(add);
+  };
+  tree.forEach(add);
+  if (!recs.length) return "";
+  recs.sort((x, y) => x.a - y.a);
+  const t0 = Math.min(...d.turns.map((t) => t.started_at), ...recs.map((r) => r.a));
+  const t1 = Math.max(...d.turns.map((t) => t.ended_at), ...recs.map((r) => r.b), t0 + 1000);
+  const N = recs.length, W = t1 - t0;
+  const slot = new Map(recs.map((r, i) => [r, i]));
+  const pos = (r) => trajEqual ? [slot.get(r) / N * 100, 0.82 / N * 100] : [(r.a - t0) / W * 100, Math.max(0.12, (r.b - r.a) / W * 100)];
+  const lanes = { m: "", t: "", a: "" };
+  for (const r of recs) {
+    const [x, w] = pos(r);
+    lanes[r.lane] += `<i class="b${r.err ? " err" : ""}${r.live ? " live" : ""}${r.id === TR.sel ? " on" : ""}" data-sel="${esc(r.id)}" style="left:${x.toFixed(3)}%;width:${Math.min(w, 100 - x).toFixed(3)}%"></i>`;
+  }
+  // turn edges: real start time, or the slot of the turn's first record
+  const turnAt = (t) => trajEqual ? (recs.findIndex((r) => r.turn === t.turn) / N * 100) : (t.started_at - t0) / W * 100;
+  const turnEnd = (t) => trajEqual ? ((recs.findLastIndex((r) => r.turn === t.turn) + 1) / N * 100) : (t.ended_at - t0) / W * 100;
+  const selTurn = TR.index.get(TR.sel)?.turn;
+  let marks = "", labels = "", lastL = -100;
+  for (const t of d.turns) {
+    const x = turnAt(t);
+    if (x < 0) continue;
+    marks += `<span class="ov-turn" style="left:${x.toFixed(3)}%"></span>`;
+    if (x - lastL >= 7 || t.turn === selTurn) { labels += `<span class="${t.turn === selTurn ? "on" : ""}" style="left:${x.toFixed(3)}%">第 ${t.turn} 轮</span>`; lastL = x; }
+  }
+  const st = d.turns.find((t) => t.turn === selTurn);
+  const sel = st ? (() => { const a = Math.max(0, turnAt(st)), b = Math.min(100, turnEnd(st)); return `<div class="ov-sel" style="left:${a.toFixed(3)}%;width:${Math.max(0.3, b - a).toFixed(3)}%"></div>`; })() : "";
+  const fmt = (t) => (W < 180_000 ? clock(t) : clock(t).slice(0, 5));
+  const axis = trajEqual ? `<span class="eq">等宽：每条记录占一格，共 ${N} 条</span>`
+    : Array.from({ length: 6 }, (_, i) => `<span style="left:${(i / 5 * 100).toFixed(2)}%">${fmt(t0 + W * i / 5)}</span>`).join("");
+  return `<div class="ov" aria-label="时间概览"><div class="ov-grid"><div class="ov-turns">${labels}</div>${marks}${sel}
+    <div class="ov-lane m"><span class="lbl">模型</span>${lanes.m}</div><div class="ov-lane t"><span class="lbl">工具</span>${lanes.t}</div><div class="ov-lane a"><span class="lbl">子代理</span>${lanes.a}</div>
+    <div class="ov-axis${trajEqual ? " eq" : ""}">${axis}</div></div></div>`;
+}
+function renderTraj() {
+  const box = $("#p-traj");
+  if (!box || box.hidden || !current) return;
+  if (!TR.data) {
+    box.className = "vpanel traj nosel";
+    box.innerHTML = `<div class="vempty">${TR.err ? `<h3>加载链路失败</h3><p>${esc(TR.err)}</p>` : '<p class="status-line">加载链路…</p>'}</div>`;
+    return;
+  }
+  const d = TR.data, tree = trajTree();
+  const { rows, index } = trajRows(tree);
+  TR.rows = rows;
+  TR.index = index;
+  if (TR.sel && !index.has(TR.sel)) TR.sel = "";
+  const cols = trajCols();
+  const tsearch = $("#t-q");
+  const focus = document.activeElement === tsearch, caret = tsearch?.selectionStart;
+  const wrap = $("#tt-wrap"), top = wrap?.scrollTop, left = wrap?.scrollLeft;
+  box.className = "vpanel traj" + (TR.sel ? "" : " nosel");
+  box.innerHTML = `<div class="traj-main">
+    <div class="ttools">
+      <div class="seg sm"><button data-tact="expand" title="展开所有轮次">${icon("chevDown")}展开</button><button data-tact="collapse" title="收起所有轮次">${icon("chevUp")}收起</button></div>
+      <div class="seg sm" role="group" aria-label="时间概览刻度"><button data-tact="real" aria-pressed="${!trajEqual}">实际时长</button><button data-tact="equal" aria-pressed="${trajEqual}">等宽</button></div>
+      <label class="tsearch">${icon("search")}<input id="t-q" placeholder="搜索链路" aria-label="搜索链路：名称、参数、回复" value="${esc(TR.q)}" autocomplete="off" spellcheck="false"></label>
+    </div>
+    ${overviewHtml(tree)}
+    <div class="tt-wrap" id="tt-wrap">${rows.length ? `<table class="tt" id="tt"><colgroup><col>${cols.map((c) => `<col style="width:${c[2]}px">`).join("")}</colgroup>
+      <thead><tr><th class="l">记录</th>${cols.map((c) => `<th data-col="${c[0]}">${c[1]}</th>`).join("")}</tr></thead>
+      <tbody>${rows.map((n) => trajRowHtml(n, cols)).join("")}</tbody></table>`
+      : `<p class="status-line" style="padding:16px 24px">${TR.q ? "没有匹配的记录。" : "这个会话还没有记录。"}</p>`}</div>
+  </div><aside class="ti" id="ti" aria-label="记录详情"></aside>`;
+  const w2 = $("#tt-wrap");
+  if (top != null) { w2.scrollTop = top; w2.scrollLeft = left; }
+  if (focus) { const i = $("#t-q"); i.focus(); i.setSelectionRange(caret, caret); }
+  if (TR.sel) renderTi();
+}
+function trajSelect(id, reveal = false) {
+  TR.sel = id;
+  const n = TR.index.get(id);
+  if (n && reveal) {
+    TR.open.add(n.turn);
+    for (let k = n; k; k = parentOf(k)) if (k.kind === "step") TR.shut.delete(k.id); else if (k.kind === "agent" && k.id !== id) TR.kidOpen.add(k.child.key);
+  }
+  renderTraj();
+  if (id) requestAnimationFrame(() => $(`#tt tr[data-sel="${CSS.escape(id)}"]`)?.scrollIntoView({ block: reveal ? "center" : "nearest" }));
+}
+function parentOf(n) {
+  for (const p of TR.index.values()) if (p.kids.includes(n)) return p;
+  return null;
+}
+function trajMove(d) {
+  const i = TR.rows.findIndex((n) => n.id === TR.sel);
+  const next = TR.rows[Math.max(0, Math.min(TR.rows.length - 1, (i < 0 ? 0 : i + d)))];
+  if (next) trajSelect(next.id);
+}
+function trajToggle(id) {
+  const n = TR.index.get(id);
+  if (!n) return;
+  if (n.kind === "turn") TR.open.has(n.turn) ? TR.open.delete(n.turn) : TR.open.add(n.turn);
+  else if (n.kind === "step") TR.shut.has(id) ? TR.shut.delete(id) : TR.shut.add(id);
+  else if (n.kind === "agent") {
+    const k = n.child.key;
+    if (TR.kidOpen.has(k)) TR.kidOpen.delete(k);
+    else { TR.kidOpen.add(k); if (!TR.kids.get(k)?.turns) loadKid(k); }
+  }
+  renderTraj();
+}
+
+// ---------------------------------------------------------------- record detail
+const SWC = { input: "var(--c1)", cache_read: "var(--c3)", cache_write: "var(--c4)", output: "var(--c2)", reasoning: "var(--c5)" };
+const PARTS = [["input", "输入"], ["cache_read", "缓存读取"], ["cache_write", "缓存写入"], ["output", "输出"]];
+const sw = (k) => `<span class="sw" style="background:${SWC[k]}"></span>`;
+const locateBtn = (key, ev) => (ev ? `<button class="btn sm" data-act="traj-locate" data-key="${esc(key)}" data-ev="${esc(ev)}">${icon("chat")}在对话中定位</button>` : "");
+const stepsOf = (owner) => (owner === TR.key ? TR.data : TR.kids.get(owner))?.turns?.flatMap((t) => t.steps) || [];
+// What the step cost: tokens × unit price per category, then the context it used and its timeline.
+function stepUsage(n) {
+  const s = n.step, p = s.cost_parts && s.price ? s.price : null, src = SOURCE[s.cost_source] || s.cost_source || "未定价";
+  const rows = PARTS.map(([k, name]) => `<span class="k">${sw(k)}${name}</span><span class="f" data-k="${k}" data-v="${s[k]}">${full(s[k])}${p ? ` × $${+p[k].toFixed(4)}/M` : ""}</span><span class="v"${p ? ` data-part="${k}" data-v="${s.cost_parts[k]}"` : ""}>${p ? money4(s.cost_parts[k]) : ""}</span>`).join("");
+  const note = [p?.tier_above ? `prompt 超过 ${full(p.tier_above)} token，整步按高档价计。` : "", s.reasoning ? `输出里含思考 ${full(s.reasoning)} token。` : "",
+    s.cost_source === "harness" ? "金额由 harness 自己记录，没有按类别拆分。" : s.cost_usd == null ? `价格目录里没有 ${s.model || "这个模型"}，不计入合计。` : ""].join("");
+  let h = `<div class="ti-sec" id="ti-formula"><h4><span>费用</span><span>${esc(src)}</span></h4><div class="formula">${rows}
+      <span class="tot"><span>合计</span><span data-k="cost_usd" data-v="${s.cost_usd ?? ""}">${s.cost_usd != null ? money4(s.cost_usd) : "未定价"}</span></span></div>
+      ${note ? `<p class="src-note">${esc(note)}</p>` : ""}</div>`;
+  if (s.context_tokens) {
+    const pct = s.context_pct, limit = pct ? Math.round(s.context_tokens * 100 / pct) : null;
+    h += `<div class="ti-sec"><h4><span>上下文</span><span>${pct != null ? pct.toFixed(1) + "%" : ""}</span></h4>${pct != null ? `<div class="meter ${pct >= 90 ? "bad" : pct >= 70 ? "warn" : ""}"><i style="width:${Math.min(100, pct)}%"></i></div>` : ""}
+      <p class="src-note" style="margin-top:6px">${tok(s.context_tokens)}${limit ? ` / ${tok(limit)}` : ""} token</p></div>`;
+  }
+  return h;
+}
+function stepTiming(n) {
+  const s = n.step, all = stepsOf(n.owner), next = all.find((x) => x.index === s.index + 1);
+  const tools = s.items.filter((x) => x.kind === "tool");
+  const gen = s.started_at != null ? s.ts - s.started_at : null;
+  const end = next?.started_at ?? TR.data?.turns.find((t) => t.steps.includes(s))?.ended_at;
+  return `<div class="ti-sec"><h4><span>时间线</span><span>${end && s.started_at ? dur(end - s.started_at) : ""}</span></h4><div class="tl">
+      ${s.started_at != null ? `<div class="m"><span>请求开始</span><span>${clock(s.started_at)}</span></div>` : ""}
+      <div class="m"><span>模型生成${gen != null ? ` · ${dur(gen)}` : ""}</span><span>${clock(s.ts)}</span></div>
+      ${tools.map((x) => `<div class="t"><span>${esc(x.name)} · ${x.running ? "运行中" : x.ended_at ? dur(x.ended_at - x.ts) : "—"}</span><span>${x.ended_at ? clock(x.ended_at) : "—"}</span></div>`).join("")}
+      ${end ? `<div><span>${next ? "下一步开始" : "本轮结束"}</span><span>${clock(end)}</span></div>` : ""}</div></div>`;
+}
+function renderTi() {
+  const box = $("#ti"), n = TR.index.get(TR.sel);
+  if (!box || !n) return;
+  let title = "", sub = [], body = "";
+  if (n.kind === "step") {
+    const s = n.step;
+    title = `${n.owner !== TR.key ? "子代理 · " : ""}第 ${s.index} 步`;
+    sub = [s.model || "", clock(s.ts)];
+    body = stepUsage(n) + stepTiming(n) + `<div class="cmd-actions">${locateBtn(n.owner, s.event)}</div>`;
+  } else if (n.kind === "agent") {
+    const c = n.child, u = kidTok(c), cost = kidCost(c);
+    title = `子代理 · ${c.title || short(c.key)}`;
+    sub = [c.model || "", c.status === "work" ? "工作中" : ""];
+    body = `<div class="ti-sec"><h4><span>费用${c.family?.sessions ? `（含它的 ${c.family.sessions} 个子代理）` : ""}</span><span data-v="${cost ?? ""}">${cost != null ? money4(cost) : "未定价"}</span></h4><div class="formula">
+        ${PARTS.map(([k, name]) => `<span class="k">${sw(k)}${name}</span><span class="f">${full(u[k])}</span><span class="v"></span>`).join("")}</div>
+        ${n.call?.is_error ? `<p class="src-note">${esc(n.call.name)} 调用以错误结束。</p>` : ""}</div>
+      <div class="cmd-actions"><button class="btn sm" data-open="${esc(c.key)}">${icon("arrow")}打开子代理会话</button><button class="btn sm ghost" data-tw="${esc(n.id)}">${TR.kidOpen.has(c.key) ? "收起链路" : "在这里展开"}</button></div>`;
+  } else if (n.kind === "turn") {
+    const t = n.t, m = nodeMetrics(n);
+    title = `第 ${n.turn} 轮`;
+    sub = [dur(t.ended_at - t.started_at), clock(t.started_at)];
+    body = `<div class="ti-sec"><h4><span>用户输入</span></h4><p class="ti-text">${esc(t.prompt || "（没有用户输入）")}</p></div>
+      <div class="ti-sec"><h4><span>费用</span><span>${m.cost != null ? moneyFine(m.cost) : "—"}</span></h4>${m.costTip ? `<p class="src-note" style="margin:0">${esc(m.costTip)}</p>` : ""}</div>
+      <div class="cmd-actions">${locateBtn(TR.key, t.event)}</div>`;
+  } else {
+    const x = n.item;
+    if (x.kind === "tool") {
+      title = `${x.name || "工具"}${n.owner === TR.key ? "" : " · 子代理"}`;
+      sub = [x.running ? "运行中" : x.is_error ? "失败" : "成功", x.ended_at ? dur(x.ended_at - x.ts) : "", clock(x.ts)];
+      const cut = (v) => ([...(v || "")].length >= 200 ? '<p class="src-note">只显示前 200 个字符，完整内容在对话里。</p>' : "");
+      body = `<div class="ti-sec"><h4><span>参数</span></h4><pre class="code-blk">${esc(x.input_preview || "（无参数）")}</pre>${cut(x.input_preview)}</div>
+        <div class="ti-sec"><h4><span>结果</span>${x.is_error ? '<span class="bad">失败</span>' : ""}</h4>${x.running ? '<p class="src-note" style="margin:0">还在运行。</p>'
+          : `<pre class="code-blk">${esc(x.output_preview || "（空）")}</pre>${cut(x.output_preview)}`}</div>
+        <div class="cmd-actions">${locateBtn(n.owner, x.event)}</div>`;
+    } else {
+      title = x.kind === "reasoning" ? "思考" : x.kind === "text" ? "回复" : "系统";
+      sub = [clock(x.ts)];
+      body = `<div class="ti-sec">${x.kind === "text" ? `<p class="ti-text">${esc(x.preview || "")}${x.chars > 200 ? "…" : ""}</p>` : x.kind === "reasoning" ? '<p class="src-note" style="margin:0">思考正文在对话里查看。</p>' : `<p class="ti-text mono">${esc(x.subtype || "")}</p>`}</div>
+        <div class="cmd-actions">${locateBtn(n.owner, x.event)}</div>`;
+    }
+  }
+  box.innerHTML = `<div class="ti-h"><div class="t"><h3 title="${esc(title)}">${esc(title)}</h3><div class="sub">${sub.filter(Boolean).map((x) => `<span>${esc(x)}</span>`).join("")}</div></div>
+      <div class="nav"><button class="icon-btn xs" data-tact="prev" title="上一条 (k)" aria-label="上一条">${icon("chevUp")}</button><button class="icon-btn xs" data-tact="next" title="下一条 (j)" aria-label="下一条">${icon("chevDown")}</button><button class="icon-btn xs" data-tact="close" title="关闭 (Esc)" aria-label="关闭记录详情">${icon("x")}</button></div></div>
+    <div class="ti-b">${body}</div>`;
+}
+
+// ---------------------------------------------------------------- 用量 tab
+function renderUsageTab() {
+  const box = $("#p-usage"), s = current;
+  if (!box || box.hidden || !s) return;
+  const { u, f, self, all, kids } = costSplit(s);
+  TR.usig = usageSig(s);
+  if (!u?.steps && !f) { box.innerHTML = `<div class="vempty"><p class="status-line">这个会话还没有 usage 记录。</p></div>`; return; }
+  const top = box.scrollTop;
+  const unpriced = (f || u).unpriced_steps || 0;
+  const d = TR.key === s.key ? TR.data : null;
+  const steps = d ? d.turns.flatMap((t) => t.steps) : [];
+  const last = steps.at(-1);
+  const pct = last?.context_pct ?? (u?.context_limit ? u.last_context_tokens * 100 / u.context_limit : null);
+  const ctxTok = last?.context_tokens ?? u?.last_context_tokens;
+  const pctOf = (v) => (all ? Math.round((v || 0) / all * 100) : 0);
+  const hero = `<section class="card uc kpi hero" id="u-total"><h3>合计<span class="sub">API 等价成本</span></h3>
+      <div class="big" data-v="${all ?? ""}">${all != null ? money(all) : "未定价"}</div>
+      ${f ? `<div class="split" aria-hidden="true"><i style="flex:${self || 0};background:var(--c1)"></i><i style="flex:${kids || 0};background:var(--c5)"></i></div>
+      <div class="legend"><span class="sw" style="background:var(--c1)"></span><span>本会话</span><span class="v" id="u-self" data-v="${self ?? ""}">${moneyFine(self ?? 0)}</span>
+        <span class="sw" style="background:var(--c5)"></span><span>${f.sessions} 个子代理</span><span class="v" id="u-kids" data-v="${kids}">${moneyFine(kids)}</span></div>` : ""}
+      ${unpriced ? `<p class="u-warn">${unpriced} 步未定价，不计入合计</p>` : ""}</section>`;
+  const ctx = `<section class="card uc"><h3>上下文<span class="sub">最后一步</span></h3>
+      <div class="big" style="font-size:24px" id="u-ctx" data-v="${pct ?? ""}">${pct != null ? pct.toFixed(pct < 10 ? 1 : 0) + "%" : "—"}</div><div class="big-sub">${tok(ctxTok)}${u?.context_limit ? ` / ${tok(u.context_limit)}` : ""} token</div>
+      ${pct != null ? `<div class="meter ${pct >= 90 ? "bad" : pct >= 70 ? "warn" : ""}" style="margin-top:14px"><i style="width:${Math.min(100, pct)}%"></i></div>` : ""}</section>`;
+  let bars = `<section class="card uc"><h3>每步费用<span class="sub">${f ? "紫色为子代理 · " : ""}点击查看这一步</span></h3>`;
+  if (!d) bars += `<p class="status-line">${TR.err ? `加载失败：${esc(TR.err)}` : "加载每步费用…"}</p></section>`;
+  else {
+    const kidAt = new Map();
+    for (const c of d.children || []) if (c.step != null) kidAt.set(c.step, (kidAt.get(c.step) || 0) + (kidCost(c) || 0));
+    const mx = Math.max(1e-9, ...steps.map((x) => (x.cost_usd || 0) + (kidAt.get(x.index) || 0)));
+    const gap = steps.length > 160 ? 0 : steps.length > 60 ? 1 : 3;
+    const turns = d.turns.filter((t) => t.steps.length);
+    bars += `<div class="sbars" style="--g:${gap}px">${turns.map((t) => `<div class="sgrp" style="flex:${t.steps.length}">${t.steps.map((x) => {
+      const kc = kidAt.get(x.index) || 0;
+      return `<button class="col" data-goto="s:${esc(TR.key)}#${x.index}" title="第 ${x.index} 步 ${x.cost_usd != null ? moneyFine(x.cost_usd) : "未定价"}${kc ? ` + 子代理 ${moneyFine(kc)}` : ""}" aria-label="第 ${x.index} 步">${kc ? `<i style="height:${kc / mx * 100}%;background:var(--c5)"></i>` : ""}<i style="height:${(x.cost_usd || 0) / mx * 100}%;background:var(--c1)"></i></button>`;
+    }).join("")}</div>`).join("")}</div>
+      <div class="sbars-x">${turns.map((t) => `<span style="flex:${t.steps.length}" title="${esc(t.prompt || "")}"><b>第 ${t.turn} 轮</b> ${moneyFine(sumCost([...t.steps.map((x) => x.cost_usd), ...t.steps.map((x) => kidAt.get(x.index) ?? null)]) ?? 0)}</span>`).join("")}</div></section>`;
+  }
+  let models = "";
+  if (d) {
+    const by = new Map();
+    const addRow = (m, from, x, n) => {
+      const k = `${from}|${m || "—"}`, r = by.get(k) || { m: m || "—", from, steps: 0, input: 0, cache_read: 0, cache_write: 0, output: 0, cost: null };
+      r.steps += n;
+      for (const p of ["input", "cache_read", "cache_write", "output"]) r[p] += x[p] || 0;
+      r.cost = sumCost([r.cost, x.cost]);
+      by.set(k, r);
+    };
+    for (const x of steps) addRow(x.model, "本会话", { ...x, cost: x.cost_usd }, 1);
+    for (const c of d.children || []) { const t = kidTok(c); addRow(c.model, "子代理", { ...t, cost: kidCost(c) }, t.steps || 0); }
+    const rows = [...by.values()].sort((a, b) => (b.cost ?? -1) - (a.cost ?? -1));
+    if (new Set(rows.map((r) => r.m)).size > 1) models = `<section class="card uc"><h3>按模型</h3><div class="dt2-wrap"><table class="dt2"><thead><tr><th class="l">模型</th><th class="l">来自</th><th>费用</th><th class="l">占比</th></tr></thead><tbody>
+      ${rows.map((r) => `<tr><td class="l mono">${esc(r.m)}</td><td class="l">${r.from}</td><td class="b">${r.cost != null ? moneyFine(r.cost) : "未定价"}</td>
+        <td class="l"><span class="shr"><span class="cbar"><i style="width:${pctOf(r.cost)}%;background:${r.from === "子代理" ? "var(--c5)" : "var(--c1)"}"></i></span>${pctOf(r.cost)}%</span></td></tr>`).join("")}</tbody></table></div></section>`;
+  }
+  box.innerHTML = `<div class="upage"><div class="ugrid">${hero}${ctx}</div>${bars}${models}</div>`;
+  box.scrollTop = top;
+}
+
+// ---------------------------------------------------------------- 子代理 tab
+// Every descendant: the direct ones come with the trajectory (and their call / step), deeper ones
+// are listed through `parent:` searches, one per sub-agent that has its own.
+async function loadDesc() {
+  const owner = TR.key, d = TR.data;
+  if (!d || TR.descBusy) return;
+  TR.descBusy = true;
+  const out = (d.children || []).map((c) => ({ ...c, depth: 0, by: "" }));
+  const queue = out.filter((c) => c.family?.sessions);
+  try {
+    while (queue.length && out.length < 500) {
+      const p = queue.shift();
+      const r = await getJson("/v1/sessions", { q: `parent:${p.key}`, limit: 300 });
+      if (TR.key !== owner) return;
+      const kids = r.map((s) => ({ key: s.key, title: label(s), model: s.model, status: s.status, started_at: s.started_at, updated_at: s.updated_at, usage: s.usage, family: s.family, depth: p.depth + 1, by: p.title || short(p.key) }));
+      out.splice(out.indexOf(p) + 1, 0, ...kids);
+      queue.push(...kids.filter((c) => c.family?.sessions));
+    }
+  } catch {}
+  finally { if (TR.key === owner) TR.descBusy = false; }
+  if (TR.key !== owner) return;
+  TR.desc = out;
+  if (shownTab() === "subs") renderSubsTab();
+}
+function renderSubsTab() {
+  const box = $("#p-subs"), s = current;
+  if (!box || box.hidden || !s) return;
+  const d = TR.key === s.key ? TR.data : null;
+  if (!d) { box.innerHTML = `<div class="vempty"><p class="status-line">${TR.err ? `加载失败：${esc(TR.err)}` : "加载子代理…"}</p></div>`; return; }
+  if (!TR.desc) { TR.desc = (d.children || []).map((c) => ({ ...c, depth: 0, by: "" })); loadDesc(); }
+  const list = TR.desc, top = box.scrollTop;
+  const turnOf = new Map(d.turns.flatMap((t) => t.steps.map((x) => [x.index, t.turn])));
+  const { f } = costSplit(s);
+  box.innerHTML = `<div class="upage"><section class="card uc"><h3>子代理${f ? `<span class="sub">合计 ${moneyFine(costSplit(s).kids)}</span>` : ""}</h3>
+    ${list.length ? `<div class="shead"><span></span><span>会话</span><span>时长</span><span>费用</span><span></span></div>
+    <div class="subs" id="subs-list">${list.map((c) => {
+      const h = c.key.slice(0, c.key.indexOf(":")), at = c.depth ? `由「${esc(c.by)}」启动` : c.step != null ? `第 ${turnOf.get(c.step) ?? "?"} 轮第 ${c.step} 步启动` : "启动位置未知";
+      const span = c.started_at ? c.updated_at - c.started_at : null;
+      return `<div class="srow" data-key="${esc(c.key)}" style="--d:${c.depth}">${tile(h, "sm")}<div class="t"><b class="txt">${esc(c.title || short(c.key))}</b>
+        <span>${at}${c.status === "work" ? ' · <span class="work">工作中</span>' : ""}</span></div>
+        <span class="n">${span != null && span >= 0 ? dur(span) : "—"}</span><span class="n c" data-v="${c.usage?.cost_usd ?? ""}">${c.usage?.cost_usd != null ? moneyFine(c.usage.cost_usd) : "—"}</span>
+        <span class="acts">${c.depth ? "" : `<button class="btn sm ghost" data-act="traj-child" data-key="${esc(c.key)}">${icon("route")}在链路中看</button>`}<button class="btn sm" data-open="${esc(c.key)}">打开</button></span></div>`;
+    }).join("")}</div>${TR.descBusy ? '<p class="status-line" style="margin:8px 12px 0">加载更深层的子代理…</p>' : ""}` : '<p class="status-line">这个会话没有子代理。</p>'}</section></div>`;
+  box.scrollTop = top;
+}
+
+// ---------------------------------------------------------------- 信息 tab
+function renderInfoTab() {
+  const box = $("#p-info"), s = current;
+  if (!box || box.hidden || !s) return;
+  if (box.dataset.key !== s.key || !$("#info-kv")) {
+    box.dataset.key = s.key;
+    box.innerHTML = `<div class="upage"><div class="info-grid"><section class="card uc"><h3>会话信息</h3><dl class="kv" id="info-kv"></dl></section>
+      <section class="card uc" id="info-resume"><h3>恢复会话</h3><p class="status-line">加载恢复命令…</p></section></div></div>`;
+    loadHeadResume(s.key);
+  }
   const kv = [["Harness", `<span class="hchip">${tile(s.harness, "xs")}${esc(hname(s.harness))}</span>`],
     s.model && ["模型", `<span class="mono">${esc(s.model)}</span>`],
-    s.cwd && ["目录", `<span class="mono txt">${esc(s.cwd)}</span>`],
-    ["状态", `${s.status === "work" ? "工作中" : "空闲"}${s.status_reason ? ` · ${esc(s.status_reason)}` : ""} · ${age(s.status_since > 0 ? s.status_since : s.updated_at)} 前`],
+    s.cwd && ["目录", `<span class="mono">${esc(s.cwd)}</span>`],
+    ["状态", `${s.status === "work" ? "工作中" : "空闲"} · ${age(s.status_since > 0 ? s.status_since : s.updated_at)} 前`],
     s.pid && ["进程", `<span class="live-pid"><span class="dot work"></span>${s.pid}</span>`],
     s.parent && ["父会话", `<button class="linkbtn mono" data-open="${esc(s.parent)}">${esc(short(s.parent))}</button>`],
     ["开始", esc(stamp(s.started_at))], ["更新", esc(stamp(s.updated_at))],
-    ["Key", `<span class="mono key" data-copy-text="${esc(s.key)}" title="点击复制">${esc(short(s.key))}</span>`]].filter(Boolean);
-  $("#insp-kv").innerHTML = kv.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("");
-  const kids = [...sessions.values()].filter((x) => x.parent === s.key).sort((a, b) => b.updated_at - a.updated_at);
-  const subs = $("#insp-subs");
-  subs.hidden = !kids.length;
-  subs.innerHTML = kids.length ? `<div class="insp-h"><span>子会话</span><span class="muted">${kids.length}</span></div>` + kids.slice(0, 8).map((k) =>
-    `<button class="sub-row" data-open="${esc(k.key)}">${k.status === "work" ? '<span class="dot work pulse"></span>' : icon("branch")}<span class="t txt">${esc(label(k))}</span><span class="muted">${age(k.updated_at)}</span></button>`).join("") : "";
-}
-function ctxBar(tokens, limit, pct) {
-  if (pct == null && limit) pct = tokens * 100 / limit;
-  const cls = pct >= 90 ? "bad" : pct >= 70 ? "warn" : "";
-  return { pct, cls };
-}
-const TOK_KINDS = [["input", "输入", "var(--c1)"], ["output", "输出", "var(--c2)"], ["cache_read", "缓存读", "var(--c3)"], ["cache_write", "缓存写", "var(--c4)"]];
-function renderUsageStrip(u) {
-  const box = $("#sh-usage");
-  if (!box) return;
-  if (!u || !u.steps) { box.innerHTML = `<section class="insp-sec"><div class="insp-h"><span>用量</span></div><p class="muted sm" style="margin:0">这个会话还没有 usage 记录。</p></section>`; return; }
-  const last = T?.steps?.steps?.at(-1);
-  const pct = last && last.context_pct != null ? last.context_pct : u.context_limit ? u.last_context_tokens * 100 / u.context_limit : null;
-  const { cls } = ctxBar(u.last_context_tokens, u.context_limit, pct);
-  const total = tokensOf(u) || 1;
-  box.innerHTML = `<section class="insp-sec">
-      <div class="us-cost"><b data-v="${u.cost_usd ?? ""}">${u.cost_usd != null ? money(u.cost_usd) : "未定价"}</b><span>API 等价成本 · ${u.steps} 步</span>
-        ${u.unpriced_steps ? `<span class="warn">${u.unpriced_steps} 步未定价，不计入总额</span>` : ""}</div>
-      <div class="stackbar" aria-hidden="true">${TOK_KINDS.map(([k, , c]) => u[k] ? `<i style="flex:${u[k] / total};background:${c}"></i>` : "").join("")}</div>
-      <dl class="us-tok">${[...TOK_KINDS, ["reasoning", "思考", ""]].map(([k, n, c]) => `<div><dt>${c ? `<i class="sw" style="background:${c}"></i>` : ""}${n}</dt><dd title="${full(u[k])}" data-v="${u[k]}">${tok(u[k])}</dd></div>`).join("")}
-        <div><dt>合计</dt><dd title="${full(tokensOf(u))}">${tok(tokensOf(u))}</dd></div></dl>
-    </section>
-    <section class="insp-sec ctx"><div class="insp-h"><span>上下文<span class="muted">（最后一步）</span></span><span class="mono">${pct != null ? `${pct.toFixed(pct < 10 ? 1 : 0)}%` : ""}</span></div>
-      <div class="meter ${cls}" id="ctx-bar" data-pct="${pct ?? ""}" role="meter" aria-label="上下文窗口占用" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${pct ?? 0}"><i style="width:${Math.min(100, pct ?? 0)}%"></i></div>
-      <div class="muted sm mono">${tok(u.last_context_tokens)}${u.context_limit ? ` / ${tok(u.context_limit)}` : ""} token</div></section>`;
+    ["Key", `<span class="mono key" data-copy-text="${esc(s.key)}" title="点击复制">${esc(s.key)}</span>`],
+    s.source && ["源文件", `<span class="mono">${esc(s.source)}</span>`]].filter(Boolean);
+  $("#info-kv").innerHTML = kv.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("");
 }
 
-// ---------------------------------------------------------------- inspector
-// Docked beside the conversation on wide screens, a sheet under the header on narrower ones.
-// Opening and closing animate only transform and opacity: the grid changes once, and while the
-// panel glides the conversation keeps its wide layout with the panel floating over it
-// (.insp-moving). Every element starts from where it is on screen, so toggling mid-glide reverses
-// without a jump.
-const GLIDE = { duration: 360, easing: "cubic-bezier(.32, .72, 0, 1)", fill: "both" };
-const wideMq = matchMedia("(min-width: 1181px)"), calmMq = matchMedia("(prefers-reduced-motion: reduce)");
-let inspPref = localStorage.getItem("uniflo.insp") !== "0";
-let inspOn = wideMq.matches && inspPref;
-let glides = [], glideRun = 0;
-function syncInspToggle() {
-  const b = $("#insp-toggle");
-  if (!b) return;
-  b.classList.toggle("on", inspOn);
-  b.setAttribute("aria-expanded", String(inspOn));
-  b.title = `${inspOn ? "收起" : "展开"}详情面板 (])`;
-  b.setAttribute("aria-label", b.title);
-}
-function placeSheet() {
-  const head = $("#detail-head");
-  $("#app").style.setProperty("--insp-top", (head.hidden ? 8 : head.getBoundingClientRect().bottom + 8) + "px");
-  $("#insp-scrim").style.top = (head.hidden ? 0 : head.offsetHeight) + "px";
-}
-function settleInspector() {
-  for (const a of glides) a.cancel();
-  glides = [];
-  $("#app").classList.remove("insp-moving");
-  const th = $("#thread");
-  if (th) th.style.width = "";
-}
-function setInspector(open) {
-  if (inspOn === open) return;
-  const app = $("#app"), panel = $("#insp"), scrim = $("#insp-scrim");
-  const movers = [$("#thread"), $("#detail-head .ch-actions")].filter(Boolean);
-  const shown = (el) => getComputedStyle(el).display !== "none";
-  const firstX = movers.map((el) => el.getBoundingClientRect().left);
-  const panelX = shown(panel) ? panel.getBoundingClientRect().left : null;
-  const scrimO = shown(scrim) ? +getComputedStyle(scrim).opacity : 0;
-  settleInspector();
-  inspOn = open;
-  if (wideMq.matches) { inspPref = open; localStorage.setItem("uniflo.insp", open ? "1" : "0"); }
-  syncInspToggle();
-  app.classList.toggle("no-insp", !open);
-  const wide = wideMq.matches;
-  if (!wide) placeSheet();
-  if (calmMq.matches || narrowLayout.matches || app.hidden) return;
-  const lastX = movers.map((el) => el.getBoundingClientRect().left), th = $("#thread"), lastW = th?.getBoundingClientRect().width;
-  app.classList.add("insp-moving");
-  // keep the final line breaks for the whole glide, so nothing rewraps when it lands
-  if (wide && open && th) th.style.width = lastW + "px";
-  const baseX = movers.map((el) => el.getBoundingClientRect().left), rest = panel.getBoundingClientRect();
-  const away = wide ? app.getBoundingClientRect().right - rest.left : innerWidth - rest.left + 24;
-  const from = panelX == null ? away : panelX - rest.left;
-  const run = ++glideRun;
-  glides = [
-    panel.animate({ transform: [`translateX(${from}px)`, `translateX(${open ? 0 : away}px)`] }, GLIDE),
-    ...(wide ? movers.map((el, i) => el.animate({ transform: [`translateX(${firstX[i] - baseX[i]}px)`, `translateX(${lastX[i] - baseX[i]}px)`] }, GLIDE)) : []),
-    ...(wide ? [] : [scrim.animate({ opacity: [scrimO, open ? 1 : 0] }, { ...GLIDE, duration: 260 })]),
-  ];
-  Promise.all(glides.map((a) => a.finished)).then(() => run === glideRun && settleInspector(), () => {});
-}
-$("#app").classList.toggle("no-insp", !inspOn);
-$("#insp-scrim").onclick = () => setInspector(false);
-// crossing the breakpoint: the docked panel follows the saved preference, the sheet only opens on request
-wideMq.addEventListener("change", () => { settleInspector(); inspOn = wideMq.matches && inspPref; syncInspToggle(); $("#app").classList.toggle("no-insp", !inspOn); });
-addEventListener("resize", () => { if (inspOn && !wideMq.matches) placeSheet(); });
 const SOURCE = { harness: "自报", catalog: "目录价", approx: "近似价" };
-async function loadSteps(key) {
-  const box = $("#steps-panel");
-  if (!box) return;
-  if (!T?.steps) box.innerHTML = `<div class="status-line" style="padding:10px 12px">加载每步用量…</div>`;
-  try {
-    const d = await getJson(`/v1/sessions/${encodeURIComponent(key)}/usage`);
-    if (!T || T.key !== key) return;
-    T.steps = d;
-    if (!d.steps.length) { box.innerHTML = `<div class="status-line" style="padding:10px 12px">这个会话没有 usage 记录。</div>`; return; }
-    const atEnd = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
-    box.innerHTML = `<table class="dt" id="steps-table"><thead><tr><th>#</th><th class="l">时间</th><th>回合</th><th class="l">模型</th><th>输入</th><th>输出</th><th>缓存读</th><th>缓存写</th><th>思考</th><th>费用</th><th class="l">来源</th><th>上下文</th></tr></thead><tbody>
-      ${d.steps.map((s, i) => `<tr data-event="${esc(s.event)}"><td class="dim">${i + 1}</td><td class="l dim">${clock(s.ts)}</td><td class="dim">${s.turn}</td>
-        <td class="l mono">${esc(s.model || "—")}</td>${["input", "output", "cache_read", "cache_write", "reasoning"].map((k) => `<td data-k="${k}" data-v="${s[k]}" title="${full(s[k])}">${tok(s[k])}</td>`).join("")}
-        <td data-k="cost_usd" data-v="${s.cost_usd ?? ""}" class="${s.cost_usd == null ? "warnc" : ""}">${s.cost_usd != null ? money(s.cost_usd) : "未定价"}</td>
-        <td class="l dim">${s.cost_source ? SOURCE[s.cost_source] || s.cost_source : "—"}</td>
-        <td data-k="context_pct" data-v="${s.context_pct ?? ""}">${tok(s.context_tokens)}${s.context_pct != null ? ` · ${s.context_pct.toFixed(s.context_pct < 10 ? 1 : 0)}%<span class="mini"><i style="width:${Math.min(100, s.context_pct)}%"></i></span>` : ""}</td></tr>`).join("")}
-    </tbody></table>`;
-    if (atEnd || !box.dataset.seen) box.scrollTop = box.scrollHeight;
-    box.dataset.seen = "1";
-    if (current?.key === key) renderUsageStrip(current.usage);
-  } catch (e) {
-    box.innerHTML = `<div class="status-line bad" style="padding:10px 12px">加载每步用量失败：${esc(e.message)}</div>`;
+$("#p-traj").addEventListener("click", (e) => {
+  const t = e.target;
+  if (t.closest("[data-open]")) return; // opens the sub-agent (document handler)
+  const ta = t.closest("[data-tact]");
+  if (ta) {
+    const a = ta.dataset.tact;
+    if (a === "expand") { for (const x of TR.data?.turns || []) TR.open.add(x.turn); TR.shut.clear(); return renderTraj(); }
+    if (a === "collapse") { TR.open.clear(); return renderTraj(); }
+    if (a === "real" || a === "equal") { trajEqual = a === "equal"; localStorage.setItem("uniflo.trajEqual", trajEqual ? "1" : "0"); return renderTraj(); }
+    if (a === "prev" || a === "next") return trajMove(a === "next" ? 1 : -1);
+    if (a === "close") return trajSelect("");
   }
-}
+  const tw = t.closest("[data-tw]");
+  if (tw) return trajToggle(tw.dataset.tw);
+  const bar = t.closest(".ov [data-sel]");
+  if (bar) return trajSelect(bar.dataset.sel, true);
+  const row = t.closest("#tt tr[data-sel]");
+  if (row) return trajSelect(row.dataset.sel);
+});
+let tqTimer = null;
+$("#p-traj").addEventListener("input", (e) => {
+  if (e.target.id !== "t-q") return;
+  clearTimeout(tqTimer);
+  tqTimer = setTimeout(() => { TR.q = e.target.value; renderTraj(); }, 120);
+});
+$("#detail-head").addEventListener("keydown", (e) => {
+  if (!e.target.closest("#vtabs") || !/^Arrow(Left|Right)$|^Home$|^End$/.test(e.key)) return;
+  e.preventDefault();
+  const on = $$("#vtabs .vtab:not([hidden])");
+  const i = on.indexOf(e.target.closest(".vtab"));
+  const next = e.key === "Home" ? on[0] : e.key === "End" ? on.at(-1) : on[(i + (e.key === "ArrowRight" ? 1 : -1) + on.length) % on.length];
+  showTab(next.dataset.tab, true);
+});
 
 // ---------------------------------------------------------------- resume menu
 let menuFor = null;
@@ -2905,13 +3576,12 @@ async function loadHeadResume(key) {
     } catch { return; }
   }
   if (selected !== key) return;
-  const box = $("#insp-resume");
+  const box = $("#info-resume");
   if (!box) return;
   const cmd = (IS_WIN ? (info.command_powershell || info.command) : info.command) || "";
-  box.hidden = false;
-  if (!cmd) { box.innerHTML = `<div class="insp-h"><span>恢复会话</span></div><p class="muted sm" style="margin:0">${esc(info.reason || "这个 harness 不支持恢复")}</p>`; return; }
+  if (!cmd) { box.innerHTML = `<h3>恢复会话</h3><p class="muted sm" style="margin:0">${esc(info.reason || "这个 harness 不支持恢复")}</p>`; return; }
   const term = !READ_ONLY && (IS_MAC || IS_WIN);
-  box.innerHTML = `<div class="insp-h"><span>恢复会话</span></div>
+  box.innerHTML = `<h3>恢复会话</h3>
     <div class="cmd" title="${esc(cmd)}"><span class="mono txt">${esc(cmd)}</span><button class="icon-btn xs" data-act="copy-resume-quick" title="复制恢复命令" aria-label="复制恢复命令">${icon("copy")}</button></div>
     ${term ? `<div class="cmd-actions"><button class="btn sm" data-act="open-term" data-term="">${icon("term")}在${IS_WIN ? " Windows Terminal " : "终端"}中打开</button></div>` : ""}
     ${info.reason ? `<p class="insp-note">${esc(info.reason)}</p>` : ""}`;
@@ -3052,7 +3722,7 @@ function evHtml(e) {
       if (!e.text.trim() || e.text === "[redacted]") {
         return `<div class="think-empty">${e.partial ? '<span class="shimmer">思考中…</span>' : e.text ? "已思考 · 内容已加密" : "已思考"}</div>`;
       }
-      return `<details class="think"${open(e.id)} data-open-id="${esc(e.id)}"><summary>${icon("chev", "chev")}<span class="lbl${e.partial ? " shimmer" : ""}">${e.partial ? "思考中…" : "思考过程"}</span><span class="cnt">${e.text.length} 字</span></summary><div class="think-body txt">${esc(e.text)}</div></details>`;
+      return `<details class="think"${open(e.id)} data-open-id="${esc(e.id)}"><summary>${icon("chev", "chev")}<span class="lbl${e.partial ? " shimmer" : ""}">${e.partial ? "思考中…" : "思考过程"}</span></summary><div class="think-body txt">${esc(e.text)}</div></details>`;
     case "tool_call": {
       const res = T?.results.get(e.call_id);
       const st = toolState(e, res);
@@ -3066,7 +3736,7 @@ function evHtml(e) {
       return `<details class="tool ${e.is_error ? "error" : "ok"}"${open(e.id)} data-open-id="${esc(e.id)}"><summary><span class="ti">${icon("back")}</span><span class="tn">${esc(e.name || "工具结果")}</span><span class="ta txt">${esc((e.output || "").split("\n")[0])}</span>${stateIcon(e.is_error ? "error" : "ok")}${icon("chev", "chev")}</summary>
         <div class="tool-body"><div class="blk${e.is_error ? " err" : ""}"><div class="blk-h">输出 · ${esc(e.call_id)}${cutMark(e)}</div><pre class="txt">${esc(e.output || "（无输出）")}</pre></div></div></details>`;
     case "turn_start": return "";
-    case "turn_end": return `<span>${clock(e.ts)}${e.reason ? " · " + esc(e.reason) : ""}</span>`;
+    case "turn_end": { const r = turnReason(e.reason); return `<span>${clock(e.ts)}${r ? ` · <b class="warn">${r}</b>` : ""}</span>`; }
     case "usage": return `in ${fmtN(e.input)} · out ${fmtN(e.output)}${e.cache_read || e.cache_write ? ` · cache ${fmtN(e.cache_read)}/${fmtN(e.cache_write)}` : ""}${e.reasoning ? ` · think ${fmtN(e.reasoning)}` : ""}`;
     case "system": {
       const warn = /error|fail|abort/i.test(e.subtype);
@@ -3109,14 +3779,17 @@ function place(e, live, anchor) {
   if (live) node.classList.add("enter");
   if (e.kind === "turn_end") turnTotal(node);
 }
-// Token usage of a turn, summed from the usage events since the previous divider.
+const TURN_REASON = [[/interrupt/i, "已中断"], [/max_tokens|length/i, "输出达上限"], [/abort|cancel/i, "已取消"], [/refus/i, "已拒绝"], [/error|fail/i, "出错"]];
+const turnReason = (r) => (r && TURN_REASON.find(([re]) => re.test(r))?.[1]) || "";
+// How long the turn took, from its opening prompt (or turn start) to the divider; unknown when that start is not loaded.
 function turnTotal(node) {
-  const sum = { input: 0, output: 0, cache_read: 0, n: 0 };
+  const end = T.evs.get(node.dataset.id);
   for (let n = node.previousElementSibling; n && !n.classList.contains("k-turn_end"); n = n.previousElementSibling) {
-    const u = n.dataset.kind === "usage" && T.evs.get(n.dataset.id);
-    if (u) { sum.input += u.input || 0; sum.output += u.output || 0; sum.cache_read += u.cache_read || 0; sum.n++; }
+    if (n.dataset.kind !== "turn_start" && !(n.dataset.kind === "user_message" && !n.classList.contains("syn"))) continue;
+    const t0 = T.evs.get(n.dataset.id)?.ts;
+    if (t0 && end?.ts >= t0) node.querySelector("span").insertAdjacentText("afterbegin", `用时 ${dur(end.ts - t0)} · `);
+    return;
   }
-  if (sum.n) node.querySelector("span").insertAdjacentText("beforeend", ` · in ${fmtN(sum.input)} · out ${fmtN(sum.output)}${sum.cache_read ? ` · cache ${fmtN(sum.cache_read)}` : ""}`);
 }
 function drop(id) {
   const n = T.nodes.get(id);
@@ -3136,6 +3809,9 @@ async function select(key, reveal = true, at = null) {
   }
   selected = key;
   renderList();
+  if (at && vtab !== "chat") { vtab = "chat"; setp({ tab: null }); }
+  if ($("#timeline").hidden) chatPin = { bottom: true, top: 0 };
+  if (TR.key !== key && needsTraj(shownTab())) { resetTraj(key); paintTab(); }
   setp({ select: key, at });
   T = { key, at, evs: new Map(), nodes: new Map(), calls: new Map(), results: new Map(), open: T?.key === key ? T.open : new Set(), loading: true, pending: [], nextBefore: null, window: false };
   const mine = T;
@@ -3814,6 +4490,13 @@ function ftsEta(done, total) {
   if (done <= d0 || now - t0 < 1500) return "";
   return fmtEta((total - done) / ((done - d0) / ((now - t0) / 1000)));
 }
+// Processes other than the daemon writing the index (/v1/stats fts.foreign_writers): usually an old
+// uniflo started before an upgrade and still running inside some harness session.
+function foreignNote(st) {
+  const fw = st?.foreign_writers || [];
+  return fw.length ? `<div class="notice warn" id="fts-foreign">${icoInfo}<div><b>另有 ${fw.length} 个进程在写全文索引</b>：${fw.map((p) => `<code>${p.pid}</code> ${esc(p.command || "")}`).join("，")}。
+    它们多半是升级前启动、还在运行的旧版 uniflo（例如某个 harness 会话里的 <code>uniflo mcp</code>），会和守护进程互相覆盖索引。重启对应的 harness 会话或结束这个进程后，索引会在一轮对账内恢复完整。</div></div>` : "";
+}
 function renderFtsIndex(st) {
   HOME.st = st;
   const box = $("#s-index");
@@ -3833,7 +4516,7 @@ function renderFtsIndex(st) {
     const { done = 0, total = 0 } = st.progress || {};
     const eta = total ? ftsEta(done, total) : "";
     const pct = total ? Math.min(100, Math.round(done / total * 100)) : 0;
-    box.innerHTML = `<div class="notice">${icoInfo}<div class="grow"><b>正在建立全文索引</b>：${done} / ${total} 个会话${total ? `（${pct}%）` : ""} · 剩余时间${total ? (eta || "估算中") : "估算中"}。建好之前能搜，但结果可能不全。
+    box.innerHTML = foreignNote(st) + `<div class="notice">${icoInfo}<div class="grow"><b>正在建立全文索引</b>：${done} / ${total} 个会话${total ? `（${pct}%）` : ""} · 剩余时间${total ? (eta || "估算中") : "估算中"}。建好之前能搜，但结果可能不全。
       <div class="pbar" role="progressbar" aria-label="索引进度" aria-valuemin="0" aria-valuemax="${total}" aria-valuenow="${done}"><i style="width:${pct}%"></i></div></div></div>`;
     renderHome();
     return;
@@ -3841,9 +4524,9 @@ function renderFtsIndex(st) {
   const bad = st.errors > 0 && st.last_error;
   const bits = [`全文索引已就绪 · ${fmtBytes(st.bytes || 0)}`];
   if (st.warming) bits.push("正在合并预热，个别词第一次搜索可能稍慢");
-  box.innerHTML = bad
+  box.innerHTML = foreignNote(st) + (bad
     ? `<div class="notice warn">${icoInfo}<div><b>索引遇到 ${st.errors} 个错误</b>，最近一次：<code>${esc(st.last_error)}</code>。其余内容仍可检索。</div></div>`
-    : `<div class="status-line">${esc(bits.join(" · "))}</div>`;
+    : `<div class="status-line">${esc(bits.join(" · "))}</div>`);
   if (wasBuilding && $("#s-q").value.trim()) runFts();
   renderHome();
 }
@@ -4437,6 +5120,7 @@ const ENDPOINTS = [
     params: [{ n: "group_by", t: "enum", o: ["", "harness", "model", "project", "cwd", "dir", "day", "hour", "weekday", "session", "weekday_hour"], ph: "harness" }, { n: "q", ph: "h:claude in:~/work", h: "会话搜索语法；其中的 since/before 作用于事件时间" }, { n: "since", ph: "7d", h: "30m、2h、7d、YYYY-MM-DD 或 epoch 毫秒" }, { n: "until", ph: "2026-10-01" }, { n: "tz", ph: "local", h: "local、UTC、+08:00 或 IANA 名" }, { n: "under", ph: "~/work", h: "只统计 cwd 在这个目录下的会话" }, { n: "depth", t: "num", ph: "1", h: "group_by=dir 的下钻层数" }, { n: "limit", t: "num", h: "只保留前 N 行，其余折叠成 (other)" }, { n: "sort", t: "enum", o: ["", "cost", "tokens", "steps", "sessions", "prompts", "key"] }, { n: "model", h: "只统计这个模型，值取 group_by=model 的 key" }],
     rs: (v) => v.sort || v.model ? null : `client.usage(&UsageQuery { ${rfields(v, { group_by: "s", q: "s", since: "s", until: "s", under: "s", depth: "n", limit: "n", tz: "s" })}..Default::default() })?` },
   { id: "session-usage", g: "usage", m: "GET", p: "/v1/sessions/{key}/usage", t: "单会话用量明细", d: "每一步的 token 与费用，以及按回合汇总。", ret: "SessionUsageDetail", params: [A_KEY], rs: (v) => `client.session_usage(${rstr(v.key)})?` },
+  { id: "session-trajectory", g: "usage", m: "GET", p: "/v1/sessions/{key}/trajectory", t: "会话链路", d: "回合 → 步 → 记录的调用链和直接子会话；每步数值与用量明细一致。", ret: "SessionTrajectory", params: [A_KEY], rs: (v) => `client.session_trajectory(${rstr(v.key)})?` },
   { id: "models", g: "usage", m: "GET", p: "/v1/models", t: "模型与定价", d: "会话里出现过的模型、价格目录匹配结果（exact / approx / none）、价格段、步数与费用。", ret: "ModelUsage[]", params: [{ n: "q", ph: "h:claude", h: "会话搜索语法" }], rs: (v) => (v.q ? null : "client.models()?") },
   { id: "pricing", g: "usage", m: "GET", p: "/v1/pricing", t: "价格目录状态", d: "价格来源、最近一次同步、是否过期、模型数、覆盖项与待确认的价格变化。", ret: "PricingStatus" },
   { id: "memory", g: "agent", m: "GET", p: "/v1/memory", t: "记忆与指令文件", d: "agent 的记忆与指令文件（AGENTS.md、CLAUDE.md…）列表。", ret: "MemoryFile[]", params: [{ n: "cwd", ph: "~/work/project", h: "绝对路径，可用 ~；省略时只列全局文件" }], rs: (v) => `client.memory(${v.cwd ? `Some(${rstr(v.cwd)})` : "None"})?` },
@@ -4917,7 +5601,7 @@ $("#open-palette").title = `命令面板 (${IS_MAC ? "⌘K" : "Ctrl+K"})`;
 // ---------------------------------------------------------------- interaction
 document.addEventListener("click", (e) => {
   const t = e.target;
-  if (!t.closest("#menu") && !t.closest("#resume-btn")) closeMenu();
+  if (!t.closest("#menu") && !t.closest("#resume-btn, #filter-btn")) closeMenu();
   const inPicker = e.composedPath().some((n) => n.classList?.contains("air-datepicker") || n.id === "u-dates");
   if (!inPicker && !t.closest('#u-range [data-range="custom"]')) closeDatePicker();
   if (t.closest("#u-dates")) {
@@ -4935,10 +5619,19 @@ document.addEventListener("click", (e) => {
   if (pal) return runPalette(Number(pal.dataset.i));
   if (t.closest("#palette") && !t.closest(".palette-box")) return closePalette();
   if (t.closest("#show-list")) return showList();
-  if (t.closest("#insp-toggle")) return setInspector(!inspOn);
-  const it = t.closest('#insp [data-act="open-term"]');
+  const it = t.closest('#info-resume [data-act="open-term"]');
   if (it) return openTerminal(it.dataset.term);
-  const chip = t.closest(".chip[data-tok]");
+  const vt = t.closest("#vtabs [data-tab]");
+  if (vt) return showTab(vt.dataset.tab);
+  const loc = t.closest('[data-act="traj-locate"]');
+  if (loc) { showTab("chat"); return loc.dataset.key === selected ? select(selected, false, loc.dataset.ev) : openSession(loc.dataset.key, loc.dataset.ev); }
+  const go = t.closest("[data-goto]") || t.closest('[data-act="traj-child"]');
+  if (go) { showTab("traj"); const id = go.dataset.goto || `a:${go.dataset.key}`; return TR.data ? trajSelect(id, true) : (TR.pendingSel = id); }
+  if (t.closest("#filter-btn")) {
+    const fb = $("#filter-btn");
+    return menuFor === fb ? closeMenu() : openMenu(fb, filterMenu(new Set($("#q").value.split(/\s+/))));
+  }
+  const chip = t.closest("#menu [data-tok]");
   if (chip) {
     const tok = chip.dataset.tok;
     let toks = $("#q").value.split(/\s+/).filter(Boolean);
@@ -4973,14 +5666,6 @@ document.addEventListener("click", (e) => {
   const key = t.closest("[data-copy-text]");
   if (key) { navigator.clipboard?.writeText(key.dataset.copyText); toast("已复制会话 key"); return; }
   if (t.closest("#notify")) return toggleNotify();
-  if (t.closest("#steps-toggle")) {
-    const b = t.closest("#steps-toggle"), on = b.getAttribute("aria-expanded") !== "true";
-    b.setAttribute("aria-expanded", String(on));
-    $("#steps-panel").hidden = !on;
-    setp({ steps: on });
-    if (on) loadSteps(selected);
-    return;
-  }
   if (t.closest("#resume-btn")) return openResume(t.closest("#resume-btn"));
   if (t.closest('[data-act="copy-resume-quick"]')) {
     const info = resumeCache.get(selected);
@@ -5163,7 +5848,6 @@ document.addEventListener("keydown", (e) => {
     closeMenu(); hideTip(); closeDatePicker();
     if ($("#diag").classList.contains("in")) return closeDiag();
     if (!$("#i-pop").hidden) return closePop(true);
-    if (view === "sessions" && inspOn && !wideMq.matches && !typing) return setInspector(false);
   }
   if (typing) {
     if (e.key === "Escape") e.target.blur();
@@ -5176,7 +5860,14 @@ document.addEventListener("keydown", (e) => {
   }
   if (view === "insights" && !$("#i-pop").hidden && /^Arrow/.test(e.key)) { e.preventDefault(); return movePop(e.key); }
   if (view !== "sessions") return;
-  if (e.key === "]" && !e.metaKey && !e.ctrlKey && !e.altKey) return setInspector(!inspOn);
+  const plain = !e.metaKey && !e.ctrlKey && !e.altKey;
+  if ((e.key === "[" || e.key === "]") && plain && current && !$("#detail-head").hidden) return cycleTab(e.key === "]" ? 1 : -1);
+  // 链路 with a record open: j/k walk the records, Esc closes the record pane
+  if (shownTab() === "traj" && TR.sel && plain && !$("#p-traj").hidden) {
+    if (e.key === "Escape") { e.preventDefault(); return trajSelect(""); }
+    const d = e.key === "j" || e.key === "ArrowDown" ? 1 : e.key === "k" || e.key === "ArrowUp" ? -1 : 0;
+    if (d) { e.preventDefault(); return trajMove(d); }
+  }
   if (e.key === "Escape" && narrowLayout.matches && $("#app").classList.contains("thread-open")) {
     showList();
     return;
@@ -5202,6 +5893,7 @@ window.addEventListener("resize", () => {
   resizeTimer = setTimeout(() => {
     if (view === "usage" && U.data) drawStack();
     if (view === "insights" && IN.data) renderInsights();
+    if (view === "sessions" && shownTab() === "traj") renderTraj();
   }, 150);
 });
 window.addEventListener("scroll", (e) => { if (e.target.closest?.("#menu")) return; closeMenu(); hideTip(); placePop(); }, true);
