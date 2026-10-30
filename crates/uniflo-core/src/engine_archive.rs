@@ -159,7 +159,7 @@ impl Engine {
             ledger.apply(r, &mut names, &p);
         }
         let models: HashMap<&str, Arc<str>> =
-            ledger.steps.iter().filter_map(|s| Some((&*s.event, s.model.clone()?))).collect();
+            ledger.steps.iter().filter_map(|s| Some((ledger.event_id(s), s.model.clone()?))).collect();
         let mut events = crate::jsonl::dedupe_events(recs);
         for e in &mut events {
             if let Body::Usage(u) = &mut e.body

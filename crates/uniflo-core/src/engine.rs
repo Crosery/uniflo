@@ -76,6 +76,8 @@ impl Default for EngineOptions {
 }
 
 const UNKNOWN_CAP: usize = 512;
+/// Freed heap goes back to the OS at most this often while sources keep changing.
+const TRIM_EVERY: Duration = Duration::from_secs(5 * 60);
 const PREVIEW_CHARS: usize = 160;
 const TITLE_CHARS: usize = 200;
 
@@ -368,6 +370,8 @@ pub struct Engine {
     usage_settled: AtomicBool,
     usage_tx: Mutex<Option<mpsc::UnboundedSender<usage_glue::UsageMsg>>>,
     archive: Option<Arc<ArchiveStore>>,
+    /// Sources the hot poll checks, chosen once a second by [`Engine::tick`].
+    hot: Mutex<Vec<PathBuf>>,
 }
 
 impl Engine {
@@ -397,6 +401,7 @@ impl Engine {
             usage_settled: AtomicBool::new(false),
             usage_tx: Mutex::new(None),
             archive,
+            hot: Mutex::new(Vec::new()),
         })
     }
 
@@ -656,11 +661,25 @@ impl Engine {
     fn tick(&self, now: i64) -> Vec<Pending> {
         let stale = self.windows();
         let mut st = self.state.write().unwrap();
-        st.sessions
+        let pending = st
+            .sessions
             .values_mut()
             .filter(|e| e.session.status == Status::Work || e.tracker.status == Status::Work)
             .filter_map(|e| e.refresh(now, stale).then(|| Pending::Session(e.session.clone())))
-            .collect()
+            .collect();
+        // Sources likely to change soon: working sessions and anything touched in the last
+        // minute. An idle session whose process merely stays open is left to the watcher: agents
+        // keep dozens of those, and polling each five times a second cost more than the rest.
+        let mut hot: Vec<PathBuf> = st
+            .sessions
+            .values()
+            .filter(|e| e.session.status == Status::Work || now - e.session.updated_at < 60_000)
+            .map(|e| e.src.clone())
+            .collect();
+        hot.sort();
+        hot.dedup();
+        *self.hot.lock().unwrap() = hot;
+        pending
     }
 
     // ---------------------------------------------------------------- index
@@ -705,8 +724,10 @@ impl Engine {
 
         let errors = AtomicUsize::new(0);
         let next = AtomicUsize::new(0);
-        let (rtx, rrx) = std::sync::mpsc::channel::<(usize, PathBuf, ReadOutput)>();
         let threads = self.opts.threads.clamp(1, 64);
+        // Bounded: the readers outpace the one thread applying their output, and an unbounded
+        // queue would hold every parsed file at once (a peak the heap never gives back whole).
+        let (rtx, rrx) = std::sync::mpsc::sync_channel::<(usize, PathBuf, ReadOutput)>(threads);
         std::thread::scope(|s| {
             for _ in 0..threads {
                 let rtx = rtx.clone();
@@ -829,6 +850,9 @@ impl Engine {
     /// Run forever: filesystem watch + hot polling + live probes + staleness ticks.
     /// Call [`Engine::index`] first.
     pub async fn run(self: Arc<Self>) -> Result<()> {
+        // What the initial index read and parsed is garbage now.
+        let _ = tokio::task::spawn_blocking(crate::util::trim_heap).await;
+        let mut trimmed = Instant::now();
         let (tx, mut rx) = mpsc::unbounded_channel::<Msg>();
         let _watcher = self.start_watcher(tx.clone());
         // Close the window between `index()` and the watcher becoming active.
@@ -899,7 +923,17 @@ impl Engine {
                 _ = save.tick() => {
                     if self.dirty.load(Ordering::Relaxed) {
                         let me = self.clone();
-                        let _ = tokio::task::spawn_blocking(move || me.save_cache()).await;
+                        let trim = trimmed.elapsed() >= TRIM_EVERY;
+                        let _ = tokio::task::spawn_blocking(move || {
+                            let _ = me.save_cache();
+                            if trim {
+                                crate::util::trim_heap();
+                            }
+                        })
+                        .await;
+                        if trim {
+                            trimmed = Instant::now();
+                        }
                     }
                 }
             }
@@ -951,20 +985,13 @@ impl Engine {
         }
     }
 
-    /// Sources likely to change soon: working sessions and anything touched in the last minute.
+    /// The hot sources (see [`Engine::tick`]) that moved past their cursor.
     fn hot_sources(&self) -> Vec<PathBuf> {
-        let now = now_ms();
+        let hot = self.hot.lock().unwrap().clone();
         let st = self.state.read().unwrap();
-        let mut out = Vec::new();
-        for (p, s) in &st.sources {
-            let hot = s.keys.iter().filter_map(|k| st.sessions.get(k)).any(|e| {
-                e.session.status == Status::Work || e.live_pid.is_some() || now - e.session.updated_at < 60_000
-            });
-            if hot && self.adapters[s.adapter].changed(p, &s.cursor) {
-                out.push(p.clone());
-            }
-        }
-        out
+        hot.into_iter()
+            .filter(|p| st.sources.get(p).is_some_and(|s| self.adapters[s.adapter].changed(p, &s.cursor)))
+            .collect()
     }
 
     async fn rescan(self: Arc<Self>) -> Vec<PathBuf> {
@@ -1045,7 +1072,13 @@ impl Engine {
 
     /// Probe liveness off the loop; the result comes back as [`Msg::Probed`].
     fn spawn_probe(self: &Arc<Self>, adapter: usize, tx: mpsc::UnboundedSender<Msg>) {
-        if self.probing[adapter].swap(true, Ordering::AcqRel) {
+        // A probe only marks this adapter's sessions (see `apply_live`): with none, it would run
+        // `ps` / `lsof` for nothing, every second, for each harness the user has never used.
+        let has_sessions = {
+            let st = self.state.read().unwrap();
+            st.sessions.values().any(|e| e.adapter == adapter && e.archive.is_none())
+        };
+        if !has_sessions || self.probing[adapter].swap(true, Ordering::AcqRel) {
             return;
         }
         let me = self.clone();

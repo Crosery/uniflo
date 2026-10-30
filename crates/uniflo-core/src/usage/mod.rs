@@ -43,7 +43,8 @@ pub fn id_hash(s: &str) -> u64 {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Step {
-    pub event: Box<str>,
+    /// Where the event id sits in the owning ledger's id arena; read it with [`Ledger::event_id`].
+    pub(crate) event: (u32, u32),
     pub ts: i64,
     pub turn: u32,
     pub model: Option<Arc<str>>,
@@ -120,6 +121,9 @@ enum Slot {
 #[derive(Debug, Clone, Default)]
 pub struct Ledger {
     pub steps: Vec<Step>,
+    /// Event ids of `steps`, back to back: one allocation per ledger instead of one per step,
+    /// which would pin heap pages long after a build's temporary data is freed.
+    events: String,
     pub prompts: Vec<Prompt>,
     ids: HashMap<u64, Slot>,
     /// Model of the latest assistant message / metadata: fills steps that carry none.
@@ -196,7 +200,7 @@ impl Ledger {
                 let id = id_hash(&e.id);
                 let model = u.model.as_deref().filter(|s| !s.is_empty()).map(|m| names.get(m));
                 let mut step = Step {
-                    event: e.id.as_str().into(),
+                    event: (0, 0),
                     ts: e.ts,
                     turn: self.turn,
                     model: model.or_else(|| self.model.clone()),
@@ -213,6 +217,7 @@ impl Ledger {
                 match self.ids.get(&id) {
                     Some(Slot::Step(i)) => {
                         let old = &mut self.steps[*i as usize];
+                        step.event = old.event;
                         step.turn = old.turn;
                         if u.model.is_none() {
                             step.model = old.model.clone().or(step.model);
@@ -221,6 +226,8 @@ impl Ledger {
                         *old = step;
                     }
                     _ => {
+                        step.event = (self.events.len() as u32, e.id.len() as u32);
+                        self.events.push_str(&e.id);
                         self.ids.insert(id, Slot::Step(self.steps.len() as u32));
                         self.steps.push(step);
                     }
@@ -284,7 +291,7 @@ impl Ledger {
                     let ctx = s.context_tokens();
                     let (cost_parts, price) = s.breakdown(p).unzip();
                     StepUsage {
-                        event: s.event.to_string(),
+                        event: self.event_id(s).to_owned(),
                         ts: s.ts,
                         turn: s.turn,
                         model: s.model.as_deref().map(str::to_owned),
@@ -344,6 +351,7 @@ impl Ledger {
     /// Rebuild from persisted parts (see [`store`]).
     pub(crate) fn restore(
         steps: Vec<Step>,
+        events: String,
         prompts: Vec<Prompt>,
         seen: impl IntoIterator<Item = u64>,
         model: Option<Arc<str>>,
@@ -351,10 +359,30 @@ impl Ledger {
         open: bool,
     ) -> Ledger {
         let mut ids: HashMap<u64, Slot> = seen.into_iter().map(|k| (k, Slot::Seen)).collect();
-        for (i, s) in steps.iter().enumerate() {
-            ids.insert(id_hash(&s.event), Slot::Step(i as u32));
+        let mut l = Ledger { steps, events, prompts, ids: HashMap::new(), model, turn, open, priced_at: 0 };
+        for (i, s) in l.steps.iter().enumerate() {
+            ids.insert(id_hash(l.event_id(s)), Slot::Step(i as u32));
         }
-        Ledger { steps, prompts, ids, model, turn, open, priced_at: 0 }
+        l.ids = ids;
+        l.shrink();
+        l
+    }
+
+    /// The event id of `s`, a step of this ledger.
+    pub fn event_id(&self, s: &Step) -> &str {
+        let (at, len) = (s.event.0 as usize, s.event.1 as usize);
+        self.events.get(at..at + len).unwrap_or_default()
+    }
+
+    /// Drop the spare capacity growing by doubling left behind; ledgers live as long as the
+    /// daemon, and a full build leaves a quarter of their memory unused on average.
+    pub fn shrink(&mut self) {
+        refit(&mut self.steps);
+        if self.events.capacity() > self.events.len() {
+            self.events = self.events.as_str().to_owned();
+        }
+        refit(&mut self.prompts);
+        self.ids.shrink_to_fit();
     }
 
     pub(crate) fn is_open(&self) -> bool {
@@ -369,7 +397,13 @@ impl Ledger {
         let mut out = Ledger::default();
         let mut base = 0;
         for l in parts {
-            out.steps.extend(l.steps.iter().map(|s| Step { turn: s.turn + base, ..s.clone() }));
+            let at = out.events.len() as u32;
+            out.events.push_str(&l.events);
+            out.steps.extend(l.steps.iter().map(|s| Step {
+                event: (s.event.0 + at, s.event.1),
+                turn: s.turn + base,
+                ..s.clone()
+            }));
             out.prompts.extend(l.prompts.iter().map(|p| Prompt { turn: p.turn + base, ..*p }));
             base += l.turn;
             out.priced_at = out.priced_at.max(l.priced_at);
@@ -378,6 +412,16 @@ impl Ledger {
         out.prompts.sort_by_key(|p| p.ts);
         out.turn = base;
         out
+    }
+}
+
+/// Moves `v` into an allocation of exactly its length. `shrink_to_fit` goes through `realloc`,
+/// which macOS answers by keeping the whole block unless it would shrink by more than half.
+fn refit<T>(v: &mut Vec<T>) {
+    if v.capacity() > v.len() {
+        let mut exact = Vec::with_capacity(v.len());
+        exact.append(v);
+        *v = exact;
     }
 }
 
@@ -584,6 +628,7 @@ mod tests {
         assert_eq!(l.steps.iter().map(|s| s.turn).collect::<Vec<_>>(), [1, 1, 2]);
         assert_eq!(l.steps[1].input, 60);
         let d = l.detail("t:1", &p);
+        assert_eq!(d.steps.iter().map(|s| s.event.as_str()).collect::<Vec<_>>(), ["s1", "s2", "s3"]);
         assert_eq!(d.turns.len(), 2);
         assert_eq!(d.turns[0].steps, 2);
         assert_eq!(d.turns[0].input, 160);
@@ -702,6 +747,44 @@ mod tests {
         assert_eq!(ix.view("t:1").unwrap().steps.len(), 1);
         ix.remove_source(Path::new("/b"));
         assert!(ix.view("t:1").is_none());
+    }
+
+    #[test]
+    fn combined_ledgers_keep_each_step_event_id() {
+        let p = Pricing::new(None).current();
+        let mut n = Names::default();
+        let build = |recs: &[Record], n: &mut Names| {
+            let mut l = Ledger::default();
+            for r in recs {
+                l.apply(r, n, &p);
+            }
+            l
+        };
+        let a = build(&[ev("a1", 1, usage(1, 0, None)), ev("a2", 3, usage(2, 0, None))], &mut n);
+        let b = build(&[ev("b-long-id", 2, usage(3, 0, None))], &mut n);
+        let c = Ledger::combine(&[&b, &a]);
+        let ids: Vec<_> = c.steps.iter().map(|s| (c.event_id(s), s.input)).collect();
+        assert_eq!(ids, [("a1", 1), ("b-long-id", 3), ("a2", 2)]);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn shrink_gives_spare_capacity_back_to_malloc() {
+        unsafe extern "C" {
+            fn malloc_size(p: *const std::ffi::c_void) -> usize;
+        }
+        // SAFETY: the pointer is the live heap block of a non-empty vector.
+        let block = |v: &Vec<Step>| unsafe { malloc_size(v.as_ptr().cast()) };
+        let p = Pricing::new(None).current();
+        let mut n = Names::default();
+        let mut l = Ledger::default();
+        for i in 0..80 {
+            l.apply(&ev(&format!("s{i}"), i, usage(1, 0, None)), &mut n, &p);
+        }
+        let before = block(&l.steps);
+        l.shrink();
+        assert!(block(&l.steps) < before * 3 / 4, "{} -> {}", before, block(&l.steps));
+        assert_eq!((l.steps.len(), l.event_id(&l.steps[79])), (80, "s79"));
     }
 
     #[test]

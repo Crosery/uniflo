@@ -248,6 +248,7 @@ impl Engine {
         keys.sort();
         for l in ledgers.values_mut() {
             l.priced_at = generation;
+            l.shrink();
         }
         {
             let st = self.state.read().unwrap();
@@ -483,8 +484,12 @@ impl Engine {
         let mut was_ready = self.usage_progress().ready;
         let mut tick = tokio::time::interval(Duration::from_secs(1));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // Progress only moves through this loop's own messages; counting it costs a pass over
+        // every source, so it is not recounted on quiet ticks.
+        let mut moved = false;
         loop {
             if !pending.is_empty() {
+                moved = true;
                 let mut seen = HashSet::new();
                 let batch: Vec<PathBuf> = pending.drain(..).filter(|p| seen.insert(p.clone())).collect();
                 let me = self.clone();
@@ -501,7 +506,10 @@ impl Engine {
             tokio::select! {
                 m = rx.recv(), if self.opts.usage => match m {
                     Some(UsageMsg::Changed(p)) => pending.push(p),
-                    Some(UsageMsg::Removed(p)) => self.usage_drop(&p),
+                    Some(UsageMsg::Removed(p)) => {
+                        self.usage_drop(&p);
+                        moved = true;
+                    }
                     None => {}
                 },
                 Some(p) = built_rx.recv() => pending.push(p),
@@ -532,12 +540,16 @@ impl Engine {
                             flag.store(false, Ordering::Release);
                         });
                     }
-                    let ready = self.usage_progress().ready;
+                    let ready = if std::mem::take(&mut moved) { self.usage_progress().ready } else { was_ready };
                     let dirty = self.usage.read().unwrap().dirty;
                     if dirty && ((ready && !was_ready) || saved.elapsed() >= SAVE_EVERY) {
                         saved = Instant::now();
                         let me = self.clone();
-                        let _ = tokio::task::spawn_blocking(move || me.save_usage_cache()).await;
+                        let _ = tokio::task::spawn_blocking(move || {
+                            let _ = me.save_usage_cache();
+                            crate::util::trim_heap();
+                        })
+                        .await;
                     }
                     was_ready = ready;
                 }

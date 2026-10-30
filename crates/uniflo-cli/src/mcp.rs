@@ -32,11 +32,36 @@ const INVALID_REQUEST: i64 = -32600;
 const METHOD_NOT_FOUND: i64 = -32601;
 const INVALID_PARAMS: i64 = -32602;
 
-pub fn run(cli: &Cli) -> Result<()> {
+/// `idle`: a fallback index unused this long is dropped. Agents keep their MCP servers for days,
+/// and the index holds every session (and the usage ledgers, the full-text reader) the daemon
+/// also has; rebuilding it takes seconds, so the window spans an agent's pauses between calls.
+pub fn run(cli: &Cli, idle: Duration) -> Result<()> {
     let mut server = Server::new(cli.url.clone(), cli.token.clone(), cli.local);
     let mut out = std::io::stdout().lock();
-    for line in std::io::stdin().lock().lines() {
-        let line = line?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in std::io::stdin().lock().lines() {
+            if tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    loop {
+        use std::sync::mpsc::RecvTimeoutError;
+        // Only a fallback index has anything to release; otherwise just wait for the next request.
+        let next = if server.holds_fallback() {
+            rx.recv_timeout(idle)
+        } else {
+            rx.recv().map_err(|_| RecvTimeoutError::Disconnected)
+        };
+        let line = match next {
+            Ok(line) => line?,
+            Err(RecvTimeoutError::Timeout) => {
+                server.release_idle();
+                continue;
+            }
+            Err(RecvTimeoutError::Disconnected) => break,
+        };
         if line.trim().is_empty() {
             continue;
         }
@@ -211,6 +236,20 @@ impl Server {
             self.local = Some(Local { rt, engine, router, usage_ready: false, fts: false });
         }
         self.local.as_mut().ok_or_else(|| anyhow!("no local index"))
+    }
+
+    /// No request for the idle window: drop the fallback index and give its memory back. The next
+    /// request asks the daemon first and rebuilds the index (from the cache) only without one.
+    fn release_idle(&mut self) {
+        if self.holds_fallback() {
+            self.local = None;
+            self.noted = false;
+            uniflo_core::util::trim_heap();
+        }
+    }
+
+    fn holds_fallback(&self) -> bool {
+        !self.local_only && self.local.is_some()
     }
 
     /// In-process mode: build the usage ledgers before the first usage answer.
@@ -1328,6 +1367,31 @@ mod tests {
 
     fn call(s: &mut Server, line: &str) -> Value {
         s.handle_line(line).expect("a reply")
+    }
+
+    fn empty_local() -> (Local, std::sync::Weak<Engine>) {
+        let opts = EngineOptions { cache_path: None, data_dir: None, usage: false, ..Default::default() };
+        let engine = Engine::new(Vec::new(), opts);
+        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let router = uniflo_gateway::router(engine.clone(), GuardOptions::default());
+        let weak = Arc::downgrade(&engine);
+        (Local { rt, engine, router, usage_ready: false, fts: false }, weak)
+    }
+
+    #[test]
+    fn idle_fallback_index_is_released() {
+        let mut s = server();
+        let (local, engine) = empty_local();
+        s.local = Some(local);
+        s.noted = true;
+        s.release_idle();
+        assert!(s.local.is_none() && !s.noted);
+        assert!(engine.upgrade().is_none(), "nothing else keeps the engine alive");
+
+        let mut s = Server::new("http://127.0.0.1:9".into(), None, true);
+        s.local = Some(empty_local().0);
+        s.release_idle();
+        assert!(s.local.is_some(), "--local keeps its index");
     }
 
     #[test]

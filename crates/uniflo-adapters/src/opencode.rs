@@ -18,6 +18,7 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use uniflo_core::adapter::Batch;
+use uniflo_core::procs::ProcCache;
 #[cfg(target_os = "windows")]
 use uniflo_core::util::env_dir;
 use uniflo_core::util::{file_mtime_ms, home, now_ms, str_of, string_of};
@@ -28,6 +29,7 @@ use uniflo_schema::{Body, Event, Usage, session_key};
 const HOT_MS: i64 = 7 * 86_400_000;
 const SUMMARY_PARTS: i64 = 40;
 const OPEN_CAP: usize = 512;
+const PROC_TTL: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// OpenCode-family data dirs. The CLI keeps XDG layout (`~/.local/share`) even on
 /// Windows, but a LOCALAPPDATA install is possible too: prefer whichever actually
@@ -497,13 +499,17 @@ impl Adapter for OpenCode {
         if !self.db.is_file() {
             return None;
         }
-        let pred: fn(&str) -> bool = match self.info.id {
-            "kilo" => is_kilo,
-            "mimocode" => is_mimocode,
-            "zcode" => is_zcode,
-            _ => is_opencode,
-        };
-        let procs = uniflo_core::procs::list(pred, None);
+        static OPENCODE: ProcCache = ProcCache::new(PROC_TTL, is_opencode);
+        static KILO: ProcCache = ProcCache::new(PROC_TTL, is_kilo);
+        static MIMOCODE: ProcCache = ProcCache::new(PROC_TTL, is_mimocode);
+        static ZCODE: ProcCache = ProcCache::new(PROC_TTL, is_zcode);
+        let procs = match self.info.id {
+            "kilo" => &KILO,
+            "mimocode" => &MIMOCODE,
+            "zcode" => &ZCODE,
+            _ => &OPENCODE,
+        }
+        .get();
         if procs.is_empty() {
             return Some(Vec::new());
         }

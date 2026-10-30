@@ -66,7 +66,7 @@ pub fn save(path: &Path, tag: &str, index: &UsageIndex) -> Result<()> {
                 .map(|x| {
                     let m = idx(x.model.as_ref());
                     (
-                        x.event.to_string(),
+                        l.event_id(x).to_owned(),
                         x.ts,
                         x.turn,
                         m,
@@ -118,11 +118,15 @@ pub fn load(path: &Path, tag: &str) -> HashMap<PathBuf, Restored> {
         let name = |i: u32| (i > 0).then(|| names.get(i as usize - 1).cloned()).flatten();
         let mut ledgers = HashMap::new();
         for l in s.sessions {
+            let mut events = String::new();
             let steps = l
                 .steps
                 .into_iter()
                 .map(|(event, ts, turn, m, input, output, cache_read, cache_write, reasoning, reported)| Step {
-                    event: event.into(),
+                    event: {
+                        events.push_str(&event);
+                        ((events.len() - event.len()) as u32, event.len() as u32)
+                    },
                     ts,
                     turn,
                     model: name(m),
@@ -137,7 +141,7 @@ pub fn load(path: &Path, tag: &str) -> HashMap<PathBuf, Restored> {
                 })
                 .collect();
             let prompts = l.prompts.into_iter().map(|(id, ts, turn)| Prompt { id, ts, turn }).collect();
-            ledgers.insert(l.key, Ledger::restore(steps, prompts, l.seen, name(l.model), l.turn, l.open));
+            ledgers.insert(l.key, Ledger::restore(steps, events, prompts, l.seen, name(l.model), l.turn, l.open));
         }
         sources.insert(s.path, (s.harness, s.cursor, ledgers));
     }
@@ -199,6 +203,7 @@ mod tests {
         let l = src.2.get_mut("t:1").unwrap();
         assert_eq!((l.steps.len(), l.prompts.len(), l.turn), (1, 1, 1));
         assert_eq!(l.steps[0].model.as_deref(), Some("gpt-5"));
+        assert_eq!(l.event_id(&l.steps[0]), "s");
         // Re-delivered events stay deduplicated after a restore.
         l.apply(&ev("ts", Body::TurnStart {}), &mut n, &p);
         l.apply(&ev("u", Body::UserMessage { text: "q".into(), synthetic: false }), &mut n, &p);

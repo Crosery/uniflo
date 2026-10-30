@@ -3,6 +3,7 @@
 use serde_json::Value;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast::Receiver;
@@ -15,6 +16,7 @@ use uniflo_schema::{Body, Envelope, Status};
 struct Toy {
     root: PathBuf,
     live: Arc<Mutex<Option<Vec<LiveSession>>>>,
+    probes: Arc<AtomicUsize>,
 }
 
 impl LineDecoder for Toy {
@@ -44,6 +46,7 @@ impl LineDecoder for Toy {
         cx.emit_at(ts, body);
     }
     fn live(&self) -> Option<Vec<LiveSession>> {
+        self.probes.fetch_add(1, Ordering::Relaxed);
         self.live.lock().unwrap().clone()
     }
 }
@@ -52,6 +55,7 @@ struct Harness {
     dir: tempfile::TempDir,
     engine: Arc<Engine>,
     live: Arc<Mutex<Option<Vec<LiveSession>>>>,
+    probes: Arc<AtomicUsize>,
 }
 
 fn now() -> i64 {
@@ -65,8 +69,9 @@ fn line(t: &str, x: &str) -> String {
 fn setup(cache: Option<PathBuf>, dir: Option<tempfile::TempDir>) -> Harness {
     let dir = dir.unwrap_or_else(|| tempfile::tempdir().unwrap());
     let live = Arc::new(Mutex::new(None));
+    let probes = Arc::new(AtomicUsize::new(0));
     let adapter: Arc<dyn Adapter> =
-        Arc::new(JsonlAdapter::new(Toy { root: dir.path().join("root"), live: live.clone() }));
+        Arc::new(JsonlAdapter::new(Toy { root: dir.path().join("root"), live: live.clone(), probes: probes.clone() }));
     std::fs::create_dir_all(dir.path().join("root")).unwrap();
     let opts = EngineOptions {
         cache_path: cache,
@@ -75,7 +80,7 @@ fn setup(cache: Option<PathBuf>, dir: Option<tempfile::TempDir>) -> Harness {
         rescan: Duration::from_millis(500),
         ..Default::default()
     };
-    Harness { engine: Engine::new(vec![adapter], opts), dir, live }
+    Harness { engine: Engine::new(vec![adapter], opts), dir, live, probes }
 }
 
 impl Harness {
@@ -205,6 +210,29 @@ async fn process_exit_ends_work_and_pid_is_exposed() {
     assert_eq!((session.status, session.pid, session.status_reason.as_deref()), (Status::Idle, None, Some("exited")));
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_harness_without_sessions_is_not_probed() {
+    let h = setup(None, None);
+    *h.live.lock().unwrap() = Some(Vec::new());
+    h.engine.index();
+    tokio::spawn(h.engine.clone().run());
+    // One probe at the end of `index()`, one when `run()` asks whether the adapter probes at all.
+    let probes = || h.probes.load(Ordering::Relaxed);
+    let t0 = Instant::now();
+    while probes() < 2 {
+        assert!(t0.elapsed() < Duration::from_secs(5));
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(probes(), 2, "ten 50 ms probe ticks with no session to mark");
+    h.append("n.jsonl", &line("u", "first"));
+    let t0 = Instant::now();
+    while probes() == 2 {
+        assert!(t0.elapsed() < Duration::from_secs(5), "the first session brings the probe back");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 #[test]
 fn warm_restart_reads_only_new_bytes() {
     let dir = tempfile::tempdir().unwrap();
@@ -234,7 +262,8 @@ fn stale_work_without_process_goes_idle() {
     std::fs::create_dir_all(&root).unwrap();
     let old = now() - 3_600_000;
     std::fs::write(root.join("old.jsonl"), format!("{{\"t\":\"tool\",\"x\":\"x\",\"ts\":{old}}}\n")).unwrap();
-    let adapter: Arc<dyn Adapter> = Arc::new(JsonlAdapter::new(Toy { root, live: Arc::new(Mutex::new(None)) }));
+    let adapter: Arc<dyn Adapter> =
+        Arc::new(JsonlAdapter::new(Toy { root, live: Arc::new(Mutex::new(None)), probes: Default::default() }));
     let e = Engine::new(vec![adapter], EngineOptions { cache_path: None, ..Default::default() });
     e.index();
     let s = e.session("toy:old").unwrap();
@@ -246,8 +275,11 @@ async fn filesystem_watcher_alone_delivers() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("root");
     std::fs::create_dir_all(&root).unwrap();
-    let adapter: Arc<dyn Adapter> =
-        Arc::new(JsonlAdapter::new(Toy { root: root.clone(), live: Arc::new(Mutex::new(None)) }));
+    let adapter: Arc<dyn Adapter> = Arc::new(JsonlAdapter::new(Toy {
+        root: root.clone(),
+        live: Arc::new(Mutex::new(None)),
+        probes: Default::default(),
+    }));
     let hour = Duration::from_secs(3600);
     let opts = EngineOptions { cache_path: None, hot_poll: hour, live_poll: hour, rescan: hour, ..Default::default() };
     let engine = Engine::new(vec![adapter], opts);

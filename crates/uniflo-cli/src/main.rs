@@ -190,7 +190,11 @@ enum Cmd {
     /// Archived (cleaned-up) sessions: `ls` (default) or `rm <key>`.
     Archive(clean::ArchiveArgs),
     /// stdio MCP server for agents (what `uniflo setup --mcp` registers).
-    Mcp,
+    Mcp {
+        /// Seconds without a request before the in-process fallback index is dropped (tests).
+        #[arg(long, default_value_t = 300.0, hide = true)]
+        idle: f64,
+    },
     /// The agent Skill shipped with this binary.
     Skill {
         #[command(subcommand)]
@@ -228,7 +232,7 @@ fn run() -> Result<()> {
     // agent-facing ones (and `update` itself) never do.
     let notice = notice::begin(!matches!(
         cli.cmd,
-        Cmd::Daemon { .. } | Cmd::Mcp | Cmd::Setup(_) | Cmd::Skill { .. } | Cmd::Context(_) | Cmd::Update { .. }
+        Cmd::Daemon { .. } | Cmd::Mcp { .. } | Cmd::Setup(_) | Cmd::Skill { .. } | Cmd::Context(_) | Cmd::Update { .. }
     ));
     let res = dispatch(cli);
     notice.show();
@@ -238,7 +242,7 @@ fn run() -> Result<()> {
 fn dispatch(cli: Cli) -> Result<()> {
     if !matches!(
         cli.cmd,
-        Cmd::Daemon { .. } | Cmd::Mcp | Cmd::Setup(_) | Cmd::Skill { .. } | Cmd::Context(_) | Cmd::Update { .. }
+        Cmd::Daemon { .. } | Cmd::Mcp { .. } | Cmd::Setup(_) | Cmd::Skill { .. } | Cmd::Context(_) | Cmd::Update { .. }
     ) {
         setup::first_run();
     }
@@ -291,7 +295,7 @@ fn dispatch(cli: Cli) -> Result<()> {
         Cmd::Scan { json, no_cache } => scan(json, no_cache),
         Cmd::Update { check, prerelease, json } => update::run(check, prerelease, json),
         Cmd::Pricing(ref a) => usage::pricing(&cli, a),
-        Cmd::Mcp => mcp::run(&cli),
+        Cmd::Mcp { idle } => mcp::run(&cli, Duration::try_from_secs_f64(idle).unwrap_or(Duration::MAX)),
         Cmd::Skill { ref action } => {
             agent::skill(action);
             Ok(())
@@ -878,7 +882,7 @@ impl Source {
             | Cmd::Scan { .. }
             | Cmd::Update { .. }
             | Cmd::Pricing(_)
-            | Cmd::Mcp
+            | Cmd::Mcp { .. }
             | Cmd::Skill { .. }
             | Cmd::Setup(_)
             | Cmd::Context(_) => unreachable!(),

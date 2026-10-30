@@ -170,6 +170,26 @@ pub fn stdio_not_inheritable() {
     }
 }
 
+/// Hand the pages of freed heap blocks back to the OS. The allocator keeps them for reuse, so
+/// after a burst (the initial index, a ledger build, a cache save) a long-running process would
+/// otherwise stay at its peak footprint. Takes tens of milliseconds; call it after bursts, not
+/// on a hot path.
+pub fn trim_heap() {
+    #[cfg(target_os = "macos")]
+    {
+        unsafe extern "C" {
+            fn malloc_zone_pressure_relief(zone: *mut std::ffi::c_void, goal: usize) -> usize;
+        }
+        // SAFETY: a null zone means every malloc zone; a zero goal releases as much as possible.
+        unsafe { malloc_zone_pressure_relief(std::ptr::null_mut(), 0) };
+    }
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        // SAFETY: glibc's trim only returns free memory; live allocations are untouched.
+        unsafe { libc::malloc_trim(0) };
+    }
+}
+
 #[cfg(windows)]
 pub const CREATE_NO_WINDOW: u32 = 0x08000000;
 

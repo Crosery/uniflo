@@ -26,6 +26,9 @@ pub struct Antigravity {
     pub roots: Vec<PathBuf>,
     procs: Option<ProcCache>,
     summaries: Mutex<HashMap<PathBuf, (FileSig, Arc<SummaryIndex>)>>,
+    /// Conversation database → its workspace, by the database's signature: the live probe asks
+    /// for every recent conversation each second, and each open parses the schema.
+    db_cwds: Mutex<HashMap<PathBuf, (FileSig, Option<String>)>>,
 }
 
 #[derive(Default)]
@@ -39,7 +42,7 @@ const PROC_TTL: Duration = Duration::from_secs(3);
 
 impl Antigravity {
     pub fn new(roots: Vec<PathBuf>, procs: Option<ProcCache>) -> Self {
-        Antigravity { roots, procs, summaries: Mutex::new(HashMap::new()) }
+        Antigravity { roots, procs, summaries: Mutex::new(HashMap::new()), db_cwds: Mutex::new(HashMap::new()) }
     }
 
     fn summary_index(&self, base: &Path) -> Arc<SummaryIndex> {
@@ -102,10 +105,23 @@ impl Antigravity {
 
     fn cwd_of(&self, base: &Path, id: &str) -> Option<String> {
         let cdb = base.join("conversations").join(format!("{id}.db"));
-        if let Some(cwd) = db_cwd(&cdb) {
+        if let Some(cwd) = self.db_cwd(&cdb) {
             return Some(cwd);
         }
         self.summary_index(base).cwds.get(id).cloned()
+    }
+
+    fn db_cwd(&self, cdb: &Path) -> Option<String> {
+        let sig = file_sig(&[cdb.to_path_buf(), wal_of(cdb)]);
+        let mut g = self.db_cwds.lock().unwrap();
+        if let Some((prev, cwd)) = g.get(cdb)
+            && *prev == sig
+        {
+            return cwd.clone();
+        }
+        let cwd = db_cwd(cdb);
+        g.insert(cdb.to_path_buf(), (sig, cwd.clone()));
+        cwd
     }
 
     fn has_session(&self, id: &str) -> bool {
@@ -639,6 +655,32 @@ mod tests {
             tracker.observe(e);
         }
         assert_eq!(tracker.reason, "tool_result", "must not trigger 90s assistant_message settle window");
+    }
+
+    #[test]
+    fn conversation_workspace_is_read_once_per_database_change() {
+        let fx = Fixture::new();
+        let a = adapter(&fx);
+        let cdb = fx.root().join("conversations/c1.db");
+        std::fs::create_dir_all(cdb.parent().unwrap()).unwrap();
+        let put = |uri: &str| {
+            let c = rusqlite::Connection::open(&cdb).unwrap();
+            c.execute_batch("CREATE TABLE IF NOT EXISTS trajectory_metadata_blob (data BLOB); DELETE FROM trajectory_metadata_blob;")
+                .unwrap();
+            let mut blob = vec![uri.len() as u8];
+            blob.extend_from_slice(uri.as_bytes());
+            c.execute("INSERT INTO trajectory_metadata_blob (data) VALUES (?1)", [blob]).unwrap();
+        };
+        put("file:///work/a");
+        let dec = &a.inner.decoder;
+        assert_eq!(dec.cwd_of(fx.root(), "c1").as_deref(), Some("/work/a"));
+        assert!(dec.db_cwds.lock().unwrap().contains_key(&cdb));
+        // Same signature: the memo answers, even if the stored value were different.
+        dec.db_cwds.lock().unwrap().get_mut(&cdb).unwrap().1 = Some("/memo".into());
+        assert_eq!(dec.cwd_of(fx.root(), "c1").as_deref(), Some("/memo"));
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        put("file:///work/bb");
+        assert_eq!(dec.cwd_of(fx.root(), "c1").as_deref(), Some("/work/bb"));
     }
 
     #[test]

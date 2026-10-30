@@ -35,7 +35,7 @@ pub fn watch(roots: &[PathBuf], on_change: impl Fn(Change) + Send + 'static) -> 
             if matches!(&ev.kind, EventKind::Access(a) if !matches!(a, AccessKind::Close(AccessMode::Write))) {
                 return;
             }
-            for p in ev.paths {
+            for p in ev.paths.into_iter().filter(|p| !is_sqlite_shm(p)) {
                 map_canonical_path(&mappings, p, |mapped| {
                     on_change(Change::Path(mapped));
                 });
@@ -52,6 +52,13 @@ pub fn watch(roots: &[PathBuf], on_change: impl Fn(Change) + Send + 'static) -> 
         }
     }
     Ok(Watcher { _inner: w })
+}
+
+/// A SQLite WAL index (`x.db-shm`) is rewritten whenever any connection opens or reads the
+/// database, our own read-only ones included, and never carries data: a commit always touches
+/// `-wal` or the database file. Following it would make every read schedule the next one.
+fn is_sqlite_shm(p: &Path) -> bool {
+    p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.ends_with("-shm"))
 }
 
 /// Maps an incoming notification path `p` (typically canonicalized by FSEvents/OS) back
@@ -137,5 +144,40 @@ mod tests {
     fn nested_roots_collapse() {
         let r = dedupe_roots(&["/a/b".into(), "/a".into(), "/c".into(), "/a".into()]);
         assert_eq!(r, vec![PathBuf::from("/a"), PathBuf::from("/c")]);
+    }
+
+    #[test]
+    fn sqlite_wal_index_is_not_reported() {
+        use std::time::{Duration, Instant};
+        assert!(is_sqlite_shm(Path::new("/s/state.db-shm")));
+        assert!(!is_sqlite_shm(Path::new("/s/state.db-wal")));
+        assert!(!is_sqlite_shm(Path::new("/s/state.db")));
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let _w = watch(std::slice::from_ref(&root), move |c| {
+            if let Change::Path(p) = c {
+                let _ = tx.send(p);
+            }
+        })
+        .unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        std::fs::write(root.join("x.db-shm"), b"index").unwrap();
+        std::fs::write(root.join("x.db-wal"), b"frame").unwrap();
+        let name = |p: &Path| p.file_name().unwrap().to_string_lossy().into_owned();
+        let mut seen = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline && !seen.iter().any(|n| n == "x.db-wal") {
+            if let Ok(p) = rx.recv_timeout(Duration::from_millis(100)) {
+                seen.push(name(&p));
+            }
+        }
+        // A late batch could still carry the index file.
+        while let Ok(p) = rx.recv_timeout(Duration::from_millis(500)) {
+            seen.push(name(&p));
+        }
+        assert!(seen.iter().any(|n| n == "x.db-wal"), "{seen:?}");
+        assert!(!seen.iter().any(|n| n == "x.db-shm"), "{seen:?}");
     }
 }

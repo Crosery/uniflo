@@ -117,9 +117,14 @@ impl Home {
     }
 
     fn mcp(&self, url: &str) -> Mcp {
+        self.mcp_with(url, &[])
+    }
+
+    fn mcp_with(&self, url: &str, extra: &[&str]) -> Mcp {
         let mut child = self
             .cmd()
             .args(["--url", url, "mcp"])
+            .args(extra)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -663,6 +668,45 @@ fn mcp_switches_back_to_a_daemon_started_after_local_fallback() {
             .is_some_and(|a| a.iter().any(|s| s["session"] == "claude:recovered"))
     });
     assert_eq!(d.get("/v1/stats").1["fts"]["errors"], 0);
+}
+
+/// Scenario: 空闲的本地退回索引被释放，下一次调用重建它，或改走新起的守护进程.
+#[test]
+fn mcp_drops_an_idle_fallback_then_rebuilds_or_reaches_a_daemon() {
+    let _lock = lock();
+    let h = home();
+    let url = closed_url();
+    let port: u16 = url.rsplit(':').next().unwrap().parse().unwrap();
+    let mut m = h.mcp_with(&url, &["--idle", "0.3"]);
+    m.handshake();
+    let text = |r: &Value| r["content"][0]["text"].as_str().unwrap().to_owned();
+    let sessions = json!({"q": "h:claude", "limit": 50});
+    let r = m.call_structured("uniflo_sessions", sessions.clone());
+    assert!(text(&r).starts_with("守护进程未运行"), "{r}");
+    let r = m.call_structured("uniflo_search", json!({"q": "缓存击穿"}));
+    assert!(ids(&r["structuredContent"], "results", "session").contains(&"claude:c1".to_owned()), "{r}");
+
+    // The index answered once is noted once; only a dropped and rebuilt one is noted again.
+    std::thread::sleep(Duration::from_millis(900));
+    let r = m.call_structured("uniflo_sessions", sessions.clone());
+    assert!(text(&r).starts_with("守护进程未运行"), "rebuilt after the idle drop: {r}");
+    assert_eq!(ids(&r["structuredContent"], "sessions", "key").len(), 6);
+
+    // Dropped again: a daemon that appears meanwhile answers the next call.
+    std::thread::sleep(Duration::from_millis(900));
+    h.write(".claude/projects/-p/later.jsonl", user("later-u", now_ms(), "/synthetic", "later task"));
+    let child = h
+        .cmd()
+        .args(["daemon", "--bind", &format!("127.0.0.1:{port}"), "--no-cache", "--no-update-check", "--no-price-sync"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let d = Daemon { child, url, port };
+    wait("daemon health", || d.get("/v1/health").0 == 200);
+    let r = m.call_structured("uniflo_sessions", sessions);
+    assert!(!text(&r).contains("守护进程未运行"), "{r}");
+    assert!(ids(&r["structuredContent"], "sessions", "key").contains(&"claude:later".to_owned()), "{r}");
 }
 
 /// Scenario: 恢复命令与注入防护.

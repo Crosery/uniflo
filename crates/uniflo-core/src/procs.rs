@@ -52,11 +52,21 @@ pub struct ProcCache {
     keep: fn(&str) -> bool,
     files: Option<fn(&Path) -> bool>,
     last: Mutex<Option<(Instant, Vec<Proc>)>>,
+    /// cwd and open files per pid from `lsof`, reused for [`INSPECT_TTL`] since the first.
+    #[cfg_attr(windows, allow(dead_code))]
+    inspected: Mutex<Option<(Instant, Inspected)>>,
 }
+
+/// How long `lsof` answers are reused for processes that keep running. Which processes run
+/// still comes from the `ps` listing, and a new process is inspected at once; only a session
+/// switch inside a running process waits this long. One `lsof` costs about as much CPU as a
+/// `ps`, and each harness asked again every two or three seconds.
+#[cfg(unix)]
+const INSPECT_TTL: Duration = Duration::from_secs(10);
 
 impl ProcCache {
     pub const fn new(ttl: Duration, keep: fn(&str) -> bool) -> Self {
-        ProcCache { ttl, keep, files: None, last: Mutex::new(None) }
+        ProcCache { ttl, keep, files: None, last: Mutex::new(None), inspected: Mutex::new(None) }
     }
 
     /// Also collect open files matching `pred` (e.g. transcripts held open by the agent).
@@ -72,9 +82,102 @@ impl ProcCache {
         {
             return v.clone();
         }
-        let v = list(self.keep, self.files);
-        *g = Some((Instant::now(), v.clone()));
+        #[cfg(unix)]
+        let (at, v) = {
+            let (at, mut procs) = shared(self.keep);
+            self.attach(&mut procs);
+            (at, procs)
+        };
+        #[cfg(windows)]
+        let (at, v) = list_shared(self.keep, self.files);
+        *g = Some((at, v.clone()));
         v
+    }
+
+    /// Fill cwd and open files, asking `lsof` only about processes it has not answered for
+    /// within [`INSPECT_TTL`].
+    #[cfg(unix)]
+    fn attach(&self, procs: &mut [Proc]) {
+        let mut g = self.inspected.lock().unwrap();
+        if g.as_ref().is_none_or(|(at, _)| at.elapsed() >= INSPECT_TTL) {
+            *g = Some((Instant::now(), HashMap::new()));
+        }
+        let Some((_, known)) = g.as_mut() else { return };
+        let missing: Vec<u32> = procs.iter().map(|p| p.pid).filter(|p| !known.contains_key(p)).collect();
+        if !missing.is_empty() {
+            let mut fresh = inspect(&missing, self.files);
+            for pid in missing {
+                known.insert(pid, fresh.remove(&pid).unwrap_or_default());
+            }
+        }
+        known.retain(|pid, _| procs.iter().any(|p| p.pid == *pid));
+        for p in procs {
+            if let Some((cwd, files)) = known.get(&p.pid) {
+                p.cwd.clone_from(cwd);
+                p.files.clone_from(files);
+            }
+        }
+    }
+}
+
+/// How long one `ps` listing serves every probe. The engine probes each harness every second
+/// and a full listing costs about 0.1 s of CPU (most of a second of wall time) with a few
+/// thousand processes; separate listings per harness added up to several per second.
+#[cfg(unix)]
+const SHARED_PS_TTL: Duration = Duration::from_secs(2);
+
+/// One `ps` line split once: pid, the start-time words, the command.
+#[allow(dead_code)]
+struct PsLine {
+    pid: u32,
+    stamp: String,
+    args: String,
+}
+
+#[cfg(unix)]
+type Listing = std::sync::Arc<Vec<PsLine>>;
+
+#[cfg(unix)]
+static SHARED_PS: Mutex<Option<(Instant, Listing)>> = Mutex::new(None);
+
+/// [`list`] over a `ps` listing shared across callers (at most [`SHARED_PS_TTL`] old), with
+/// the time that listing was taken. Concurrent callers wait for one listing instead of each
+/// starting their own.
+#[cfg(unix)]
+pub fn list_shared(keep: fn(&str) -> bool, files: Option<fn(&Path) -> bool>) -> (Instant, Vec<Proc>) {
+    let (at, mut procs) = shared(keep);
+    with_inspect(&mut procs, files);
+    (at, procs)
+}
+
+/// The shared listing's processes that satisfy `keep`, without cwd or open files.
+#[cfg(unix)]
+fn shared(keep: fn(&str) -> bool) -> (Instant, Vec<Proc>) {
+    let (at, lines) = {
+        let mut g = SHARED_PS.lock().unwrap();
+        match g.as_ref() {
+            Some((at, lines)) if at.elapsed() < SHARED_PS_TTL => (*at, lines.clone()),
+            _ => {
+                let at = Instant::now();
+                let lines: Listing = std::sync::Arc::new(ps().lines().filter_map(split_ps_line).collect());
+                *g = Some((at, lines.clone()));
+                (at, lines)
+            }
+        }
+    };
+    (at, pick(&lines, keep))
+}
+
+#[cfg(windows)]
+pub fn list_shared(keep: fn(&str) -> bool, files: Option<fn(&Path) -> bool>) -> (Instant, Vec<Proc>) {
+    (Instant::now(), list(keep, files))
+}
+
+#[cfg(unix)]
+fn ps() -> String {
+    match Command::new("ps").args(["-Aww", "-o", "pid=,lstart=,command="]).env("LC_ALL", "C").output() {
+        Ok(out) => String::from_utf8_lossy(&out.stdout).into_owned(),
+        Err(_) => String::new(),
     }
 }
 
@@ -82,26 +185,37 @@ impl ProcCache {
 /// `files`) resolved.
 #[cfg(unix)]
 pub fn list(keep: fn(&str) -> bool, files: Option<fn(&Path) -> bool>) -> Vec<Proc> {
-    let Ok(out) = Command::new("ps").args(["-Aww", "-o", "pid=,lstart=,command="]).env("LC_ALL", "C").output() else {
-        return Vec::new();
-    };
-    let mut procs: Vec<Proc> =
-        String::from_utf8_lossy(&out.stdout).lines().filter_map(parse_ps_line).filter(|p| keep(&p.args)).collect();
-    if procs.is_empty() {
-        return procs;
-    }
-    let mut info = inspect(&procs.iter().map(|p| p.pid).collect::<Vec<_>>(), files);
+    let lines: Vec<PsLine> = ps().lines().filter_map(split_ps_line).collect();
+    let mut procs = pick(&lines, keep);
+    with_inspect(&mut procs, files);
+    procs
+}
+
+#[cfg(unix)]
+fn pick(lines: &[PsLine], keep: fn(&str) -> bool) -> Vec<Proc> {
+    #[allow(unused_mut)]
+    let mut procs: Vec<Proc> = lines.iter().filter(|l| keep(&l.args)).filter_map(PsLine::to_proc).collect();
+    #[cfg(target_os = "linux")]
     for p in &mut procs {
-        if let Some((cwd, files)) = info.remove(&p.pid) {
-            p.cwd = cwd;
-            p.files = files;
-        }
-        #[cfg(target_os = "linux")]
         if let Some(argv) = read_linux_cmdline(p.pid) {
             p.argv = argv;
         }
     }
     procs
+}
+
+#[cfg(unix)]
+fn with_inspect(procs: &mut [Proc], files: Option<fn(&Path) -> bool>) {
+    if procs.is_empty() {
+        return;
+    }
+    let mut info = inspect(&procs.iter().map(|p| p.pid).collect::<Vec<_>>(), files);
+    for p in procs {
+        if let Some((cwd, files)) = info.remove(&p.pid) {
+            p.cwd = cwd;
+            p.files = files;
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -168,8 +282,13 @@ fn process_cwd(pid: u32) -> Option<PathBuf> {
 }
 
 /// `  123 Fri Oct  2 12:02:01 2026     /usr/bin/foo --bar`
-#[allow(dead_code)]
+#[cfg(test)]
 fn parse_ps_line(line: &str) -> Option<Proc> {
+    split_ps_line(line)?.to_proc()
+}
+
+#[allow(dead_code)]
+fn split_ps_line(line: &str) -> Option<PsLine> {
     let mut it = line.split_whitespace();
     let pid: u32 = it.next()?.parse().ok()?;
     let parts: Vec<&str> = it.by_ref().take(5).collect();
@@ -177,10 +296,18 @@ fn parse_ps_line(line: &str) -> Option<Proc> {
         return None;
     }
     let stamp = format!("{} {} {} {}", parts[1], parts[2], parts[3], parts[4]);
-    let start = chrono::NaiveDateTime::parse_from_str(&stamp, "%b %d %H:%M:%S %Y").ok()?;
-    let start_ms = chrono::TimeZone::from_local_datetime(&chrono::Local, &start).single()?.timestamp_millis();
     let args = it.collect::<Vec<_>>().join(" ");
-    Some(Proc { pid, start_ms, args, argv: Vec::new(), cwd: None, files: Vec::new() })
+    Some(PsLine { pid, stamp, args })
+}
+
+#[allow(dead_code)]
+impl PsLine {
+    /// The start time is parsed only for the lines a probe keeps.
+    fn to_proc(&self) -> Option<Proc> {
+        let start = chrono::NaiveDateTime::parse_from_str(&self.stamp, "%b %d %H:%M:%S %Y").ok()?;
+        let start_ms = chrono::TimeZone::from_local_datetime(&chrono::Local, &start).single()?.timestamp_millis();
+        Some(Proc { pid: self.pid, start_ms, args: self.args.clone(), argv: Vec::new(), cwd: None, files: Vec::new() })
+    }
 }
 
 /// Parse NUL-delimited command-line bytes (as from `/proc/<pid>/cmdline`).
@@ -291,6 +418,45 @@ mod tests {
         let mine = found.iter().find(|p| p.pid == std::process::id()).expect("own process listed");
         assert_eq!(mine.cwd.as_deref(), std::env::current_dir().ok().as_deref());
         assert!((crate::util::now_ms() - mine.start_ms) < 600_000);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn shared_listing_serves_repeated_probes() {
+        fn me(args: &str) -> bool {
+            args.contains("uniflo_core") || args.contains("procs::")
+        }
+        let (at, found) = list_shared(me, None);
+        assert!(found.iter().any(|p| p.pid == std::process::id()));
+        if at.elapsed() < SHARED_PS_TTL / 2 {
+            let (again, _) = list_shared(me, None);
+            assert_eq!(again, at, "a probe within the TTL reuses the listing");
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn cache_reuses_lsof_answers_for_running_processes() {
+        fn me(args: &str) -> bool {
+            args.contains("uniflo_core") || args.contains("procs::")
+        }
+        fn marker(p: &Path) -> bool {
+            p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("uniflo-procs-memo"))
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let canon = |p: &Path| std::fs::canonicalize(p).unwrap();
+        let files = |v: Vec<Proc>| {
+            let mine = v.into_iter().find(|p| p.pid == std::process::id()).expect("own process listed");
+            mine.files.iter().map(|f| canon(f)).collect::<Vec<_>>()
+        };
+        let a = dir.path().join("uniflo-procs-memo-a.jsonl");
+        let _a = std::fs::File::create(&a).unwrap();
+        let cache = ProcCache::new(Duration::ZERO, me).with_files(marker);
+        assert_eq!(files(cache.get()), vec![canon(&a)]);
+        let b = dir.path().join("uniflo-procs-memo-b.jsonl");
+        let _b = std::fs::File::create(&b).unwrap();
+        // Listed again (zero TTL), but the running process's lsof answer is reused.
+        assert_eq!(files(cache.get()), vec![canon(&a)]);
     }
 
     #[test]
