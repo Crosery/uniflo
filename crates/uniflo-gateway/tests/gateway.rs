@@ -222,10 +222,23 @@ async fn rest_endpoints_shapes_and_paging() {
     assert_eq!(texts.last().unwrap(), "question 0");
     assert_eq!(texts.first().unwrap(), "answer 29");
 
+    let all = get(s.addr, "/v1/sessions/claude:sess-1/events?limit=1000", &[]).await.json();
+    let oldest = get(s.addr, "/v1/sessions/claude:sess-1/events?oldest=true&limit=5", &[]).await.json();
+    let first = oldest["events"].as_array().unwrap();
+    assert!(first.len() >= 5 && first.len() < all["events"].as_array().unwrap().len());
+    assert_eq!(first, &all["events"].as_array().unwrap()[..first.len()]);
+    assert_eq!(first[0]["text"], "question 0");
+    assert!(oldest["next_before"].is_null());
+
     let trunc = get(s.addr, "/v1/sessions/claude:sess-1/events?limit=1&max_text=3", &[]).await.json();
     let last = trunc["events"].as_array().unwrap().iter().find(|e| e["kind"] == "assistant_message").unwrap().clone();
     assert_eq!(last["text"], "ans");
     assert_eq!(last["truncated"], true);
+
+    append(&s.file, &user("u0", "question 0 updated"));
+    let oldest = get(s.addr, "/v1/sessions/claude:sess-1/events?oldest=true&limit=5", &[]).await.json();
+    assert_eq!(oldest["events"][0]["text"], "question 0 updated");
+    assert_eq!(oldest["events"][0]["pos"], first[0]["pos"]);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

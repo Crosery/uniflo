@@ -444,6 +444,57 @@ impl Engine {
         adapter.history(&src, &id, q)
     }
 
+    /// Blocking: first events of a session in source order, keeping later updates to those ids.
+    pub fn oldest(&self, key: &str, limit: usize) -> Result<Vec<Event>> {
+        let (adapter, src, id, archived) = {
+            let st = self.state.read().unwrap();
+            let e = st.sessions.get(key).ok_or_else(|| anyhow!("unknown session {key}"))?;
+            (self.adapters[e.adapter].clone(), e.src.clone(), e.session.id.clone(), e.archive.is_some())
+        };
+        let limit = limit.max(1);
+        if archived {
+            let mut events = Self::archived_history(&src, &HistoryQuery { before: None, limit: usize::MAX / 2 })?;
+            if events.len() > limit {
+                let last = events[limit - 1].pos;
+                let keep = limit + events[limit..].iter().take_while(|event| event.pos == last).count();
+                events.truncate(keep);
+            }
+            return Ok(events);
+        }
+        let mut groups: BTreeMap<Option<u64>, Vec<Event>> = BTreeMap::new();
+        let mut indices: HashMap<String, (Option<u64>, usize)> = HashMap::new();
+        let mut count = 0;
+        adapter.read_all(&src, std::slice::from_ref(&id), &mut |session, record| {
+            if session != id {
+                return;
+            }
+            if let Record::Event(mut event) = record {
+                if let Some(&(pos, index)) = indices.get(&event.id) {
+                    event.pos = pos;
+                    groups.get_mut(&pos).unwrap()[index] = event;
+                } else if count < limit || groups.last_key_value().is_some_and(|(pos, _)| event.pos <= *pos) {
+                    let pos = event.pos;
+                    let group = groups.entry(pos).or_default();
+                    indices.insert(event.id.clone(), (pos, group.len()));
+                    group.push(event);
+                    count += 1;
+                    while count > limit {
+                        let n = groups.last_key_value().unwrap().1.len();
+                        if count - n < limit {
+                            break;
+                        }
+                        let (_, removed) = groups.pop_last().unwrap();
+                        count -= removed.len();
+                        for event in removed {
+                            indices.remove(&event.id);
+                        }
+                    }
+                }
+            }
+        })?;
+        Ok(groups.into_values().flatten().collect())
+    }
+
     pub fn harnesses(&self) -> Vec<Harness> {
         let st = self.state.read().unwrap();
         let mut counts: HashMap<&str, (usize, usize)> = HashMap::new();

@@ -536,7 +536,7 @@ tr.r-note td { height: 30px; color: var(--text-3); text-align: left; }
 .info-grid .kv { grid-template-columns: 84px minmax(0, 1fr); }
 #timeline { flex: 1; min-height: 0; overflow-y: auto; scroll-behavior: auto; }
 #thread { max-width: 800px; margin: 0 auto; padding: 28px 32px 32px; }
-#more { display: flex; align-items: center; justify-content: center; gap: 6px; min-height: 28px; margin: 0 auto 14px; padding: 0 12px; border: 0; background: none; color: var(--text-3); font-size: var(--fs-xs); cursor: pointer; }
+#more { position: sticky; top: 8px; z-index: 4; display: flex; align-items: center; justify-content: center; gap: 6px; width: max-content; min-height: 28px; margin: 0 auto 14px; padding: 0 12px; border: 1px solid var(--border-2); border-radius: 999px; background: var(--bg-raised); color: var(--text-3); font-size: var(--fs-xs); cursor: pointer; }
 #more.loading { color: var(--accent); cursor: wait; }
 #more.error { color: var(--danger); }
 #more.done { color: var(--text-3); cursor: default; }
@@ -2371,7 +2371,7 @@ async function api(name, path, q) {
     const text = await r.text();
     const ms = performance.now() - t0;
     const body = q && q.format === "ndjson" ? text.split("\n").filter(Boolean).map((l) => JSON.parse(l)) : JSON.parse(text);
-    if (!r.ok) throw new Error(body.error || `HTTP ${r.status}`);
+    if (!r.ok) throw Object.assign(new Error(body.error || `HTTP ${r.status}`), { status: r.status });
     check(name, true, ms);
     $("#m-rest").textContent = ms.toFixed(1) + "ms";
     return { body, ms, seq: Number(r.headers.get("x-uniflo-seq") || 0) };
@@ -3864,46 +3864,82 @@ function setMore(nb, state = "ready") {
   const done = nb == null;
   b.hidden = false;
   b.disabled = done || state === "loading";
+  b.title = "向上滚动也会自动加载更早事件";
   b.className = done ? "done" : state;
   b.setAttribute("aria-busy", String(state === "loading"));
   b.innerHTML = done ? `${icon("check")}<span>已到最顶</span>`
     : state === "loading" ? '<span class="spin"></span><span>正在加载更早…</span>'
       : `${icon("up")}<span>到最顶</span>`;
 }
-function setMoreError() {
+async function historyPage(mine, q) {
+  let error;
+  for (let attempt = 0; attempt < 3 && T === mine; attempt++) {
+    try { return await api("events", `/v1/sessions/${encodeURIComponent(mine.key)}/events`, q); }
+    catch (e) {
+      error = e;
+      if (e.status >= 400 && e.status < 500) break;
+      if (attempt < 2 && T === mine) await new Promise((resolve) => setTimeout(resolve, 250 * 2 ** attempt));
+    }
+  }
+  throw error;
+}
+function historyError(error) {
   const b = $("#more");
   if (!b) return;
-  b.hidden = false;
   b.disabled = false;
   b.className = "error";
   b.setAttribute("aria-busy", "false");
-  b.innerHTML = `${icon("x")}<span>加载失败，继续上滑重试</span>`;
+  b.title = `无法读取历史：${error?.message || error}`;
+  b.innerHTML = `${icon("x")}<span>无法读取历史：${esc(error?.message || error)}</span>`;
 }
-async function loadEarlier(limit = PAGE) {
-  if (!T || T.loading || T.loadingEarlier || T.nextBefore == null) return false;
-  const mine = T, tl = $("#timeline"), h0 = tl.scrollHeight;
+async function loadEarlier() {
+  if (!T || T.loading || T.loadingEarlier || T.nextBefore == null) return;
+  const mine = T, tl = $("#timeline");
   mine.loadingEarlier = true;
   setMore(mine.nextBefore, "loading");
   try {
-    const r = await api("events", `/v1/sessions/${encodeURIComponent(mine.key)}/events`, { limit, before: mine.nextBefore, max_text: MAX_TEXT });
-    if (T !== mine) return false;
-    const anchor = $("#more").nextElementSibling;
-    for (const e of r.body.events) if (!T.evs.has(e.id)) upsertEvent(e, false, anchor);
+    const r = await historyPage(mine, { limit: PAGE, before: mine.nextBefore, max_text: MAX_TEXT });
+    if (T !== mine) return;
+    const thread = $("#thread"), anchor = document.createComment("history boundary"), h0 = tl.scrollHeight;
+    thread.insertBefore(anchor, $("#more").nextSibling);
+    try { for (const e of r.body.events) if (!T.evs.has(e.id)) upsertEvent(e, false, anchor); }
+    finally { anchor.remove(); }
     setMore(r.body.next_before);
     tl.scrollTop += tl.scrollHeight - h0;
-    return true;
-  } catch {
-    if (T === mine) setMoreError();
-    return false;
+  } catch (e) {
+    if (T === mine) historyError(e);
   } finally {
     if (T === mine) mine.loadingEarlier = false;
   }
 }
-async function loadAllEarlier() {
+async function jumpToTop() {
   if (!T || T.loading || T.loadingEarlier || T.nextBefore == null) return;
   const mine = T;
-  while (T === mine && mine.nextBefore != null) if (!await loadEarlier()) break;
-  if (T === mine && mine.nextBefore == null) $("#timeline").scrollTop = 0;
+  mine.loading = mine.loadingEarlier = true;
+  setMore(mine.nextBefore, "loading");
+  try {
+    const r = await historyPage(mine, { oldest: true, limit: PAGE, max_text: MAX_TEXT });
+    if (T !== mine) return;
+    mine.evs.clear(); mine.nodes.clear(); mine.calls.clear(); mine.results.clear();
+    mine.window = true;
+    const thread = $("#thread"), more = $("#more");
+    for (const node of [...thread.children]) if (node !== more) node.remove();
+    more.insertAdjacentHTML("afterend", `<button id="newer">${icon("down")}跳到最新</button>`);
+    for (const e of r.body.events) upsertEvent(e, false);
+    if (mine.pending.length) $("#newer").classList.add("fresh");
+    mine.pending = [];
+    setMore(null);
+    $("#timeline").scrollTop = 0;
+  } catch (e) {
+    if (T === mine) {
+      if (mine.window) $("#newer")?.classList.toggle("fresh", !!mine.pending.length);
+      else for (const event of mine.pending) upsertEvent(event, true);
+      mine.pending = [];
+      historyError(e);
+    }
+  } finally {
+    if (T === mine) { mine.loading = false; mine.loadingEarlier = false; }
+  }
 }
 function scrollBottom(force) {
   const tl = $("#timeline");
@@ -5145,9 +5181,9 @@ const ENDPOINTS = [
     params: [{ n: "q", ph: "h:claude since:7d", h: "会话搜索语法，见 docs/search.md" }, { n: "limit", t: "num", ph: "100" }, { n: "format", t: "enum", o: ["", "ndjson"], h: "ndjson 时每行一个会话" }],
     rs: (v) => `client.sessions(${rstr(v.q)}, ${Number(v.limit) || 100})?` },
   { id: "session", g: "sessions", m: "GET", p: "/v1/sessions/{key}", t: "单个会话", d: "一个会话的元数据；未知 key 返回 404。", ret: "Session", params: [A_KEY], rs: (v) => `client.session(${rstr(v.key)})?` },
-  { id: "events", g: "sessions", m: "GET", p: "/v1/sessions/{key}/events", t: "会话事件", d: "按时间正序的一页事件。翻更早一页传 before=next_before；给 around 时取以该事件为中心的窗口。", ret: "EventsPage",
-    params: [A_KEY, { n: "limit", t: "num", ph: "200", h: "最大 10000" }, { n: "before", t: "num", h: "上一页返回的 next_before" }, { n: "around", ph: "事件 id", h: "以这个事件为中心，前后各约 limit/2 条" }, { n: "max_text", t: "num", ph: "32768", h: "文本截断长度，0 不截断" }, { n: "format", t: "enum", o: ["", "ndjson"] }],
-    rs: (v) => `client.events(${rstr(v.key)}, &EventsQuery { ${rfields(v, { before: "n", around: "s", limit: "n", max_text: "n" })}..Default::default() })?` },
+  { id: "events", g: "sessions", m: "GET", p: "/v1/sessions/{key}/events", t: "会话事件", d: "按时间正序的一页事件。翻更早一页传 before=next_before；oldest=true 取最早一页；around 取以事件为中心的窗口。", ret: "EventsPage",
+    params: [A_KEY, { n: "limit", t: "num", ph: "200", h: "最大 10000" }, { n: "before", t: "num", h: "上一页返回的 next_before" }, { n: "oldest", t: "enum", o: ["", "true"], h: "直接取最早一页" }, { n: "around", ph: "事件 id", h: "以这个事件为中心，前后各约 limit/2 条" }, { n: "max_text", t: "num", ph: "32768", h: "文本截断长度，0 不截断" }, { n: "format", t: "enum", o: ["", "ndjson"] }],
+    rs: (v) => v.oldest ? null : `client.events(${rstr(v.key)}, &EventsQuery { ${rfields(v, { before: "n", around: "s", limit: "n", max_text: "n" })}..Default::default() })?` },
   { id: "resume", g: "sessions", m: "GET", p: "/v1/sessions/{key}/resume", t: "恢复命令", d: "在会话自己的 harness 里继续它的命令，只给命令、不执行。", ret: "ResumeInfo", params: [A_KEY], rs: (v) => `client.resume(${rstr(v.key)})?` },
   { id: "open-terminal", g: "sessions", m: "POST", p: "/v1/sessions/{key}/open-terminal", t: "在终端里恢复", d: "在新终端窗口切到会话目录并执行恢复命令。", ret: "{opened, terminal, command, cwd}", write: "这个接口会在本机打开终端窗口，这里只给写法、不发送；在会话详情里点「在终端打开」。",
     params: [A_KEY, { n: "terminal", t: "enum", o: IS_WIN ? ["", "wt", "powershell", "cmd"] : ["", "terminal", "iterm", "ghostty"] }] },
@@ -5688,7 +5724,7 @@ document.addEventListener("click", (e) => {
   if (kt) return kidAct(kt);
   const row = t.closest(".row[data-key]");
   if (row) return select(row.dataset.key);
-  if (t.closest("#more")) return loadAllEarlier();
+  if (t.closest("#more")) return jumpToTop();
   if (t.closest("#newer")) return select(T.key, false);
   const tb = t.closest("#transport button");
   if (tb && tb.dataset.transport !== transport) {

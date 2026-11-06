@@ -74,6 +74,23 @@ claude += line({ type: "assistant", uuid: "rich-a", timestamp: iso(tr + 21_000),
 claude += line({ type: "ai-title", aiTitle: "网关新增 /demo 演示页" });
 writeFileSync(claudeFile, claude);
 
+// A tool result is the first event of the latest page; its call is on the previous page.
+let boundary = ca("boundary-call", t0, [{ type: "tool_use", id: "boundary-tool", name: "Read", input: { file_path: "/w/demo/a" } }], "tool_use")
+  + cu("boundary-result", t0 + 1_000, [{ type: "tool_result", tool_use_id: "boundary-tool", content: "synthetic result" }]);
+for (let i = 0; i < 49; i++) {
+  boundary += cu(`boundary-u${i}`, t0 + 2_000 + i * 2_000, `boundary question ${i}`);
+  boundary += ca(`boundary-a${i}`, t0 + 3_000 + i * 2_000, [{ type: "text", text: `boundary answer ${i}` }], "end_turn");
+}
+boundary += cu("boundary-tail-1", t0 + 101_000, "boundary tail 1") + cu("boundary-tail-2", t0 + 102_000, "boundary tail 2");
+writeFileSync(join(home, ".claude/projects/-w-demo/boundary.jsonl"), boundary);
+
+let topLong = "";
+for (let i = 0; i < 500; i++) {
+  topLong += cu(`top-u${i}`, t0 + i * 2_000, `top question ${i}`);
+  topLong += ca(`top-a${i}`, t0 + i * 2_000 + 1_000, [{ type: "text", text: `top answer ${i}` }], "end_turn");
+}
+writeFileSync(join(home, ".claude/projects/-w-demo/top-long.jsonl"), topLong);
+
 // A sub-agent of the Claude session.
 mkdirSync(join(home, ".claude/projects/-w-demo/sess-1/subagents"), { recursive: true });
 writeFileSync(
@@ -292,10 +309,14 @@ async function runTransport(t) {
 
   await load(`${api}/demo?token=${TOKEN}&transport=${t}&select=claude:sess-1`);
   await until(() => cdp.eval(`${evCount} >= 150`), 5_000, "first page for oldest jump").catch(() => {});
-  const clicked = await cdp.eval(`(() => { const b = document.querySelector('#more'); if (!b || b.disabled) return false; b.click(); return true; })()`);
+  const clicked = await cdp.eval(`(() => { window.__historyRequests = []; const fetch0 = window.fetch;
+    window.fetch = (...args) => { const u = new URL(args[0], location.href); if (u.pathname.endsWith('/events')) window.__historyRequests.push(u.search); return fetch0(...args); };
+    const b = document.querySelector('#more'); if (!b || b.disabled) return false; b.click(); return true; })()`);
   const oldest = await until(() => cdp.eval(`(() => { const tl = document.querySelector('#timeline'), more = document.querySelector('#more');
-    return more?.textContent.trim() === "已到最顶" && tl.scrollTop === 0 ? { count: ${evCount}, top: tl.scrollTop } : null; })()`), 5_000, "oldest jump").catch(() => null);
-  report(`[${t}] “到最顶” loads all remaining history`, clicked && !!oldest && oldest.count >= all && oldest.top === 0, JSON.stringify({ clicked, oldest, auto: all }));
+    return more?.textContent.trim() === "已到最顶" && tl.scrollTop === 0 ? { first: document.querySelector('#thread > .ev')?.dataset.id, top: tl.scrollTop, newer: !!document.querySelector('#newer'), requests: window.__historyRequests } : null; })()`), 8_000, "oldest jump").catch(() => null);
+  report(`[${t}] “到最顶” opens the first event in one request`, clicked && oldest?.first === "u0" && oldest.newer && oldest.requests.length === 1 && oldest.requests[0].includes("oldest=true"), JSON.stringify({ clicked, oldest }));
+  await click("#newer");
+  await until(() => cdp.eval(`${hasText("给网关加一个 /demo 路由")}`), 5_000, "return to latest").catch(() => {});
   const tag = `e2e-live-${t}-${Date.now()}`;
   await cdp.eval(`window.__seen = 0; new MutationObserver(() => { if (!window.__seen && ${hasText(tag)}) window.__seen = Date.now(); })
     .observe(document.querySelector('#timeline'), { childList: true, subtree: true, characterData: true }); true`);
@@ -321,6 +342,48 @@ async function runTransport(t) {
 
   await shot(`${t}.png`);
   report(`[${t}] no page errors`, cdp.errors.length === 0, cdp.errors.slice(0, 3).join(" | "));
+}
+
+async function runHistoryBoundary() {
+  await load(`${api}/demo?token=${TOKEN}&select=claude:boundary`);
+  const first = await waitFor(`(() => { const n = document.querySelector('#more + .ev'); return n ? { id: n.dataset.id, kind: n.dataset.kind } : null; })()`, 8_000, "boundary first event");
+  await cdp.eval(`(() => { const tl = document.querySelector('#timeline'); tl.scrollTop = 0; tl.dispatchEvent(new Event('scroll')); })()`);
+  const paired = await waitFor(`!!document.querySelector('#thread > .ev[data-kind="tool_call"] [data-id="boundary-result#0"]')`, 5_000, "boundary tool paired").catch(() => false);
+  const status = await cdp.eval(`({ text: document.querySelector('#more')?.textContent.trim(), error: document.querySelector('#more')?.classList.contains('error') })`);
+  report("[history] loading a call before the page's first tool result keeps the insertion anchor valid", first.kind === "tool_result" && !!paired && !status.error, JSON.stringify({ first, paired, status }));
+
+  await load(`${api}/demo?token=${TOKEN}&select=claude:sess-1`);
+  await waitFor(`${evCount} >= 150`, 8_000, "retry first page");
+  const count = await cdp.eval(evCount);
+  await cdp.eval(`(() => { window.__historyFailures = 0; const fetch0 = window.fetch;
+    window.fetch = (...args) => { const u = new URL(args[0], location.href); if (u.pathname.endsWith('/events') && u.searchParams.has('before') && !window.__historyFailures++) return Promise.reject(new TypeError('synthetic network interruption')); return fetch0(...args); };
+    document.querySelector('#timeline').scrollTop = 0; })()`);
+  const recovered = await waitFor(`${evCount} > ${count}`, 5_000, "history retry").catch(() => false);
+  const retry = await cdp.eval(`({ attempts: window.__historyFailures, error: document.querySelector('#more')?.classList.contains('error') })`);
+  report("[history] a transient history request interruption recovers automatically", !!recovered && retry.attempts >= 2 && !retry.error, JSON.stringify({ recovered, retry }));
+  report("[history] no page errors", cdp.errors.length === 0, cdp.errors.slice(0, 3).join(" | "));
+}
+
+async function runHistoryTop() {
+  await load(`${api}/demo?token=${TOKEN}&select=claude:top-long`);
+  await waitFor(`${evCount} >= 150 && document.querySelector('#more') && !document.querySelector('#more').disabled`, 8_000, "long session latest page");
+  const count = await cdp.eval(evCount);
+  await cdp.eval(`document.querySelector('#timeline').scrollTop = 0`);
+  await waitFor(`${evCount} > ${count} && !document.querySelector('#more').disabled`, 8_000, "automatic page before top jump");
+  const button = await cdp.eval(`(() => { window.__topRequests = []; const fetch0 = window.fetch;
+    window.fetch = (...args) => { const u = new URL(args[0], location.href); if (u.pathname.endsWith('/events')) window.__topRequests.push(u.search); return fetch0(...args); };
+    const b = document.querySelector('#more').getBoundingClientRect(), tl = document.querySelector('#timeline').getBoundingClientRect(), x = b.left + b.width / 2, y = b.top + b.height / 2;
+    return { x, y, visible: b.top >= tl.top && b.bottom <= tl.bottom && document.elementFromPoint(x, y)?.closest('#more') != null }; })()`);
+  if (button.visible) {
+    await cdp.send("Input.dispatchMouseEvent", { type: "mousePressed", x: button.x, y: button.y, button: "left", clickCount: 1 });
+    await cdp.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: button.x, y: button.y, button: "left", clickCount: 1 });
+  }
+  const top = await waitFor(`(() => { const tl = document.querySelector('#timeline');
+    return document.querySelector('#more')?.textContent.trim() === '已到最顶' && tl.scrollTop === 0 ? { first: document.querySelector('#thread > .ev')?.dataset.id, requests: window.__topRequests, newer: !!document.querySelector('#newer') } : null; })()`, 8_000, "direct oldest page").catch(() => null);
+  report("[history] visible shortcut jumps a 1500-event session to its first event in one request", button.visible && top?.first === "top-u0" && top.newer && top.requests.length === 1 && top.requests[0].includes("oldest=true"), JSON.stringify({ button, top }));
+  await click("#newer");
+  const latest = await waitFor(`${hasText("top answer 499")}`, 5_000, "return from oldest").catch(() => false);
+  report("[history] jump to latest returns from the oldest window", !!latest);
 }
 
 // Rich rendering paths + screenshots for the docs (synthetic data only).
@@ -1666,7 +1729,7 @@ try {
     for (const transport of ["sse", "ws", "ndjson"]) await runTransport(transport);
     await runCrossOrigin();
   }
-  for (const step of [runIdentity, runIcons, runUsage, runUsageControls, runTree, runUpgrade, runDetail, runTraj, runFts, runSearchHelp, runInsights, runNotify, runVisual, runDesign, runApi, runManage, runReadOnly, runRedact]) {
+  for (const step of [runHistoryBoundary, runHistoryTop, runIdentity, runIcons, runUsage, runUsageControls, runTree, runUpgrade, runDetail, runTraj, runFts, runSearchHelp, runInsights, runNotify, runVisual, runDesign, runApi, runManage, runReadOnly, runRedact]) {
     if (only.length && !only.includes(step.name)) continue;
     try { await step(); } catch (e) { report(`${step.name}`, false, String(e.message || e)); }
   }

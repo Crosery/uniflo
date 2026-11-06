@@ -476,6 +476,10 @@ async fn execute_archives_then_trashes_and_the_archive_stays_usable() {
     let paged = get(addr, &format!("/v1/sessions/{}/events?limit=2", enc(&key))).await;
     assert_eq!(paged["events"].as_array().unwrap().len(), 2);
     assert!(paged["next_before"].as_u64().is_some());
+    let oldest = get(addr, &format!("/v1/sessions/{}/events?oldest=true&limit=2&max_text=0", enc(&key))).await;
+    let oldest_ids = ids(&oldest);
+    assert_eq!(oldest_ids, ids(&ev)[..oldest_ids.len()]);
+    assert!(oldest["next_before"].is_null());
 
     // Full-text: the existing index keeps the archived session, a fresh one reads the archive.
     tokio::time::sleep(Duration::from_millis(800)).await;

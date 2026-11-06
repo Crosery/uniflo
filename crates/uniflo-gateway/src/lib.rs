@@ -7,7 +7,7 @@
 //! | `GET /v1/harnesses/{id}/icon.svg` | monochrome brand icon (`image/svg+xml`) |
 //! | `GET /v1/sessions?q=&limit=&format=ndjson` | search (see `uniflo-search` syntax) |
 //! | `GET /v1/sessions/{key}` | one session |
-//! | `GET /v1/sessions/{key}/events?limit=&before=&max_text=&format=ndjson` | transcript, newest page first |
+//! | `GET /v1/sessions/{key}/events?limit=&before=&oldest=&max_text=&format=ndjson` | transcript, newest page by default or oldest page |
 //! | `GET /v1/sessions/{key}/events?around=<event id>&limit=` | transcript window centred on one event |
 //! | `GET /v1/search?q=&filter=&kinds=&limit=&offset=` | full-text hits grouped by session (503 without an index) |
 //! | `GET /v1/stream` (SSE) · `/v1/stream.ndjson` · `/v1/ws` | live envelopes; `since`, `session`, `harness`, `types`, `kinds`, `max_text` |
@@ -223,6 +223,8 @@ async fn session(State(s): State<AppState>, Path(key): Path<String>) -> Response
 struct EventParams {
     limit: Option<usize>,
     before: Option<u64>,
+    /// Return the oldest events instead of the newest page.
+    oldest: Option<bool>,
     /// Event id: return a window centred on it instead of a page.
     around: Option<String>,
     max_text: Option<usize>,
@@ -237,10 +239,15 @@ async fn events(State(s): State<AppState>, Path(key): Path<String>, Query(p): Qu
         let (limit, max) = (p.limit.unwrap_or(200).clamp(1, 10_000), p.max_text.unwrap_or(DEFAULT_MAX_TEXT));
         return search::around(s.engine.clone(), key, id, limit, max, p.format.as_deref() == Some("ndjson")).await;
     }
-    let q = HistoryQuery { before: p.before, limit: p.limit.unwrap_or(200).clamp(1, 10_000) };
+    let limit = p.limit.unwrap_or(200).clamp(1, 10_000);
+    let oldest = p.oldest.unwrap_or(false);
+    let q = HistoryQuery { before: p.before, limit };
     let engine = s.engine.clone();
     let k = key.clone();
     let res = tokio::task::spawn_blocking(move || {
+        if oldest {
+            return anyhow::Ok((engine.oldest(&k, limit)?, None));
+        }
         let evs = engine.history(&k, &q)?;
         // Page sizes vary (upserts dedupe, one line can yield several events), so probe one
         // event further back: `next_before` is null exactly when nothing older exists.
