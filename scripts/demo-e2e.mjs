@@ -283,12 +283,19 @@ async function runTransport(t) {
   await until(() => cdp.eval(`${evCount} >= 150`), 5_000, "first page").catch(() => {});
   const first = await cdp.eval(evCount);
   report(`[${t}] transcript first page rendered`, first >= 150, `${first} events`);
-  await cdp.eval(`document.querySelector('#more')?.click()`);
-  await until(() => cdp.eval(`${evCount} > ${first}`), 5_000, "older page").catch(() => {});
+  const marker = await cdp.eval(`(() => { const tl = document.querySelector('#timeline'), more = document.querySelector('#more');
+    const before = { tag: more?.tagName, text: more?.textContent.trim() }; tl.scrollTop = 0; tl.dispatchEvent(new Event('scroll')); return before; })()`);
+  await until(() => cdp.eval(`${evCount} > ${first}`), 5_000, "older page by scroll").catch(() => {});
   const all = await cdp.eval(evCount);
-  report(`[${t}] "load earlier" pages history`, all > first, `${first} → ${all}`);
+  const afterScroll = await cdp.eval(`({ top: document.querySelector('#timeline').scrollTop, text: document.querySelector('#more')?.textContent.trim() })`);
+  report(`[${t}] upward scrolling automatically loads older history`, all > first && marker.tag === "BUTTON" && marker.text === "到最顶" && afterScroll.top > 0, `${first} → ${all} · ${JSON.stringify({ marker, afterScroll })}`);
 
-  // Live append → DOM, timed inside the page.
+  await load(`${api}/demo?token=${TOKEN}&transport=${t}&select=claude:sess-1`);
+  await until(() => cdp.eval(`${evCount} >= 150`), 5_000, "first page for oldest jump").catch(() => {});
+  const clicked = await cdp.eval(`(() => { const b = document.querySelector('#more'); if (!b || b.disabled) return false; b.click(); return true; })()`);
+  const oldest = await until(() => cdp.eval(`(() => { const tl = document.querySelector('#timeline'), more = document.querySelector('#more');
+    return more?.textContent.trim() === "已到最顶" && tl.scrollTop === 0 ? { count: ${evCount}, top: tl.scrollTop } : null; })()`), 5_000, "oldest jump").catch(() => null);
+  report(`[${t}] “到最顶” loads all remaining history`, clicked && !!oldest && oldest.count >= all && oldest.top === 0, JSON.stringify({ clicked, oldest, auto: all }));
   const tag = `e2e-live-${t}-${Date.now()}`;
   await cdp.eval(`window.__seen = 0; new MutationObserver(() => { if (!window.__seen && ${hasText(tag)}) window.__seen = Date.now(); })
     .observe(document.querySelector('#timeline'), { childList: true, subtree: true, characterData: true }); true`);

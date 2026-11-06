@@ -536,10 +536,16 @@ tr.r-note td { height: 30px; color: var(--text-3); text-align: left; }
 .info-grid .kv { grid-template-columns: 84px minmax(0, 1fr); }
 #timeline { flex: 1; min-height: 0; overflow-y: auto; scroll-behavior: auto; }
 #thread { max-width: 800px; margin: 0 auto; padding: 28px 32px 32px; }
-#more, #newer { display: flex; align-items: center; gap: 6px; margin: 0 auto 14px; height: 28px; padding: 0 12px; border-radius: 999px; border: 1px solid var(--border-2); background: var(--bg-raised); color: var(--text-2); font-size: var(--fs-xs); }
+#more { display: flex; align-items: center; justify-content: center; gap: 6px; min-height: 28px; margin: 0 auto 14px; padding: 0 12px; border: 0; background: none; color: var(--text-3); font-size: var(--fs-xs); cursor: pointer; }
+#more.loading { color: var(--accent); cursor: wait; }
+#more.error { color: var(--danger); }
+#more.done { color: var(--text-3); cursor: default; }
+#more .spin { width: 12px; height: 12px; }
+#more:disabled { opacity: 1; }
+#newer { display: flex; align-items: center; gap: 6px; margin: 0 auto 14px; height: 28px; padding: 0 12px; border-radius: 999px; border: 1px solid var(--border-2); background: var(--bg-raised); color: var(--text-2); font-size: var(--fs-xs); }
 #newer { margin: 18px auto 0; }
 #newer.fresh { color: var(--accent); border-color: var(--accent-border); }
-#more:hover, #newer:hover { background: var(--hover); color: var(--text); }
+#newer:hover { background: var(--hover); color: var(--text); }
 .working-line { max-width: 800px; margin: 0 auto; padding: 0 32px 72px; display: flex; align-items: center; gap: 8px; font-size: var(--fs-sm); }
 .ev { position: relative; }
 .ev.enter { animation: enter 240ms var(--ease); }
@@ -3813,7 +3819,7 @@ async function select(key, reveal = true, at = null) {
   if ($("#timeline").hidden) chatPin = { bottom: true, top: 0 };
   if (TR.key !== key && needsTraj(shownTab())) { resetTraj(key); paintTab(); }
   setp({ select: key, at });
-  T = { key, at, evs: new Map(), nodes: new Map(), calls: new Map(), results: new Map(), open: T?.key === key ? T.open : new Set(), loading: true, pending: [], nextBefore: null, window: false };
+  T = { key, at, evs: new Map(), nodes: new Map(), calls: new Map(), results: new Map(), open: T?.key === key ? T.open : new Set(), loading: true, loadingEarlier: false, pending: [], nextBefore: null, window: false };
   const mine = T;
   $("#timeline").innerHTML = `<div class="wrap" id="thread">${Array.from({ length: 4 }, (_, i) => `<div style="margin:18px 0;${i % 2 ? "" : "display:flex;justify-content:flex-end"}"><div class="sk" style="height:${i % 2 ? 64 : 34}px;width:${i % 2 ? 100 : 45}%"></div></div>`).join("")}</div>`;
   const enc = encodeURIComponent(key);
@@ -3829,7 +3835,7 @@ async function select(key, reveal = true, at = null) {
     renderHead(current);
     const newest = latest?.events?.at(-1)?.id;
     T.window = !!at && !!newest && !ev.body.events.some((e) => e.id === newest);
-    $("#timeline").innerHTML = `<div class="wrap" id="thread"><button id="more">${icon("up")}加载更早</button>${T.window ? `<button id="newer">${icon("down")}跳到最新</button>` : ""}</div>
+    $("#timeline").innerHTML = `<div class="wrap" id="thread"><button id="more" type="button" aria-live="polite" aria-atomic="true" aria-busy="false" title="向上滚动也会自动加载更早事件">${icon("up")}<span>到最顶</span></button>${T.window ? `<button id="newer">${icon("down")}跳到最新</button>` : ""}</div>
       <div class="working-line" id="working"${current.status === "work" ? "" : " hidden"}><span class="spin"></span><span class="shimmer">正在工作…</span></div>`;
     for (const e of ev.body.events) upsertEvent(e, false);
     T.loading = false;
@@ -3851,21 +3857,53 @@ function revealEvent(id) {
   node.classList.add("hit-target", "flash");
   node.scrollIntoView({ block: "center" });
 }
-function setMore(nb) {
+function setMore(nb, state = "ready") {
   T.nextBefore = nb;
   const b = $("#more");
-  if (b) { b.style.display = nb == null ? "none" : ""; b.disabled = false; }
+  if (!b) return;
+  const done = nb == null;
+  b.hidden = false;
+  b.disabled = done || state === "loading";
+  b.className = done ? "done" : state;
+  b.setAttribute("aria-busy", String(state === "loading"));
+  b.innerHTML = done ? `${icon("check")}<span>已到最顶</span>`
+    : state === "loading" ? '<span class="spin"></span><span>正在加载更早…</span>'
+      : `${icon("up")}<span>到最顶</span>`;
 }
-async function loadEarlier(btn) {
-  if (!T || T.nextBefore == null) return;
-  btn.disabled = true;
+function setMoreError() {
+  const b = $("#more");
+  if (!b) return;
+  b.hidden = false;
+  b.disabled = false;
+  b.className = "error";
+  b.setAttribute("aria-busy", "false");
+  b.innerHTML = `${icon("x")}<span>加载失败，继续上滑重试</span>`;
+}
+async function loadEarlier(limit = PAGE) {
+  if (!T || T.loading || T.loadingEarlier || T.nextBefore == null) return false;
   const mine = T, tl = $("#timeline"), h0 = tl.scrollHeight;
-  const r = await api("events", `/v1/sessions/${encodeURIComponent(mine.key)}/events`, { limit: PAGE, before: mine.nextBefore, max_text: MAX_TEXT });
-  if (T !== mine) return;
-  const anchor = $("#more").nextElementSibling;
-  for (const e of r.body.events) if (!T.evs.has(e.id)) upsertEvent(e, false, anchor);
-  setMore(r.body.next_before);
-  tl.scrollTop += tl.scrollHeight - h0;
+  mine.loadingEarlier = true;
+  setMore(mine.nextBefore, "loading");
+  try {
+    const r = await api("events", `/v1/sessions/${encodeURIComponent(mine.key)}/events`, { limit, before: mine.nextBefore, max_text: MAX_TEXT });
+    if (T !== mine) return false;
+    const anchor = $("#more").nextElementSibling;
+    for (const e of r.body.events) if (!T.evs.has(e.id)) upsertEvent(e, false, anchor);
+    setMore(r.body.next_before);
+    tl.scrollTop += tl.scrollHeight - h0;
+    return true;
+  } catch {
+    if (T === mine) setMoreError();
+    return false;
+  } finally {
+    if (T === mine) mine.loadingEarlier = false;
+  }
+}
+async function loadAllEarlier() {
+  if (!T || T.loading || T.loadingEarlier || T.nextBefore == null) return;
+  const mine = T;
+  while (T === mine && mine.nextBefore != null) if (!await loadEarlier()) break;
+  if (T === mine && mine.nextBefore == null) $("#timeline").scrollTop = 0;
 }
 function scrollBottom(force) {
   const tl = $("#timeline");
@@ -5599,6 +5637,10 @@ for (const k of ["#k-pal", "#pal-key"]) $(k).textContent = IS_MAC ? "⌘K" : "Ct
 $("#open-palette").title = `命令面板 (${IS_MAC ? "⌘K" : "Ctrl+K"})`;
 
 // ---------------------------------------------------------------- interaction
+$("#timeline").addEventListener("scroll", () => {
+  if (T?.nextBefore != null && !T.loading && !T.loadingEarlier && $("#timeline").scrollTop < 320) loadEarlier();
+}, { passive: true });
+
 document.addEventListener("click", (e) => {
   const t = e.target;
   if (!t.closest("#menu") && !t.closest("#resume-btn, #filter-btn")) closeMenu();
@@ -5646,7 +5688,7 @@ document.addEventListener("click", (e) => {
   if (kt) return kidAct(kt);
   const row = t.closest(".row[data-key]");
   if (row) return select(row.dataset.key);
-  if (t.closest("#more")) return loadEarlier(t.closest("#more"));
+  if (t.closest("#more")) return loadAllEarlier();
   if (t.closest("#newer")) return select(T.key, false);
   const tb = t.closest("#transport button");
   if (tb && tb.dataset.transport !== transport) {

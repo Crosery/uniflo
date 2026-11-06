@@ -8,7 +8,7 @@
 
 [开发者站](https://crosery.github.io/uniflo/) · [快速开始](#快速开始) · [网页控制台](docs/console.md) · [网关 API](docs/api.md) · [Rust SDK](docs/sdk.md) · [Agent 接入](docs/agents.md) · [llms.txt](https://crosery.github.io/uniflo/llms.txt)
 
-[0.2.6 发布说明](docs/releases/v0.2.6.md)：更新检查同时有官方源和国内镜像，下载在 GitHub 连不上时自动改经加速站，中国大陆的 `uniflo update` 不再卡住。
+[0.2.7 发布说明](docs/releases/v0.2.7.md)：会话对话支持向上滑动自动加载更早历史，并可一键加载到最顶，加载时保持当前滚动位置。
 
 ![会话视图](docs/assets/demo.png)
 
