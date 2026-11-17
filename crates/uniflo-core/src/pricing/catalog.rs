@@ -497,7 +497,8 @@ fn skeleton(key: &str) -> Option<(String, Vec<u64>)> {
 /// Words that mark a product tier/variant rather than the model family itself. Dropping one of
 /// these off the *end* of a name is never allowed (`qwen3.8-max` must not fall back to
 /// `qwen3.8`, `gpt-5-mini` must not fall back to `gpt-5`) because it would silently price a
-/// bigger or smaller tier as if it were the base model.
+/// bigger or smaller tier as if it were the base model — unless [`is_effort_word`] recognizes it
+/// as a reasoning-effort qualifier on that family.
 const TIER_WORDS: &[&str] = &[
     "mini",
     "nano",
@@ -536,6 +537,24 @@ fn is_tier_word(w: &str) -> bool {
     TIER_WORDS.iter().any(|t| t.eq_ignore_ascii_case(w))
 }
 
+/// `max` and `medium` name a product tier on some families (`qwen3.8-max`, `mistral-medium`) and
+/// a reasoning-effort level on others (`claude-opus-4-6-max`, `gemini-4-carbon-medium`,
+/// `gpt-oss-120b-medium`, `o3-medium`).
+fn is_effort_word(words: &[String], w: &str) -> bool {
+    if words.len() < 2 {
+        return false;
+    }
+    let claude = words.iter().any(|c| matches!(c.as_str(), "opus" | "sonnet" | "haiku" | "claude"));
+    if w.eq_ignore_ascii_case("max") {
+        return claude;
+    }
+    if w.eq_ignore_ascii_case("medium") {
+        let o_series = words.windows(2).any(|p| p[0] == "o" && p[1].bytes().all(|b| b.is_ascii_digit()));
+        return claude || o_series || words.iter().any(|c| matches!(c.as_str(), "gemini" | "gpt"));
+    }
+    false
+}
+
 /// Byte spans of the words in `s`, splitting on `-` and `:` (the separators themselves are
 /// dropped but their position is implicit: joining the spans of a contiguous range reproduces
 /// the original separators between them).
@@ -562,8 +581,8 @@ fn word_spans(s: &str) -> Vec<(usize, usize)> {
 /// harness prefix like `qcn-` or `cline-` is tried before trimming any suffix). A window must
 /// start with an ASCII letter, carry an ASCII digit or span at least two words (`oc-space-bunny`
 /// → `space-bunny`, while `mimo-auto` never shrinks to a bare `mimo`), and may not drop a
-/// [`TIER_WORDS`] word off the end — handles prefixes (`qcn-qwen3.8-flash`), suffixes (`gemini-3.8-flash-high`,
-/// `claude-opus-4-6-thinking`, `qwen3.6-plus-free`) and both at once.
+/// non-effort [`TIER_WORDS`] word off the end — handles prefixes (`qcn-qwen3.8-flash`), suffixes
+/// (`gemini-3.8-flash-medium`, `claude-opus-4-6-thinking`, `qwen3.6-plus-free`) and both at once.
 fn name_windows(base: &str) -> Vec<&str> {
     let spans = word_spans(base);
     let n = spans.len();
@@ -574,14 +593,20 @@ fn name_windows(base: &str) -> Vec<&str> {
     for len in (1..n).rev() {
         for start in (0..=(n - len)).rev() {
             let end = start + len;
-            let dropped_trailing_is_tier = (end..n).any(|k| is_tier_word(&base[spans[k].0..spans[k].1]));
-            if dropped_trailing_is_tier {
+            let win = &base[spans[start].0..spans[end - 1].1];
+            if !win.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
+                || (len < 2 && !win.bytes().any(|b| b.is_ascii_digit()))
+            {
                 continue;
             }
-            let win = &base[spans[start].0..spans[end - 1].1];
-            if win.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
-                && (len >= 2 || win.bytes().any(|b| b.is_ascii_digit()))
-            {
+            let mut win_words: Option<Vec<String>> = None;
+            let dropped_trailing_is_tier = (end..n).any(|k| {
+                let w = &base[spans[k].0..spans[k].1];
+                is_tier_word(w)
+                    && !((w.eq_ignore_ascii_case("max") || w.eq_ignore_ascii_case("medium"))
+                        && is_effort_word(win_words.get_or_insert_with(|| similarity_words(win)), w))
+            });
+            if !dropped_trailing_is_tier {
                 out.push(win);
             }
         }
@@ -807,8 +832,7 @@ impl Catalog {
     /// - its version numbers are exactly the name's (`gpt-5` never stands in for `gpt-5.1`, and a
     ///   size such as `70b` is never dropped),
     /// - every [`TIER_WORDS`] word of the name is in the listing too (`qwen3.8-max` is not
-    ///   `qwen3.8`), except `max` and `medium` on Claude names where they only say how hard the
-    ///   model thought, and
+    ///   `qwen3.8`), except reasoning-effort tags recognized by [`is_effort_word`], and
     /// - the listing is at least half of the name's words.
     ///
     /// The most specific listing wins (most words), a vendor's before a reseller median.
@@ -837,11 +861,8 @@ impl Catalog {
                 {
                     continue;
                 }
-                let claude = cand.iter().any(|c| matches!(c.as_str(), "opus" | "sonnet" | "haiku"));
-                let tier_kept = words
-                    .iter()
-                    .filter(|w| is_tier_word(w))
-                    .all(|w| cand.contains(w) || (claude && matches!(w.as_str(), "max" | "medium")));
+                let tier_kept =
+                    words.iter().filter(|w| is_tier_word(w)).all(|w| cand.contains(w) || is_effort_word(cand, w));
                 if tier_kept {
                     best = Some(i);
                 }
@@ -1148,6 +1169,82 @@ mod tests {
             "two words need no digit"
         );
         assert_eq!(c.resolve("qfmodel"), (MatchKind::None, None), "single word: no window at all");
+    }
+
+    #[test]
+    fn antigravity_and_effort_medium_models_resolve_without_breaking_size_tiers() {
+        let c = Catalog::new(vec![
+            entry("gemini-4-carbon"),
+            entry("gemini-4-argon"),
+            entry("gemini-4-hydrogen"),
+            entry("gemini-3.8-flash"),
+            entry("gemini-3.7-flash"),
+            entry("gemini-3.6-flash"),
+            entry("gemini-3.1-pro"),
+            entry("claude-sonnet-4-6"),
+            entry("claude-opus-4-6"),
+            entry("gpt-oss-120b"),
+            entry("gpt-5"),
+            entry("gpt-5.1-codex"),
+            entry("o3"),
+            entry("qwen3.8"),
+            entry("mistral"),
+            entry("mistral-3"),
+        ]);
+        let id = |m: &str| {
+            let (k, i) = c.resolve(m);
+            (k, i.map(|i| c.entries[i].id.clone()))
+        };
+        let approx = |id: &str| (MatchKind::Approx, Some(id.to_string()));
+
+        for sfx in ["low", "medium", "high"] {
+            assert_eq!(id(&format!("gemini-4-carbon-{sfx}")), approx("gemini-4-carbon"));
+            assert_eq!(id(&format!("gemini-4-argon-{sfx}")), approx("gemini-4-argon"));
+            assert_eq!(id(&format!("gemini-3.8-flash-{sfx}")), approx("gemini-3.8-flash"));
+            assert_eq!(id(&format!("gemini-3.7-flash-{sfx}")), approx("gemini-3.7-flash"));
+            assert_eq!(id(&format!("gemini-3.6-flash-{sfx}")), approx("gemini-3.6-flash"));
+        }
+        for sfx in ["low", "medium", "high", "xhigh"] {
+            assert_eq!(id(&format!("gemini-4-hydrogen-{sfx}")), approx("gemini-4-hydrogen"));
+        }
+        for sfx in ["low", "high"] {
+            assert_eq!(id(&format!("gemini-3.1-pro-{sfx}")), approx("gemini-3.1-pro"));
+        }
+        assert_eq!(id("claude-sonnet-4-6"), (MatchKind::Exact, Some("claude-sonnet-4-6".into())));
+        assert_eq!(id("claude-opus-4-6-thinking"), approx("claude-opus-4-6"));
+        assert_eq!(id("claude-opus-4-6-medium"), approx("claude-opus-4-6"));
+        assert_eq!(id("claude-opus-4-6-max"), approx("claude-opus-4-6"));
+        assert_eq!(id("gpt-oss-120b-medium"), approx("gpt-oss-120b"));
+        assert_eq!(id("gpt-5-medium"), approx("gpt-5"));
+        assert_eq!(id("o3-medium"), approx("o3"));
+        assert_eq!(id("acme-gemini-4-carbon-medium"), approx("gemini-4-carbon"));
+
+        // Size-tier `medium`, `max`, and `mini` remain protected.
+        assert_eq!(id("mistral-medium"), (MatchKind::None, None));
+        assert_eq!(id("mistral-3-medium"), (MatchKind::None, None));
+        assert_eq!(id("mistral-medium-2505"), (MatchKind::None, None));
+        assert_eq!(id("qwen3.8-max"), (MatchKind::None, None));
+        assert_eq!(id("gpt-5-mini"), (MatchKind::None, None));
+        assert_eq!(id("gpt-5-mini-medium"), (MatchKind::None, None));
+        assert_eq!(id("gpt-5.1-codex-max"), (MatchKind::None, None));
+
+        // Dropping `-medium` never allows dropping the real tier word before it (`-flash`).
+        let only_base = Catalog::new(vec![entry("gemini-3.8")]);
+        assert_eq!(only_base.resolve("gemini-3.8-flash-medium"), (MatchKind::None, None));
+
+        // Embedded snapshot check for models present in `pricing-snapshot.json`.
+        let snap = Catalog::new(crate::pricing::snapshot().entries.clone());
+        let snap_id = |m: &str| {
+            let (k, i) = snap.resolve(m);
+            (k, i.map(|i| snap.entries[i].id.clone()))
+        };
+        assert_eq!(snap_id("claude-sonnet-4-6"), (MatchKind::Exact, Some("claude-sonnet-4-6".into())));
+        assert_eq!(snap_id("claude-opus-4-6-thinking"), approx("claude-opus-4-6"));
+        assert_eq!(snap_id("gpt-oss-120b-medium"), approx("gpt-oss-120b"));
+        for sfx in ["low", "medium", "high"] {
+            assert_eq!(snap_id(&format!("gemini-4-argon-{sfx}")), approx("gemini-4-argon"));
+            assert_eq!(snap_id(&format!("gemini-3.8-flash-{sfx}")), approx("gemini-3.8-flash"));
+        }
     }
 
     #[test]

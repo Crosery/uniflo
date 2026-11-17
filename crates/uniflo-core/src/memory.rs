@@ -15,6 +15,7 @@ const GLOBAL: &[(&str, &str)] = &[
     (".claude/CLAUDE.md", "claude"),
     (".codex/AGENTS.md", "codex"),
     (".gemini/GEMINI.md", "gemini"),
+    (".gemini/config/GEMINI.md", "antigravity"),
     (".agents/AGENTS.md", "agents"),
     (".config/opencode/AGENTS.md", "opencode"),
     (".omp/agent/AGENTS.md", "omp"),
@@ -71,6 +72,9 @@ pub fn list(home: &Path, cwd: Option<&Path>) -> Vec<MemoryFile> {
         for p in sorted(&d.join(".cursor/rules"), "mdc") {
             push(&mut out, p, MemoryScope::Project, "cursor");
         }
+        for p in sorted(&d.join(".agents/rules"), "md") {
+            push(&mut out, p, MemoryScope::Project, "antigravity");
+        }
     }
     out
 }
@@ -124,14 +128,20 @@ fn classify(home: &Path, path: &Path) -> Option<(MemoryScope, &'static str)> {
     {
         return Some((MemoryScope::Project, "claude"));
     }
-    if let Some((_, h)) = PROJECT.iter().find(|(n, _)| *n == name) {
-        return Some((MemoryScope::Project, h));
-    }
     if name.ends_with(".mdc")
         && dir(parent).as_deref() == Some("rules")
         && parent.parent().and_then(dir).as_deref() == Some(".cursor")
     {
         return Some((MemoryScope::Project, "cursor"));
+    }
+    if Path::new(name).extension() == Some("md".as_ref())
+        && dir(parent).as_deref() == Some("rules")
+        && parent.parent().and_then(dir).as_deref() == Some(".agents")
+    {
+        return Some((MemoryScope::Project, "antigravity"));
+    }
+    if let Some((_, h)) = PROJECT.iter().find(|(n, _)| *n == name) {
+        return Some((MemoryScope::Project, h));
     }
     None
 }
@@ -191,10 +201,15 @@ mod tests {
         std::fs::create_dir_all(&sub).unwrap();
         write(&home.join(".claude/CLAUDE.md"), "g");
         write(&home.join(".codex/AGENTS.md"), "g2");
+        write(&home.join(".gemini/config/GEMINI.md"), "agy global");
         write(&proj.join("AGENTS.md"), "root agents");
         write(&sub.join("CLAUDE.md"), "sub");
         write(&proj.join(".cursor/rules/a.mdc"), "rule");
         write(&proj.join(".cursor/rules/notes.txt"), "no");
+        write(&proj.join(".agents/rules/b.md"), "agy rule b");
+        write(&proj.join(".agents/rules/a.md"), "agy rule a");
+        write(&proj.join(".agents/rules/notes.txt"), "no");
+        write(&proj.join(".agents/rules/nested/c.md"), "no");
         write(&proj.join("README.md"), "no");
         let mem = home.join(".claude/projects").join(claude_slug(&proj)).join("memory");
         write(&mem.join("MEMORY.md"), "idx");
@@ -212,19 +227,39 @@ mod tests {
             vec![
                 ("/home/.claude/CLAUDE.md".into(), g, "claude".into()),
                 ("/home/.codex/AGENTS.md".into(), g, "codex".into()),
+                ("/home/.gemini/config/GEMINI.md".into(), g, "antigravity".into()),
                 (format!("/home/.claude/projects/{}/memory/MEMORY.md", claude_slug(&proj)), p, "claude".into()),
                 (format!("/home/.claude/projects/{}/memory/x.md", claude_slug(&proj)), p, "claude".into()),
                 ("/proj/AGENTS.md".into(), p, "agents".into()),
                 ("/proj/.cursor/rules/a.mdc".into(), p, "cursor".into()),
+                ("/proj/.agents/rules/a.md".into(), p, "antigravity".into()),
+                ("/proj/.agents/rules/b.md".into(), p, "antigravity".into()),
                 ("/proj/crates/x/CLAUDE.md".into(), p, "claude".into()),
             ]
         );
-        assert_eq!(list(&home, None).len(), 2);
+        assert_eq!(list(&home, None).len(), 3);
 
         let r = read(&home, &proj.join(".cursor/rules/a.mdc")).unwrap();
         assert_eq!((r.content.as_str(), r.file.scope, r.truncated), ("rule", p, false));
+        let agy_g = read(&home, &home.join(".gemini/config/GEMINI.md")).unwrap();
+        assert_eq!(
+            (agy_g.content.as_str(), agy_g.file.scope, agy_g.file.harness.as_str()),
+            ("agy global", g, "antigravity")
+        );
+        let agy_p = read(&home, &proj.join(".agents/rules/a.md")).unwrap();
+        assert_eq!(
+            (agy_p.content.as_str(), agy_p.file.scope, agy_p.file.harness.as_str()),
+            ("agy rule a", p, "antigravity")
+        );
         assert!(read(&home, &mem.join("x.md")).is_ok());
-        for bad in [proj.join("README.md"), proj.join(".cursor/rules/notes.txt"), sub.join("../../AGENTS.md")] {
+        for bad in [
+            proj.join("README.md"),
+            proj.join(".cursor/rules/notes.txt"),
+            proj.join(".agents/rules/notes.txt"),
+            proj.join(".agents/rules/nested/c.md"),
+            proj.join(".agents/other.md"),
+            sub.join("../../AGENTS.md"),
+        ] {
             assert!(matches!(read(&home, &bad), Err(ReadError::Forbidden)), "{bad:?}");
         }
         assert!(matches!(read(&home, Path::new("AGENTS.md")), Err(ReadError::Forbidden)));

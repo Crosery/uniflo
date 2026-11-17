@@ -28,7 +28,7 @@ use uniflo_schema::{
 };
 
 /// Bump when ledger semantics change so cached ledgers are rebuilt.
-pub const LEDGER_VERSION: u32 = 1;
+pub const LEDGER_VERSION: u32 = 2;
 
 /// Stable 64-bit FNV-1a: event ids are hashed into persisted dedupe sets, so the hash must
 /// not depend on the Rust version.

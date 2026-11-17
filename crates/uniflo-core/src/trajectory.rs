@@ -316,7 +316,7 @@ impl<'p> Builder<'p> {
 /// Whether a tool name looks like one that starts a sub-agent.
 fn spawns_agents(name: &str) -> bool {
     let n = name.to_ascii_lowercase();
-    ["agent", "task", "spawn"].iter().any(|k| n.contains(k))
+    n == "swarm" || ["agent", "task", "spawn"].iter().any(|k| n.contains(k))
 }
 
 struct ToolRef {
@@ -669,5 +669,28 @@ mod tests {
         assert!(tool_children(0, 1).is_empty());
         assert_eq!(tool_children(0, 2), ["t:near"]);
         assert_eq!(tool_children(1, 0), ["t:exact"]);
+    }
+
+    #[test]
+    fn swarm_calls_claim_children_without_swarm_wait_stealing_them() {
+        let mut t = build(&[
+            user("u1", 100, "coordinate"),
+            call("c1", 110, "sw1", "swarm"),
+            call("c2", 112, "sw2", "Swarm"),
+            call("c3", 115, "wait1", "swarm_wait"),
+            usage("s1", 130, 1),
+        ]);
+        link_children(&mut t, &[child("t:w1", 118, None), child("t:w2", 120, None), child("t:w3", 125, None)]);
+        let at = |k: &str| t.children.iter().find(|c| c.key == k).map(|c| (c.call_id.as_deref(), c.step)).unwrap();
+        assert_eq!(at("t:w1"), (Some("sw2"), Some(1)));
+        assert_eq!(at("t:w2"), (Some("sw1"), Some(1)));
+        assert_eq!(at("t:w3"), (None, Some(1)), "swarm_wait never claims a child");
+        let tool_children = |i: usize| match &t.turns[0].steps[0].items[i] {
+            TrajectoryItem::Tool { children, .. } => children.clone(),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(tool_children(0), ["t:w2"]);
+        assert_eq!(tool_children(1), ["t:w1"]);
+        assert!(tool_children(2).is_empty());
     }
 }
