@@ -2,7 +2,7 @@
 
 > 让 agent 直接查询本机所有会话：stdio MCP 服务器 `uniflo mcp`、随二进制分发的 Skill、一条命令全局接入的 `uniflo setup`，以及恢复会话、记忆与指令文件、接力上下文。
 
-状态：`current` · 更新：2026-10-30
+状态：`current` · 更新：2026-11-17
 
 同一能力有三个入口：REST（`docs/api.md`）、CLI `--json`、MCP `structuredContent`（工具参数传 `structured: true` 才带）。MCP 工具内部就是对网关 REST 路由的 `GET`，所以三者的数值与 id 一致（`crates/uniflo-cli/tests/agent.rs` 的 `mcp_cli_and_rest_agree` 逐项比对）。浮点也逐位一致：`serde_json` 开启了 `float_roundtrip`，响应解析后再输出不会改动最后一位。唯一会随时间变的是全文检索的 `score`：它带最近活动加权，隔一段时间再查会略有变化，比对时去掉它。
 
@@ -117,6 +117,7 @@
 | Kiro | `~/.kiro/settings/mcp.json` | 同上 |
 | GitHub Copilot CLI | `~/.copilot/mcp-config.json` | `mcpServers.uniflo = {type: "local", command, args, tools: ["*"]}` |
 | Qwen Code | `~/.qwen/settings.json` | `mcpServers.uniflo = {command, args}` |
+| Antigravity | `~/.gemini/config/mcp_config.json` | `mcpServers.uniflo = {command, args: ["mcp"]}` |
 
 Pi、Grok 没有可用的 MCP 客户端，只装 Skill（选了 MCP 也会装）。
 
@@ -130,7 +131,7 @@ Pi、Grok 没有可用的 MCP 客户端，只装 Skill（选了 MCP 也会装）
 
 ### Skill 安装
 
-真源写到 `~/.agents/skills/uniflo/SKILL.md`。只给不读 `~/.agents/skills` 的 harness 建**相对**软链 `<skills 目录>/uniflo → …/.agents/skills/uniflo`：claude（`~/.claude/skills`）、factory、codebuddy、qoder、cursor、kiro、copilot、qwen、pi（`~/.pi/agent/skills`）、grok。codex、gemini、opencode、omp、kimi 自己读 `~/.agents/skills`，不建软链，避免重复加载。同名的真实目录或指向别处的软链不动，只提示。
+真源写到 `~/.agents/skills/uniflo/SKILL.md`。只给不读 `~/.agents/skills` 的 harness 建**相对**软链 `<skills 目录>/uniflo → …/.agents/skills/uniflo`：claude（`~/.claude/skills`）、factory、codebuddy、qoder、cursor、kiro、copilot、qwen、antigravity（`~/.gemini/config/skills`）、pi（`~/.pi/agent/skills`）、grok。codex、gemini、opencode、omp、kimi 自己读 `~/.agents/skills`，不建软链，避免重复加载。同名的真实目录或指向别处的软链不动，只提示。
 
 ### 记录、撤销与刷新
 
@@ -202,8 +203,8 @@ Pi、Grok 没有可用的 MCP 客户端，只装 Skill（选了 MCP 也会装）
 
 `GET /v1/memory?cwd=<绝对路径>` 只读列出 agent 会加载的文件，每项 `MemoryFile{path, scope, harness, bytes, updated_at}`。不给 `cwd` 时只列全局文件。
 
-- **全局**（`scope: global`）：`~/.claude/CLAUDE.md`、`~/.codex/AGENTS.md`、`~/.gemini/GEMINI.md`、`~/.agents/AGENTS.md`、`~/.config/opencode/AGENTS.md`、`~/.omp/agent/AGENTS.md`、`~/.qwen/QWEN.md`、`~/.kimi-code/AGENTS.md`。
-- **项目**（`scope: project`）：从 git 根到 cwd 的每一层目录（不在 git 仓库里时只看 cwd 本身），依次列出该目录的 Claude 项目记忆 `~/.claude/projects/<slug>/memory/*.md`（slug 为路径中每个非字母数字字符换成 `-`；Claude Code 在仓库根启动时记忆挂在根目录的 slug 下，所以从子目录查也要带上它），以及 `AGENTS.md`、`CLAUDE.md`、`GEMINI.md`、`QWEN.md`、`.cursorrules`、`.cursor/rules/*.mdc`。
+- **全局**（`scope: global`）：`~/.claude/CLAUDE.md`、`~/.codex/AGENTS.md`、`~/.gemini/GEMINI.md`、`~/.gemini/config/GEMINI.md`、`~/.agents/AGENTS.md`、`~/.config/opencode/AGENTS.md`、`~/.omp/agent/AGENTS.md`、`~/.qwen/QWEN.md`、`~/.kimi-code/AGENTS.md`。
+- **项目**（`scope: project`）：从 git 根到 cwd 的每一层目录（不在 git 仓库里时只看 cwd 本身），依次列出该目录的 Claude 项目记忆 `~/.claude/projects/<slug>/memory/*.md`（slug 为路径中每个非字母数字字符换成 `-`；Claude Code 在仓库根启动时记忆挂在根目录的 slug 下，所以从子目录查也要带上它），以及 `AGENTS.md`、`CLAUDE.md`、`GEMINI.md`、`QWEN.md`、`.cursorrules`、`.cursor/rules/*.mdc`、`.agents/rules/*.md`。
 
 `GET /v1/memory/file?path=<绝对路径>` 返回 `MemoryContent`（`MemoryFile` 字段加 `content`，超过 256 KB 截断并带 `truncated: true`）。只读上面这些位置和文件名能产生的路径：相对路径、含 `.` / `..`、其他文件名一律 403；文件不存在 404。判断是无状态的，不需要先调 `/v1/memory`。
 

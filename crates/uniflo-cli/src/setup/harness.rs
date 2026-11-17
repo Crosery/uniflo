@@ -187,6 +187,14 @@ pub const SPECS: &[Spec] = &[
         skill: Skill::Link(".qwen/skills"),
     },
     Spec {
+        id: "antigravity",
+        name: "Antigravity",
+        bins: &["agy"],
+        dirs: &[".gemini/antigravity", ".gemini/antigravity-cli", ".gemini/config"],
+        mcp: Mcp::File { file: ".gemini/config/mcp_config.json", key: "mcpServers", shape: Shape::Plain },
+        skill: Skill::Link(".gemini/config/skills"),
+    },
+    Spec {
         id: "pi",
         name: "Pi",
         bins: &["pi"],
@@ -211,6 +219,7 @@ pub fn lookup(id: &str) -> Option<&'static Spec> {
         "qodercli" => "qoder".to_owned(),
         "cursor-agent" => "cursor".to_owned(),
         "claude-code" => "claude".to_owned(),
+        "agy" => "antigravity".to_owned(),
         other => other.to_owned(),
     };
     SPECS.iter().find(|s| s.id == id)
@@ -329,8 +338,46 @@ mod tests {
             }
         }
         assert_eq!(lookup("droid").unwrap().id, "factory");
+        assert_eq!(lookup("agy").unwrap().id, "antigravity");
+        assert_eq!(lookup("Antigravity").unwrap().id, "antigravity");
         assert_eq!(lookup(" Claude ").unwrap().id, "claude");
         assert!(lookup("nope").is_none());
+    }
+
+    #[test]
+    fn detects_antigravity_by_agy_or_subdirs_not_plain_gemini() {
+        let t = tempfile::tempdir().unwrap();
+        let home = t.path().join("h");
+        let bin = t.path().join("bin");
+        std::fs::create_dir_all(home.join(".gemini")).unwrap();
+        std::fs::create_dir_all(&bin).unwrap();
+        let mk_env = |path: Vec<PathBuf>| Env {
+            home: home.clone(),
+            path,
+            sandboxed: true,
+            claude_config_dir: None,
+            codex_home: None,
+        };
+        let ids = |e: &Env| detect(e).into_iter().map(|d| d.spec.id).collect::<Vec<_>>();
+        assert_eq!(ids(&mk_env(vec![])), vec!["gemini"], "plain ~/.gemini only matches Gemini CLI");
+
+        for sub in [".gemini/antigravity", ".gemini/antigravity-cli", ".gemini/config"] {
+            let p = home.join(sub);
+            std::fs::create_dir_all(&p).unwrap();
+            assert_eq!(ids(&mk_env(vec![])), vec!["gemini", "antigravity"], "{sub}");
+            std::fs::remove_dir(&p).unwrap();
+        }
+
+        let agy = bin.join(if cfg!(windows) { "agy.exe" } else { "agy" });
+        std::fs::write(&agy, "#!/bin/sh\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&agy, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let found: Vec<(&str, bool)> =
+            detect(&mk_env(vec![bin])).into_iter().map(|d| (d.spec.id, d.cli.is_some())).collect();
+        assert_eq!(found, vec![("gemini", false), ("antigravity", true)]);
     }
 
     #[test]

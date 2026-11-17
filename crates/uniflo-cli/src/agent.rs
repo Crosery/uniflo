@@ -64,13 +64,14 @@ pub fn resume(src: &Source, key: &str, print: bool) -> Result<()> {
 
 fn run(s: &Session, info: &ResumeInfo) -> Result<()> {
     let needs_cwd = uniflo_core::resume::argv(&s.harness, &s.id).is_some_and(|(_, c)| c);
-    let dir = info.cwd.as_deref().filter(|c| Path::new(c).is_dir());
+    let raw_cwd = info.cwd.as_deref().or(s.cwd.as_deref());
+    let dir = raw_cwd.filter(|c| Path::new(c).is_dir());
     if needs_cwd && dir.is_none() {
         bail!(tr!(
             "{} 按目录恢复，而 {} 已不存在",
             "{} resumes per directory, and {} no longer exists",
             s.harness,
-            info.cwd.as_deref().unwrap_or("?")
+            raw_cwd.unwrap_or("?")
         ));
     }
     let (program, args) =
@@ -79,6 +80,10 @@ fn run(s: &Session, info: &ResumeInfo) -> Result<()> {
     cmd.args(args);
     if let Some(d) = dir {
         cmd.current_dir(d);
+        #[cfg(unix)]
+        if Path::new(d).is_absolute() {
+            cmd.env("PWD", d);
+        }
     }
     #[cfg(unix)]
     {

@@ -345,10 +345,44 @@ fn reload_points_entries_at_the_current_executable_and_adds_new_harnesses() {
 }
 
 #[test]
+fn antigravity_mcp_and_skill_install_and_uninstall() {
+    let h = Home::new();
+    let existing = "{\n  \"mcpServers\": {\n    \"other\": {\"command\": \"x\", \"args\": []}\n  }\n}\n";
+    h.write(".gemini/config/mcp_config.json", existing);
+    let out = h.setup(args(|a| (a.both, a.yes, a.agents) = (true, true, vec!["agy".into()])), false, "");
+    assert!(out.contains("antigravity"), "{out}");
+
+    let mcp = h.json(".gemini/config/mcp_config.json");
+    assert_eq!(mcp["mcpServers"].as_object().unwrap().keys().collect::<Vec<_>>(), ["other", "uniflo"]);
+    assert_eq!(mcp["mcpServers"]["uniflo"], json!({"command": BIN, "args": ["mcp"]}));
+    assert_eq!(h.read(".gemini/config/mcp_config.json.bak-uniflo-20261009-120000"), existing);
+
+    let link = h.path(".gemini/config/skills/uniflo");
+    assert!(
+        std::fs::read_link(&link).unwrap() == Path::new("../../../.agents/skills/uniflo")
+            || std::fs::canonicalize(&link).ok() == std::fs::canonicalize(h.path(".agents/skills/uniflo")).ok()
+    );
+    assert_eq!(std::fs::read_to_string(link.join("SKILL.md")).unwrap(), crate::agent::SKILL);
+
+    let out = h.setup(args(|a| (a.both, a.yes, a.agents) = (true, true, vec!["antigravity".into()])), false, "");
+    assert!(out.contains("已就绪"), "{out}");
+
+    h.setup(args(|a| (a.uninstall, a.yes) = (true, true)), false, "");
+    let mcp = h.json(".gemini/config/mcp_config.json");
+    assert_eq!(mcp["mcpServers"].as_object().unwrap().keys().collect::<Vec<_>>(), ["other"]);
+    assert!(!link.exists());
+    assert!(!h.path(".agents/skills/uniflo/SKILL.md").exists());
+}
+
+#[test]
 fn relative_links() {
     assert_eq!(
         relative(Path::new("/h/.claude/skills"), Path::new("/h/.agents/skills/uniflo")),
         PathBuf::from("../../.agents/skills/uniflo")
+    );
+    assert_eq!(
+        relative(Path::new("/h/.gemini/config/skills"), Path::new("/h/.agents/skills/uniflo")),
+        PathBuf::from("../../../.agents/skills/uniflo")
     );
     assert_eq!(
         relative(Path::new("/h/.pi/agent/skills"), Path::new("/h/.agents/skills/uniflo")),

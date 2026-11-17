@@ -2,7 +2,7 @@
 
 > 已支持的 harness、各自的存储与回合信号、是否支持会话清理，跨平台路径映射（macOS、Linux、Windows），以及新增一个 harness 的步骤。
 
-状态：`current` · 更新：2026-10-09
+状态：`current` · 更新：2026-11-17
 
 ## 已支持
 
@@ -21,7 +21,7 @@
 | `roo` | Roo Code | 同 Cline 路径结构，覆盖 `rooveterinaryinc.roo-cline`, `roovscode.roo-cline`, `kilocode.kilo-code` | 同 Cline | 同 Cline | — | — |
 | `kodu` | Kodu | 同 Cline 路径结构，`kodu-ai.kodu` | 同 Cline | 同 Cline | — | — |
 | `gemini` | Gemini CLI | `~/.gemini/tmp/<project>/chats/session-*.jsonl`（旧版 `.json`） | JSONL，消息原地重写 | 无工具调用的回复 | — | — |
-| `antigravity` | Antigravity | `~/.gemini/antigravity{,-cli}/brain/<id>/…/transcript.jsonl`，旁路 `annotations/<id>.pbtxt`、`conversations/<id>.db`、`conversation_summaries.db`、`cache/last_conversations.json` | 步骤 JSONL + 旁路元数据（标题、cwd、父会话） | 无工具调用的规划步骤 `DONE` | `ps` + `lsof`（Win: PowerShell） | `agy --conversation=<id>` |
+| `antigravity` | Antigravity | `~/.gemini/antigravity{,-cli}/brain/<id>/…/transcript.jsonl`，旁路 `annotations/<id>.pbtxt`、`conversations/<id>.db`、`conversation_summaries.db`、`cache/last_conversations.json` | 步骤 JSONL + 旁路元数据（标题含 `agent_name` 兜底、cwd、父会话、步骤用量） | 无工具调用的规划步骤 `DONE`（或 `CANCELED`）、`swarm_wait` 工具完成 | `ps` + `lsof` 打开 `conversations/<id>.db*` / `presence/<id>.lock`（Win: PowerShell） | `agy --conversation=<id>` |
 | `opencode` | OpenCode | `~/.local/share/opencode/opencode.db`（Windows: `%LOCALAPPDATA%\opencode\opencode.db`） | SQLite | 助手消息完成且 `finish != tool-calls` | `ps` + cwd 查询（Win: PowerShell） | `opencode --session <id>` |
 | `kilo` | Kilo Code | `~/.local/share/kilo/kilo.db`（Windows: `%LOCALAPPDATA%\kilo\kilo.db`） | 同 OpenCode | 同 OpenCode | `ps` + cwd 查询（Win: PowerShell） | `kilo --session <id>`（需 cwd） |
 | `zcode` | ZCode | `~/.zcode/cli/db/db.sqlite` | 同 OpenCode | 同 OpenCode | `ps` + cwd 查询（Win: PowerShell） | — |
@@ -59,6 +59,7 @@
 | prime | 同 Pi | 同 Pi | `message.model` | `usage.cost.total` |
 | cline / roo / kodu | `api_req_started` | 原样（Cline 已把缓存从 `tokensIn` 拆出） | 记录里的 `model` | `cost` |
 | gemini | 消息 `tokens` | `input = input + tool − cached`；`output = output + thoughts`；`reasoning = thoughts` | 消息 `model` | — |
+| antigravity | `transcript.jsonl` 的 `PLANNER_RESPONSE` / `CHECKPOINT` token 字段 + `conversations/<id>.db` 的 `steps.metadata`（`ModelUsageStats`） | `input = input_tokens`（本就不含缓存），`cache_read = cache_read_tokens`，`cache_write = cache_write_tokens`，`output = output_tokens`（已含思考），`reasoning = thinking_output_tokens` | 步骤 `model`；旧版无该字段时按 `steps.metadata` 的模型枚举 / `model_info` 映射 | — |
 | opencode / kilo / zcode / mimocode | `step-finish` part 的 `tokens` | `total = i+o+r+c` 的版本 output 不含思考 → 加回；`total = i+o+c` 的版本已含 → 原样；无 `total` 时同 Pi 的启发式 | 消息 `modelID` | part 的 `cost` |
 | workbuddy | 助手消息与工具调用记录的 `providerData.usage`（OpenAI completions 形） | `input = inputTokens − Σ inputTokensDetails[].cached_tokens`，后者记为 `cache_read`；`reasoning = Σ outputTokensDetails[].reasoning_tokens` | `providerData.model` | —（`credit` 不是美元） |
 | minimax | 助手行 `usage` | 原样（`input_tokens` 不含缓存） | `context_usage_telemetry.model` | — |
@@ -70,7 +71,7 @@
 | openclaw | 同 Pi（条目由 Pi 解码） | 同 Pi | `message.model` | `usage.cost.total` |
 | devin | 消息 `metadata.metrics` | 原样（`input_tokens` 不含缓存，`cache_read_tokens` / `cache_creation_tokens` 分列） | `metadata.generation_model` | — |
 | cursor（IDE 旧版会话） | 气泡的 `tokenCount` | 原样（`inputTokens` / `outputTokens`） | 气泡 `modelInfo.modelName`，否则会话的 `modelConfig.modelName`，再否则 `usageData` 里唯一的模型名（`""` 与 `default` 都算没记录；`usageData` 有多个模型时不猜） | — |
-| antigravity / cursor（transcript）/ factory / reasonix / kiro / copilot / craft | 不记录用量（craft 头部的 `tokenUsage` 是会话合计，且已由 `claude` 逐步计入） | — | — | — |
+| cursor（transcript）/ factory / reasonix / kiro / copilot / craft | 不记录用量（craft 头部的 `tokenUsage` 是会话合计，且已由 `claude` 逐步计入） | — | — | — |
 
 - 重复计数：Codex 一旦出现 `token_usage_record`，同文件的 `token_count` 都是它的重复，全部跳过；旧 rollout 只有 `token_count`，`total_token_usage` 未变化的重复行（限流刷新）跳过。Pi / Prime 的 `child_usage_attributed` 是子代理文件自身用量的合计（真实数据逐 token 相等），子代理会话本身已计，故不再产出 usage。
 - `cost_usd` 只在 harness 自报正数时填写；≤ 0 视为未报，由价格目录计算。

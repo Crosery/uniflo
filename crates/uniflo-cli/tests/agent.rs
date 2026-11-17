@@ -872,6 +872,138 @@ fn setup_outside_a_terminal_writes_nothing_and_nothing_prompts() {
     assert!(String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n").starts_with("---\nname: uniflo\n"));
 }
 
+/// Scenario: Antigravity (`agy`) 的 `uniflo setup`（MCP JSON + Skill 软链）与 `uniflo resume` 目录切换.
+#[test]
+fn antigravity_setup_and_resume_cwd_handling() {
+    let _lock = lock();
+    let h = Home { dir: tempfile::tempdir().unwrap() };
+    let ws = h.quoted_cwd();
+    std::fs::create_dir_all(&ws).unwrap();
+    let step = jl(json!({
+        "step_index": 0,
+        "type": "USER_INPUT",
+        "source": "USER_EXPLICIT",
+        "status": "DONE",
+        "created_at": "2026-11-17T10:00:00Z",
+        "content": "hello antigravity"
+    }));
+    for id in ["ag1", "ag2", "ag3"] {
+        h.write(&format!(".gemini/antigravity-cli/brain/{id}/.system_generated/logs/transcript.jsonl"), &step);
+    }
+    h.write(
+        ".gemini/antigravity-cli/cache/last_conversations.json",
+        serde_json::to_string(&json!({
+            ws.display().to_string(): "ag1",
+            "/no/such/antigravity/workspace": "ag2"
+        }))
+        .unwrap(),
+    );
+    h.write(".claude/projects/-m/cmissing.jsonl", user("u1", now_ms(), "/no/such/claude/workspace", "missing cwd"));
+
+    // Setup via `--agents agy` in sandboxed UNIFLO_HOME: writes mcp_config.json and skills/uniflo symlink.
+    let out = h
+        .cmd()
+        .env("PATH", "/usr/bin:/bin")
+        .args(["setup", "--both", "--agents", "agy", "--yes"])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let mcp_cfg: Value =
+        serde_json::from_str(&std::fs::read_to_string(h.root().join(".gemini/config/mcp_config.json")).unwrap())
+            .unwrap();
+    assert_eq!(mcp_cfg["mcpServers"]["uniflo"]["args"], json!(["mcp"]));
+    assert!(mcp_cfg["mcpServers"]["uniflo"]["command"].as_str().unwrap().contains("uniflo"));
+    let skill_link = h.root().join(".gemini/config/skills/uniflo");
+    assert!(std::fs::symlink_metadata(&skill_link).unwrap().file_type().is_symlink());
+    assert!(
+        std::fs::read_to_string(skill_link.join("SKILL.md"))
+            .unwrap()
+            .replace("\r\n", "\n")
+            .starts_with("---\nname: uniflo\n")
+    );
+
+    let out = h
+        .cmd()
+        .env("PATH", "/usr/bin:/bin")
+        .args(["setup", "--uninstall", "--yes"])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(!h.root().join(".gemini/config/mcp_config.json").exists(), "created file removed on uninstall");
+    assert!(!skill_link.exists(), "skill symlink removed on uninstall");
+
+    // Resume `--print` stays `agy --conversation=<id>` whether cwd exists, is missing, or is absent.
+    let closed = closed_url();
+    for id in ["ag1", "ag2", "ag3"] {
+        let out = h.run(&["--url", &closed, "resume", &format!("antigravity:{id}"), "--print"]);
+        assert!(out.status.success(), "{id}: {}", String::from_utf8_lossy(&out.stderr));
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim_end(), format!("agy --conversation={id}"));
+    }
+
+    // Executing `uniflo resume` enters an existing cwd, and still succeeds when cwd is missing or None
+    // (`needs_cwd == false`), whereas `claude` (`needs_cwd == true`) fails when its cwd is gone.
+    #[cfg(unix)]
+    {
+        let stub = h.root().join("stub");
+        let caller = h.root().join("caller");
+        std::fs::create_dir_all(&stub).unwrap();
+        std::fs::create_dir_all(&caller).unwrap();
+        let rec = h.root().join("agy-run.txt");
+        std::fs::write(
+            stub.join("agy"),
+            format!("#!/bin/sh\n{{ pwd; for a in \"$@\"; do printf '%s\\n' \"$a\"; done; }} > '{}'\n", rec.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(stub.join("agy"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let path_env = format!("{}:/usr/bin:/bin", stub.display());
+
+        let out = h
+            .cmd()
+            .current_dir(&caller)
+            .env("PWD", &caller)
+            .env("PATH", &path_env)
+            .args(["--url", &closed, "resume", "antigravity:ag1"])
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let got = std::fs::read_to_string(&rec).unwrap();
+        let lines: Vec<&str> = got.lines().collect();
+        assert_eq!(PathBuf::from(lines[0]).canonicalize().unwrap(), ws.canonicalize().unwrap(), "{got}");
+        assert_eq!(&lines[1..], ["--conversation=ag1"]);
+
+        for id in ["ag2", "ag3"] {
+            let out = h
+                .cmd()
+                .current_dir(&caller)
+                .env("PWD", &caller)
+                .env("PATH", &path_env)
+                .args(["--url", &closed, "resume", &format!("antigravity:{id}")])
+                .stdin(Stdio::null())
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{id}: {}", String::from_utf8_lossy(&out.stderr));
+            let got = std::fs::read_to_string(&rec).unwrap();
+            let lines: Vec<&str> = got.lines().collect();
+            assert_eq!(PathBuf::from(lines[0]).canonicalize().unwrap(), caller.canonicalize().unwrap(), "{id}: {got}");
+            assert_eq!(&lines[1..], [format!("--conversation={id}")]);
+        }
+
+        let out = h
+            .cmd()
+            .current_dir(&caller)
+            .env("PATH", &path_env)
+            .args(["--url", &closed, "resume", "claude:cmissing"])
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(!out.status.success());
+        assert!(String::from_utf8_lossy(&out.stderr).contains("no longer exists"));
+    }
+}
+
 /// Scenario: 真实 harness 接入（隔离 HOME）. Needs the real `claude` and `codex` on PATH; run with
 /// `cargo test -p uniflo --test agent -- --ignored real_`.
 #[test]
