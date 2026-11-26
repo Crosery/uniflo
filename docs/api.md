@@ -34,7 +34,7 @@
 | `GET /v1/memory` | `cwd`（绝对路径，可用 `~`，可省） | `MemoryFile[]`：agent 记忆与指令文件 `{path, scope, harness, bytes, updated_at}`，范围见 `docs/agents.md#记忆与指令文件`；`cwd` 不是绝对路径 400 |
 | `GET /v1/memory/file` | `path`（必填） | `MemoryContent`：上面能列出的文件之一及其内容（最多 256 KB，超出 `truncated: true`）；其他路径 403，不存在 404 |
 | `GET /v1/messages` | `to`、`peer`、`cwd`、`from`、`unread=true`、`undelivered=true`、`limit`（默认 50，最大 500） | `InboxResponse`：可选跨 Agent 消息收件箱（ADR-0012），返回 `{to?, messages[], unread}`；传 `peer` 时返回发往或来自该会话的双向消息；未挂载消息总线时 503 |
-| `GET /v1/messages/peers` | `pid`（调用方进程 PID）、`self`（显式排除的自身 key）、`limit`（默认 25，最大 100） | `PeersResponse`：按进程树反查调用方自身 `self_key`，并列出可对话的本机活跃/近期同事会话及其零 Hook 投递通道（`herdr` / `tmux` / `resume_wake` / `inbox`）与未读数 |
+| `GET /v1/messages/peers` | `pid`（调用方进程 PID）、`self`（显式排除的自身 key）、`cwd`（仅筛选该目录）、`prefer_cwd`（同目录优先置顶）、`limit`（默认 25，最大 100） | `PeersResponse`：按进程树反查调用方自身 `self_key`，按「同目录 → 工作中/近 15 分钟活跃 → 存活空闲 → 历史空闲」列出同事会话及其零 Hook 投递通道（`herdr` / `tmux` / `resume_wake` / `inbox`）与未读数 |
 | `POST /v1/messages` | JSON `SendMessageRequest`：`{to, text, from?, kind?, reply_to?, deliver?, wait_secs?, hop?}` | 写接口。按精确 key、唯一前缀或 `cwd:<目录>`（自动排除 `from` 自身）投递至本地信箱与 SSE 实时流；`deliver="auto"\|"wake"` 时零 Hook 主动投递（优先 Herdr/tmux 活终端直推，其次官方无头原上下文续跑，服务端限制 `hop < 2` 防循环），传 `wait_secs`（1–90）可内联等待并返回对方 `reply`；空正文或超 64 KiB 返回 400，未知目标 404，前缀歧义 409 |
 | `POST /v1/messages/ack` | JSON `AckMessagesRequest`：`{ids?, to?, state?: "delivered"\|"acked"}` | 写接口。将指定消息或目标会话的待处理消息标为 `delivered`（Hook 已拉取）或 `acked`（默认已读），返回 `{updated}` |
 | `GET /v1/messages/stream` | `to`、`peer`、`cwd` | SSE 实时推送流：`id` 为消息 id、`event` 为 `message`、`data` 为 `AgentMessage` JSON，零轮询即时到达 |

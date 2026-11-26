@@ -366,12 +366,12 @@ fn probe_herdr(force: bool) -> Vec<HerdrEntry> {
         && let Ok(ls) = serde_json::from_str::<HerdrLs>(&res.stdout)
     {
         let live: Vec<HerdrTerminal> = ls.terminals.into_iter().filter(|t| t.state == "live").collect();
-        // Inspect live agent terminals in parallel chunks (at most 8 concurrent `herdr-core get` calls)
-        // so even 40+ terminals finish in ~100 ms instead of seconds.
+        // Inspect live agent terminals in parallel chunks (at most 16 concurrent `herdr-core get` calls)
+        // so even 45+ terminals finish well under a second.
         let mut details: HashMap<String, HerdrDetail> = HashMap::new();
         let agent_addrs: Vec<String> =
             live.iter().filter(|t| is_agent_herdr(&t.agent)).map(|t| t.address.clone()).collect();
-        for chunk in agent_addrs.chunks(8) {
+        for chunk in agent_addrs.chunks(16) {
             let chunk_res: Vec<(String, Option<HerdrDetail>)> = std::thread::scope(|scope| {
                 let handles: Vec<_> = chunk
                     .iter()
@@ -612,12 +612,21 @@ fn strip_ansi(raw: &str) -> String {
     out
 }
 
+fn same_or_nested_dir(session_cwd: &str, needle: &str) -> bool {
+    fn norm(p: &str) -> &str {
+        p.strip_prefix("/private").unwrap_or(p)
+    }
+    dir_matches(session_cwd, needle) || dir_matches(norm(session_cwd), norm(needle))
+}
+
 /// Build the live reachable peers roster for `GET /v1/messages/peers`.
 pub fn list_peers(
     engine: &Engine,
     bus: &MessageBus,
     caller_pid: Option<u32>,
     explicit_self: Option<&str>,
+    cwd_filter: Option<&str>,
+    prefer_cwd: Option<&str>,
     limit: usize,
 ) -> PeersResponse {
     let limit = if limit == 0 { 25 } else { limit.min(100) };
@@ -631,8 +640,16 @@ pub fn list_peers(
     let tmux = probe_tmux(false);
     let unread = bus.unread_counts();
 
+    let cwd_filter = cwd_filter.map(str::trim).filter(|s| !s.is_empty());
+    let prefer_cwd = prefer_cwd.map(str::trim).filter(|s| !s.is_empty());
+    let now_ms =
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0);
+    let fresh_cutoff = now_ms.saturating_sub(15 * 60 * 1000);
+    let day_cutoff = now_ms.saturating_sub(24 * 60 * 60 * 1000);
+
     let snap = engine.sessions_snapshot();
-    // Order: live working -> live idle -> recent idle; skip archived & sub-agents by default unless unread.
+    // Order: same-cwd peers -> working or freshly active (<15m) -> older live idle -> older idle.
+    // This keeps newly spawned colleagues immediately visible even when 50+ old idle terminals are open.
     let mut rows: Vec<&Arc<Session>> = snap
         .sorted
         .iter()
@@ -643,14 +660,27 @@ pub fn list_peers(
             if s.archived {
                 return false;
             }
+            if let Some(cf) = cwd_filter
+                && !s.cwd.as_deref().is_some_and(|c| same_or_nested_dir(c, cf))
+            {
+                return false;
+            }
             s.parent.is_none() || unread.contains_key(&s.key)
         })
         .collect();
     rows.sort_by(|a, b| {
-        let rank = |s: &Session| match (s.status, s.pid.is_some()) {
-            (Status::Work, _) => 0u8,
-            (Status::Idle, true) => 1u8,
-            (Status::Idle, false) => 2u8,
+        let rank = |s: &Session| {
+            let in_pref = prefer_cwd.is_some_and(|pc| s.cwd.as_deref().is_some_and(|c| same_or_nested_dir(c, pc)));
+            if in_pref && (s.status == Status::Work || s.pid.is_some() || s.updated_at >= day_cutoff) {
+                return 0u8;
+            }
+            if s.status == Status::Work || s.updated_at >= fresh_cutoff {
+                return 1u8;
+            }
+            if s.pid.is_some() {
+                return 2u8;
+            }
+            3u8
         };
         rank(a).cmp(&rank(b)).then_with(|| b.updated_at.cmp(&a.updated_at))
     });

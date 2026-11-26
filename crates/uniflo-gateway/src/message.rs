@@ -96,6 +96,8 @@ pub(crate) struct PeersParams {
     pid: Option<u32>,
     #[serde(rename = "self")]
     self_key: Option<String>,
+    cwd: Option<String>,
+    prefer_cwd: Option<String>,
     limit: Option<usize>,
 }
 
@@ -106,9 +108,11 @@ pub(crate) async fn peers(State(s): State<AppState>, Query(p): Query<PeersParams
     let engine = s.engine.clone();
     let bus = bus.clone();
     let limit = p.limit.unwrap_or(25);
-    let resp = tokio::task::spawn_blocking(move || list_peers(&engine, &bus, p.pid, p.self_key.as_deref(), limit))
-        .await
-        .unwrap_or(uniflo_schema::PeersResponse { self_key: None, peers: Vec::new() });
+    let resp = tokio::task::spawn_blocking(move || {
+        list_peers(&engine, &bus, p.pid, p.self_key.as_deref(), p.cwd.as_deref(), p.prefer_cwd.as_deref(), limit)
+    })
+    .await
+    .unwrap_or(uniflo_schema::PeersResponse { self_key: None, peers: Vec::new() });
     with_seq(&s.engine, Json(resp).into_response())
 }
 

@@ -4031,6 +4031,8 @@ function upsertBusMessage(m, live = false, delivery = null) {
   if (ch) {
     tagCls = ch === "herdr" || ch === "tmux" ? "ok" : ch === "resume_wake" ? "acc" : ch === "inbox_busy" || ch === "loop_guard" || ch === "resume_failed" ? "warn" : "";
     tagTxt = BUS_CH_LABEL[ch] || ch;
+  } else if (merged.from === current.key && merged.to === "web-demo") {
+    tagCls = "ok"; tagTxt = "已回复";
   } else if (merged.acked_at) {
     tagCls = "ok"; tagTxt = "已读";
   } else if (merged.delivered_at) {
@@ -5445,7 +5447,7 @@ const ENDPOINTS = [
   { id: "memory", g: "agent", m: "GET", p: "/v1/memory", t: "记忆与指令文件", d: "agent 的记忆与指令文件（AGENTS.md、CLAUDE.md…）列表。", ret: "MemoryFile[]", params: [{ n: "cwd", ph: "~/work/project", h: "绝对路径，可用 ~；省略时只列全局文件" }], rs: (v) => `client.memory(${v.cwd ? `Some(${rstr(v.cwd)})` : "None"})?` },
   { id: "memory-file", g: "agent", m: "GET", p: "/v1/memory/file", t: "读取记忆文件", d: "上面能列出的文件之一及其内容，最多 256 KB；其他路径 403。", ret: "MemoryContent", params: [{ n: "path", req: true, ph: "~/.claude/CLAUDE.md", h: "取自记忆与指令文件列表的 path" }], rs: (v) => `client.memory_file(${rstr(v.path)})?` },
   { id: "messages", g: "agent", m: "GET", p: "/v1/messages", t: "跨 Agent 收件箱", d: "读取可选跨 Agent 消息总线的收件箱（ADR-0012）；按目标会话、双向会话 peer 或工作目录过滤。", ret: "InboxResponse", params: [{ n: "to", ph: "claude:4f1c", h: "目标会话 key、唯一前缀或 cwd:<目录>" }, { n: "peer", ph: "claude:4f1c", h: "双向过滤：发往或来自该会话的全部消息" }, { n: "cwd", ph: "~/work/project", h: "按目标会话工作目录过滤" }, { n: "from", ph: "codex:1234", h: "按发送方过滤" }, { n: "unread", t: "enum", o: ["", "true"], h: "仅未读（acked_at 为空）" }, { n: "undelivered", t: "enum", o: ["", "true"], h: "仅未投递给 hook 的消息" }, { n: "limit", t: "num", ph: "50", h: "最大 500" }] },
-  { id: "messages-peers", g: "agent", m: "GET", p: "/v1/messages/peers", t: "可对话同事列表", d: "发现当前可对话的本机活跃与近期会话及其零 Hook 投递通道（herdr / tmux / resume_wake / inbox），按 pid 自动反查调用方自身会话 key。", ret: "PeersResponse", params: [{ n: "pid", t: "num", ph: "12345", h: "调用方进程 PID，自动识别 self_key" }, { n: "self", ph: "claude:4f1c", h: "显式排除的自身会话 key" }, { n: "limit", t: "num", ph: "25", h: "最大 100" }] },
+  { id: "messages-peers", g: "agent", m: "GET", p: "/v1/messages/peers", t: "可对话同事列表", d: "发现当前可对话的本机活跃与近期会话及其零 Hook 投递通道（herdr / tmux / resume_wake / inbox），按同目录与近 15 分钟活跃优先排序。", ret: "PeersResponse", params: [{ n: "pid", t: "num", ph: "12345", h: "调用方进程 PID，自动识别 self_key" }, { n: "self", ph: "claude:4f1c", h: "显式排除的自身会话 key" }, { n: "cwd", ph: "/path/to/proj", h: "仅筛选该目录的同事" }, { n: "prefer_cwd", ph: "/path/to/proj", h: "该目录同事优先置顶" }, { n: "limit", t: "num", ph: "25", h: "最大 100" }] },
   { id: "messages-send", g: "agent", m: "POST", p: "/v1/messages", t: "发送跨 Agent 消息", d: "向本地另一会话发信并推送至 SSE；支持 deliver=auto|wake 零 Hook 实时唤醒（Herdr/tmux 直推或官方原上下文续跑）与 wait_secs 等回执。", ret: "SendMessageResponse", body: true, write: "写接口会向本地消息总线写入消息（可选唤醒目标会话），这里只给写法、不发送；可在会话「对话」页底部输入框或 `uniflo message send` / MCP 中发送。" },
   { id: "messages-ack", g: "agent", m: "POST", p: "/v1/messages/ack", t: "确认消息已读", d: "将消息标记为 delivered（Hook 已拉取）或 acked（已读）。", ret: "AckMessagesResponse", body: true, write: "写接口会修改消息已读状态，这里只给写法、不发送；请通过 `uniflo message ack` 或 MCP 调用。" },
   { id: "messages-stream", g: "stream", m: "SSE", p: "/v1/messages/stream", t: "跨 Agent 消息实时流", d: "SSE 实时推送新到达的跨 Agent 消息，支持按 to / peer / cwd 过滤，零轮询。", ret: "AgentMessage", stream: "sse", params: [{ n: "to", ph: "claude:4f1c", h: "只订阅该目标会话的消息" }, { n: "peer", ph: "claude:4f1c", h: "双向订阅发往或来自该会话的消息" }, { n: "cwd", ph: "~/work/project", h: "只订阅该目录下会话的消息" }] },

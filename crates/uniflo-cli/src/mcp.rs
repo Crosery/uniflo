@@ -1135,10 +1135,19 @@ impl Server {
 
     fn peers(&mut self, a: &Args) -> Result<Out, RpcError> {
         let limit = a.int("limit", 1, 100, 20)?;
+        let cwd = a.str("cwd")?;
         let pid = std::process::id();
         let mut qs = vec![format!("pid={pid}"), format!("limit={limit}")];
         if let Some(sk) = self.watchdog.as_ref().and_then(|w| w.self_key()).or_else(env_self_key) {
             qs.push(format!("self={}", enc(&sk)));
+        }
+        if let Some(c) = cwd {
+            qs.push(format!("cwd={}", enc(c)));
+        } else if let Ok(cur) = std::env::current_dir()
+            && let Some(s) = cur.to_str()
+            && !s.is_empty()
+        {
+            qs.push(format!("prefer_cwd={}", enc(s)));
         }
         Ok(match self.daemon_get(&format!("/v1/messages/peers?{}", qs.join("&"))) {
             Ok(v) => {
@@ -2043,8 +2052,9 @@ fn tools(message: bool) -> Vec<Value> {
         list.push(tool(
             "uniflo_peers",
             "List reachable peers",
-            "Discover your own session key (`self`) and other reachable local agent sessions with their zero-hook delivery channel (herdr, tmux, resume_wake, inbox). Call this first before messaging another agent.",
+            "Discover your own session key (`self`) and other reachable local agent sessions with their zero-hook delivery channel (herdr, tmux, resume_wake, inbox). Same-directory and recently active peers appear first. Call this first before messaging another agent.",
             json!({
+                "cwd": { "type": "string", "description": "Optional directory filter; omit to list all peers with current directory boosted first" },
                 "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 },
             }),
             &[],

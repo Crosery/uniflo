@@ -21,6 +21,9 @@ pub struct MessageArgs {
 pub enum MessageAction {
     /// List reachable local agent peers and their zero-hook delivery channels (herdr, tmux, resume_wake).
     Peers {
+        /// Optional working directory filter.
+        #[arg(long)]
+        cwd: Option<String>,
         #[arg(short = 'n', long, default_value_t = 20)]
         limit: usize,
         #[arg(long)]
@@ -137,12 +140,20 @@ fn env_self_key() -> Option<String> {
 
 pub fn run(cli: &Cli, a: &MessageArgs) -> Result<()> {
     match &a.action {
-        MessageAction::Peers { limit, json } => {
+        MessageAction::Peers { cwd, limit, json } => {
             let c = Client::new(&cli.url, cli.token.clone())?;
             let pid = std::process::id();
             let mut qs = vec![format!("pid={pid}"), format!("limit={limit}")];
             if let Some(sk) = env_self_key() {
                 qs.push(format!("self={}", enc(&sk)));
+            }
+            if let Some(dir) = cwd {
+                qs.push(format!("cwd={}", enc(dir)));
+            } else if let Ok(cur) = std::env::current_dir()
+                && let Some(s) = cur.to_str()
+                && !s.is_empty()
+            {
+                qs.push(format!("prefer_cwd={}", enc(s)));
             }
             let resp: PeersResponse = c.get_json(&format!("/v1/messages/peers?{}", qs.join("&")))?;
             if *json {
