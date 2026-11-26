@@ -8,7 +8,7 @@
 
 [开发者站](https://crosery.github.io/uniflo/) · [快速开始](#快速开始) · [网页控制台](docs/console.md) · [网关 API](docs/api.md) · [Rust SDK](docs/sdk.md) · [Agent 接入](docs/agents.md) · [llms.txt](https://crosery.github.io/uniflo/llms.txt)
 
-[0.2.9 发布说明](docs/releases/v0.2.9.md)：网关全链路并发优化实现毫秒级响应，新增默认关闭的可选跨 Agent 消息总线，完善 Antigravity 用量与接入。
+[0.2.10 发布说明](docs/releases/v0.2.10.md)：`uniflo setup` 全量覆盖 33 个 harness，全 MCP 进程级 SSE 看门狗与 10 套原生 Hook，升级智能测速选源与静默续配，CLI 首页与计划输出改版。
 
 ![会话视图](docs/assets/demo.png)
 
