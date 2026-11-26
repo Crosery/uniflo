@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use uniflo_core::procs::{Proc, ProcCache};
 use uniflo_core::util::{file_mtime_ms, home, json_arg, str_of, string_of, text_of, ts, ts_str};
@@ -26,11 +26,11 @@ use uniflo_schema::{Body, Event, Usage, session_key};
 pub struct Antigravity {
     pub roots: Vec<PathBuf>,
     procs: Option<ProcCache>,
-    summaries: Mutex<HashMap<PathBuf, (FileSig, Arc<SummaryIndex>)>>,
+    summaries: RwLock<HashMap<PathBuf, (FileSig, Arc<SummaryIndex>)>>,
     /// Conversation database → cached workspace and per-step usage/model metadata, keyed by
     /// `file_sig(&[cdb, wal_of(&cdb)])` so live polling and line decoding open each DB at most
     /// once per signature change.
-    conv_dbs: Mutex<HashMap<PathBuf, (FileSig, Arc<ConvDb>)>>,
+    conv_dbs: RwLock<HashMap<PathBuf, (FileSig, Arc<ConvDb>)>>,
 }
 
 #[derive(Default)]
@@ -66,7 +66,7 @@ const PROC_TTL: Duration = Duration::from_secs(3);
 
 impl Antigravity {
     pub fn new(roots: Vec<PathBuf>, procs: Option<ProcCache>) -> Self {
-        Antigravity { roots, procs, summaries: Mutex::new(HashMap::new()), conv_dbs: Mutex::new(HashMap::new()) }
+        Antigravity { roots, procs, summaries: RwLock::new(HashMap::new()), conv_dbs: RwLock::new(HashMap::new()) }
     }
 
     fn other_bases<'a>(&'a self, base: &'a Path) -> impl Iterator<Item = &'a Path> {
@@ -77,8 +77,7 @@ impl Antigravity {
         let sdb = base.join("conversation_summaries.db");
         let lc = base.join("cache/last_conversations.json");
         let sig = file_sig(&[sdb.clone(), wal_of(&sdb), lc.clone()]);
-        let mut g = self.summaries.lock().unwrap();
-        if let Some((prev, idx)) = g.get(base)
+        if let Some((prev, idx)) = self.summaries.read().unwrap().get(base)
             && *prev == sig
         {
             return idx.clone();
@@ -140,7 +139,7 @@ impl Antigravity {
             }
         }
         let arc = Arc::new(idx);
-        g.insert(base.to_path_buf(), (sig, arc.clone()));
+        self.summaries.write().unwrap().insert(base.to_path_buf(), (sig, arc.clone()));
         arc
     }
 
@@ -183,14 +182,13 @@ impl Antigravity {
 
     fn conv_db(&self, cdb: &Path) -> Arc<ConvDb> {
         let sig = file_sig(&[cdb.to_path_buf(), wal_of(cdb)]);
-        let mut g = self.conv_dbs.lock().unwrap();
-        if let Some((prev, db)) = g.get(cdb)
+        if let Some((prev, db)) = self.conv_dbs.read().unwrap().get(cdb)
             && *prev == sig
         {
             return db.clone();
         }
         let db = Arc::new(load_conv_db(cdb));
-        g.insert(cdb.to_path_buf(), (sig, db.clone()));
+        self.conv_dbs.write().unwrap().insert(cdb.to_path_buf(), (sig, db.clone()));
         db
     }
 
@@ -606,22 +604,31 @@ impl Sidecar for Antigravity {
     fn sidecars(&self, src: &Path) -> Vec<PathBuf> {
         let Some((base, id)) = base_and_id(src) else { return Vec::new() };
         let cdb = base.join("conversations").join(format!("{id}.db"));
-        let sdb = base.join("conversation_summaries.db");
-        let mut out = vec![
-            base.join("annotations").join(format!("{id}.pbtxt")),
-            cdb.clone(),
-            wal_of(&cdb),
-            sdb.clone(),
-            wal_of(&sdb),
-            base.join("cache/last_conversations.json"),
-        ];
+        let mut out = vec![base.join("annotations").join(format!("{id}.pbtxt")), cdb.clone(), wal_of(&cdb)];
         for other in self.other_bases(base) {
-            let osdb = other.join("conversation_summaries.db");
-            out.push(osdb.clone());
-            out.push(wal_of(&osdb));
-            out.push(other.join("cache/last_conversations.json"));
+            out.push(other.join("annotations").join(format!("{id}.pbtxt")));
         }
         out
+    }
+
+    fn sidecar_sig(&self, src: &Path) -> FileSig {
+        let Some((base, id)) = base_and_id(src) else { return Vec::new() };
+        let mut sig = file_sig(&self.sidecars(src));
+        // Hash only this session's slice of the shared `conversation_summaries.db` and
+        // `last_conversations.json` so updating one conversation does not re-read all ~700 others.
+        let summary_cwd = self
+            .summary_index(base)
+            .cwds
+            .get(id)
+            .cloned()
+            .or_else(|| self.other_bases(base).find_map(|b| self.summary_index(b).cwds.get(id).cloned()));
+        let h = fnv_summary(
+            self.summary_title(base, id).as_ref(),
+            summary_cwd.as_deref(),
+            self.parent_of(base, id).as_deref(),
+        );
+        sig.push((0, h));
+        sig
     }
 
     fn sidecar(&self, src: &Path, state: &mut Links) -> Vec<Record> {
@@ -675,6 +682,29 @@ impl Sidecar for Antigravity {
         out.extend(events);
         out
     }
+}
+
+/// Deterministic 64-bit FNV-1a hash of one session's summary-DB metadata so `sidecar_sig`
+/// stays stable across restarts and ignores changes to unrelated sessions in the shared DB.
+fn fnv_summary(title: Option<&(u8, String)>, cwd: Option<&str>, parent: Option<&str>) -> u64 {
+    let mut h = 0xcbf2_9ce4_8422_2325u64;
+    let mut mix = |bytes: &[u8]| {
+        for &b in bytes {
+            h ^= u64::from(b);
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        h ^= 0xff;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    };
+    if let Some((rank, t)) = title {
+        mix(&[*rank]);
+        mix(t.as_bytes());
+    } else {
+        mix(&[]);
+    }
+    mix(cwd.unwrap_or("").as_bytes());
+    mix(parent.unwrap_or("").as_bytes());
+    h
 }
 
 fn u64_of(v: &Value, key: &str) -> Option<u64> {
@@ -1304,9 +1334,9 @@ mod tests {
         put(raw_len("file:///work/a"));
         let dec = &a.inner.decoder;
         assert_eq!(dec.cwd_of(fx.root(), "c1").as_deref(), Some("/work/a"));
-        assert!(dec.conv_dbs.lock().unwrap().contains_key(&cdb));
+        assert!(dec.conv_dbs.read().unwrap().contains_key(&cdb));
         // Same signature: the memo answers, even if the stored value were different.
-        dec.conv_dbs.lock().unwrap().get_mut(&cdb).unwrap().1 =
+        dec.conv_dbs.write().unwrap().get_mut(&cdb).unwrap().1 =
             Arc::new(ConvDb { cwd: Some("/memo".into()), steps: HashMap::new() });
         assert_eq!(dec.cwd_of(fx.root(), "c1").as_deref(), Some("/memo"));
 

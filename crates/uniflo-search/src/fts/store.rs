@@ -404,13 +404,24 @@ impl Counters {
 }
 
 pub fn counters(c: &Connection) -> Result<Counters> {
-    Ok(Counters {
-        hot_rows: meta_i64(c, "hot_rows")?,
-        hot_tokens: meta_i64(c, "hot_tokens")?,
-        cold_rows: meta_i64(c, "cold_rows")?,
-        cold_tokens: meta_i64(c, "cold_tokens")?,
-        cold_gen: meta_i64(c, "cold_gen")?,
-    })
+    let mut out = Counters::default();
+    let mut st = c.prepare_cached(
+        "SELECT k, v FROM meta WHERE k IN ('hot_rows', 'hot_tokens', 'cold_rows', 'cold_tokens', 'cold_gen')",
+    )?;
+    let mut rows = st.query([])?;
+    while let Some(r) = rows.next()? {
+        let k: String = r.get(0)?;
+        let v: i64 = r.get::<_, String>(1)?.parse().unwrap_or(0);
+        match k.as_str() {
+            "hot_rows" => out.hot_rows = v,
+            "hot_tokens" => out.hot_tokens = v,
+            "cold_rows" => out.cold_rows = v,
+            "cold_tokens" => out.cold_tokens = v,
+            "cold_gen" => out.cold_gen = v,
+            _ => {}
+        }
+    }
+    Ok(out)
 }
 
 pub fn bump_hot(c: &Connection, d_rows: i64, d_tokens: i64) -> Result<()> {

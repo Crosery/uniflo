@@ -78,11 +78,38 @@ impl Default for EngineOptions {
 const UNKNOWN_CAP: usize = 512;
 /// Freed heap goes back to the OS at most this often while sources keep changing.
 const TRIM_EVERY: Duration = Duration::from_secs(5 * 60);
+/// Adapter root directory listings (`is_dir` probes) are cached for this long across `/v1/harnesses`.
+const ROOTS_TTL: Duration = Duration::from_secs(5);
 const PREVIEW_CHARS: usize = 160;
 const TITLE_CHARS: usize = 200;
 
+/// Immutable, pre-sorted session snapshot shared lock-free across concurrent gateway readers.
+#[derive(Debug, Default)]
+pub struct SessionSnapshot {
+    pub generation: u64,
+    /// All sessions sorted newest-first (`updated_at DESC, key ASC`).
+    pub sorted: Vec<Arc<Session>>,
+    /// O(1) lookup by session key.
+    pub by_key: HashMap<Arc<str>, Arc<Session>>,
+    pub working: usize,
+    pub sources: usize,
+    /// Per-adapter `(sessions, working)` indexed by `Engine::adapters` index.
+    pub by_adapter: Vec<(usize, usize)>,
+}
+
+/// Lightweight fields needed by `/v1/health` without iterating sessions or touching usage locks.
+#[derive(Debug, Clone)]
+pub struct HealthSnapshot {
+    pub seq: u64,
+    pub sessions: usize,
+    pub working: usize,
+    pub uptime_ms: i64,
+    pub update: Option<crate::update::UpdateInfo>,
+}
+
 struct Entry {
-    session: Session,
+    key_arc: Arc<str>,
+    session: Arc<Session>,
     tracker: StatusTracker,
     tracker_since: i64,
     turn_ended: bool,
@@ -97,8 +124,10 @@ struct Entry {
 
 impl Entry {
     fn new(key: String, harness: &str, id: &str, adapter: usize, src: &Path) -> Self {
+        let key_arc: Arc<str> = Arc::from(key.as_str());
         Entry {
-            session: Session {
+            key_arc,
+            session: Arc::new(Session {
                 key,
                 harness: harness.to_owned(),
                 id: id.to_owned(),
@@ -118,7 +147,7 @@ impl Entry {
                 usage: None,
                 family: None,
                 archived: false,
-            },
+            }),
             tracker_since: 0,
             turn_ended: false,
             tracker: StatusTracker::default(),
@@ -132,7 +161,7 @@ impl Entry {
     }
 
     fn apply_meta(&mut self, p: MetaPatch, harness: &str) {
-        let s = &mut self.session;
+        let s = Arc::make_mut(&mut self.session);
         if let Some(par) = p.parent {
             s.parent = Some(session_key(harness, &par));
         }
@@ -163,25 +192,31 @@ impl Entry {
     fn observe(&mut self, e: &Event) {
         self.tracker.observe(e);
         self.turn_ended |= !e.partial && matches!(&e.body, Body::TurnEnd { .. });
-        if e.ts > 0 {
-            self.session.updated_at = self.session.updated_at.max(e.ts);
-            if self.session.started_at.is_none() {
-                self.session.started_at = Some(e.ts);
-            }
-        }
-        if self.session.preview.is_none()
+        let need_ts = e.ts > 0 && (e.ts > self.session.updated_at || self.session.started_at.is_none());
+        let new_preview = if self.session.preview.is_none()
             && let Body::UserMessage { text, synthetic: false } = &e.body
         {
             let p = preview(text, PREVIEW_CHARS);
-            if !p.is_empty() {
-                self.session.preview = Some(p);
+            (!p.is_empty()).then_some(p)
+        } else {
+            None
+        };
+        if need_ts || new_preview.is_some() {
+            let s = Arc::make_mut(&mut self.session);
+            if e.ts > 0 {
+                s.updated_at = s.updated_at.max(e.ts);
+                if s.started_at.is_none() {
+                    s.started_at = Some(e.ts);
+                }
+            }
+            if let Some(p) = new_preview {
+                s.preview = Some(p);
             }
         }
     }
 
-    /// Recompute the published status fields. Returns whether the significant view changed.
-    fn refresh(&mut self, now: i64, w: Windows) -> bool {
-        let before = sig(&self.session);
+    /// Compute the next published status fields without mutating `self`.
+    fn next_published(&self, now: i64, w: Windows) -> (Status, i64, Option<String>, Option<u32>) {
         let eff = effective(&self.tracker, self.live_pid.is_some(), self.live_status, now, w);
         // A read can end one turn and start the next without publishing the intermediate Idle.
         // Ignore replayed boundaries and boundaries overridden by a continuous live Work state.
@@ -199,13 +234,33 @@ impl Entry {
         } else {
             now
         };
+        let reason = (!eff.reason.is_empty()).then_some(eff.reason);
+        (eff.status, since, reason, self.live_pid)
+    }
+
+    fn would_change(&self, now: i64, w: Windows) -> bool {
+        let (status, since, reason, pid) = self.next_published(now, w);
+        self.session.status != status
+            || self.session.status_since != since
+            || self.session.status_reason != reason
+            || self.session.pid != pid
+    }
+
+    /// Recompute the published status fields. Returns whether the significant view changed.
+    fn refresh(&mut self, now: i64, w: Windows) -> bool {
+        let (status, since, reason, pid) = self.next_published(now, w);
         self.tracker_since = self.tracker.since;
         self.turn_ended = false;
-        self.session.status = eff.status;
-        self.session.status_since = since;
-        self.session.status_reason = (!eff.reason.is_empty()).then_some(eff.reason);
-        self.session.pid = self.live_pid;
-        before != sig(&self.session)
+        let significant =
+            self.session.status != status || self.session.status_since != since || self.session.pid != pid;
+        if significant || self.session.status_reason != reason {
+            let s = Arc::make_mut(&mut self.session);
+            s.status = status;
+            s.status_since = since;
+            s.status_reason = reason;
+            s.pid = pid;
+        }
+        significant
     }
 }
 
@@ -284,7 +339,7 @@ impl State {
             if let Some(e) = self.sessions.get_mut(k)
                 && e.session.family != f
             {
-                e.session.family = f;
+                Arc::make_mut(&mut e.session).family = f;
                 changed.push(k.clone());
             }
         }
@@ -353,6 +408,16 @@ pub struct Engine {
     opts: EngineOptions,
     tag: String,
     state: RwLock<State>,
+    /// Monotonic generation bumped inside every `state.write()` that mutates sessions/sources.
+    state_gen: AtomicU64,
+    /// Immutable published session snapshot for lock-free concurrent gateway reads.
+    snapshot: RwLock<Arc<SessionSnapshot>>,
+    /// Coalesces concurrent readers rebuilding `snapshot` after a state bump.
+    snapshot_build: Mutex<()>,
+    /// Cached adapter root paths (`is_dir()` results) so `/v1/harnesses` avoids per-request FS stats.
+    roots_cache: RwLock<(Option<Instant>, Vec<Vec<String>>)>,
+    /// Latest crates.io update check (duplicated from `stats` for lock-free `/v1/health`).
+    update_info: RwLock<Option<crate::update::UpdateInfo>>,
     seq: AtomicU64,
     tx: broadcast::Sender<Arc<Envelope>>,
     replay: Mutex<VecDeque<Arc<Envelope>>>,
@@ -365,6 +430,12 @@ pub struct Engine {
     started: i64,
     pricing: Pricing,
     usage: RwLock<UsageIndex>,
+    /// Monotonic generation bumped whenever `usage` mutates (for versioned response caches).
+    usage_gen: AtomicU64,
+    /// Lock-free mirror of `UsageIndex::progress()` so `/v1/health` and `/v1/stats` never block on `usage`.
+    usage_started: AtomicBool,
+    usage_done: AtomicU64,
+    usage_total: AtomicU64,
     /// The first complete build finished: sources queued later (new sessions) publish their
     /// totals, though they make `usage_progress().ready` false while they build.
     usage_settled: AtomicBool,
@@ -383,12 +454,18 @@ impl Engine {
         let pricing = Pricing::new(opts.data_dir.as_ref().map(|d| d.join("pricing")));
         pricing.set_sync_enabled(opts.price_sync.is_some());
         let archive = opts.data_dir.as_ref().map(|d| Arc::new(ArchiveStore::open(d.join("archive"))));
+        let empty_snap = Arc::new(SessionSnapshot { by_adapter: vec![(0, 0); adapters.len()], ..Default::default() });
         Arc::new(Engine {
             probing,
             adapters,
             opts,
             tag,
             state: RwLock::new(State::default()),
+            state_gen: AtomicU64::new(1),
+            snapshot: RwLock::new(empty_snap),
+            snapshot_build: Mutex::new(()),
+            roots_cache: RwLock::new((None, Vec::new())),
+            update_info: RwLock::new(None),
             seq: AtomicU64::new(0),
             tx,
             replay: Mutex::new(VecDeque::new()),
@@ -398,11 +475,37 @@ impl Engine {
             started: now_ms(),
             pricing,
             usage: RwLock::new(UsageIndex::default()),
+            usage_gen: AtomicU64::new(1),
+            usage_started: AtomicBool::new(false),
+            usage_done: AtomicU64::new(0),
+            usage_total: AtomicU64::new(0),
             usage_settled: AtomicBool::new(false),
             usage_tx: Mutex::new(None),
             archive,
             hot: Mutex::new(Vec::new()),
         })
+    }
+
+    pub(super) fn bump_state(&self) {
+        self.state_gen.fetch_add(1, Ordering::Release);
+    }
+
+    /// Monotonic version of the session/source table (bumped on every state mutation).
+    pub fn state_gen(&self) -> u64 {
+        self.state_gen.load(Ordering::Acquire)
+    }
+
+    /// Monotonic version of the usage ledgers (bumped on every usage mutation).
+    pub fn usage_gen(&self) -> u64 {
+        self.usage_gen.load(Ordering::Acquire)
+    }
+
+    pub(super) fn note_usage_change(&self, u: &UsageIndex) {
+        let p = u.progress();
+        self.usage_started.store(u.started, Ordering::Release);
+        self.usage_done.store(p.done, Ordering::Release);
+        self.usage_total.store(p.total, Ordering::Release);
+        self.usage_gen.fetch_add(1, Ordering::Release);
     }
 
     fn windows(&self) -> Windows {
@@ -414,21 +517,83 @@ impl Engine {
 
     // ---------------------------------------------------------------- queries
 
+    /// Immutable, pre-sorted session snapshot shared across all concurrent readers.
+    /// Fast path takes ~20 ns with zero cloning; rebuilds coalesce behind `snapshot_build`.
+    pub fn sessions_snapshot(&self) -> Arc<SessionSnapshot> {
+        let want = self.state_gen.load(Ordering::Acquire);
+        {
+            let cur = self.snapshot.read().unwrap();
+            if cur.generation >= want {
+                return cur.clone();
+            }
+        }
+        let _guard = self.snapshot_build.lock().unwrap();
+        let want = self.state_gen.load(Ordering::Acquire);
+        {
+            let cur = self.snapshot.read().unwrap();
+            if cur.generation >= want {
+                return cur.clone();
+            }
+        }
+        let snap = self.build_snapshot();
+        *self.snapshot.write().unwrap() = snap.clone();
+        snap
+    }
+
+    fn build_snapshot(&self) -> Arc<SessionSnapshot> {
+        let (generation, mut sorted, by_key, working, sources, by_adapter) = {
+            let st = self.state.read().unwrap();
+            let generation = self.state_gen.load(Ordering::Acquire);
+            let n = st.sessions.len();
+            let mut sorted = Vec::with_capacity(n);
+            let mut by_key = HashMap::with_capacity(n);
+            let mut working = 0usize;
+            let mut by_adapter = vec![(0usize, 0usize); self.adapters.len()];
+            for e in st.sessions.values() {
+                let is_work = usize::from(e.session.status == Status::Work);
+                working += is_work;
+                if let Some(slot) = by_adapter.get_mut(e.adapter) {
+                    slot.0 += 1;
+                    slot.1 += is_work;
+                }
+                sorted.push(e.session.clone());
+                by_key.insert(e.key_arc.clone(), e.session.clone());
+            }
+            (generation, sorted, by_key, working, st.sources.len(), by_adapter)
+        };
+        // Sort after releasing `state.read()` so writers never wait on sorting.
+        sorted.sort_by(|a, b| b.updated_at.cmp(&a.updated_at).then_with(|| a.key.cmp(&b.key)));
+        Arc::new(SessionSnapshot { generation, sorted, by_key, working, sources, by_adapter })
+    }
+
     pub fn sessions(&self) -> Vec<Session> {
-        let st = self.state.read().unwrap();
-        let mut v: Vec<Session> = st.sessions.values().map(|e| e.session.clone()).collect();
-        v.sort_by(|a, b| b.updated_at.cmp(&a.updated_at).then_with(|| a.key.cmp(&b.key)));
-        v
+        self.sessions_snapshot().sorted.iter().map(|s| (**s).clone()).collect()
     }
 
     /// Every session's `updated_at` by key, without cloning whole sessions.
     pub fn updated_ats(&self) -> HashMap<String, i64> {
-        let st = self.state.read().unwrap();
-        st.sessions.iter().map(|(k, e)| (k.clone(), e.session.updated_at)).collect()
+        self.sessions_snapshot().sorted.iter().map(|s| (s.key.clone(), s.updated_at)).collect()
+    }
+
+    pub fn session_arc(&self, key: &str) -> Option<Arc<Session>> {
+        self.sessions_snapshot().by_key.get(key).cloned()
     }
 
     pub fn session(&self, key: &str) -> Option<Session> {
-        self.state.read().unwrap().sessions.get(key).map(|e| e.session.clone())
+        self.session_arc(key).map(|s| (*s).clone())
+    }
+
+    /// Fast health view: reads the published snapshot and atomic `seq` without locking `state`,
+    /// `stats`, or `usage`.
+    pub fn health_snapshot(&self) -> HealthSnapshot {
+        let snap = self.sessions_snapshot();
+        HealthSnapshot {
+            seq: self.seq.load(Ordering::SeqCst),
+            sessions: snap.sorted.len(),
+            working: snap.working,
+            uptime_ms: now_ms() - self.started,
+            update: self.update_info.read().unwrap().clone(),
+        }
     }
 
     /// Blocking: reads the transcript through the owning adapter.
@@ -442,6 +607,26 @@ impl Engine {
             return Self::archived_history(&src, q);
         }
         adapter.history(&src, &id, q)
+    }
+
+    /// Blocking: reads one history page and whether older events exist (`next_before`),
+    /// avoiding a second archive decode or a redundant probe when already at offset 0.
+    pub fn history_page(&self, key: &str, q: &HistoryQuery) -> Result<(Vec<Event>, Option<u64>)> {
+        let (adapter, src, id, archived) = {
+            let st = self.state.read().unwrap();
+            let e = st.sessions.get(key).ok_or_else(|| anyhow!("unknown session {key}"))?;
+            (self.adapters[e.adapter].clone(), e.src.clone(), e.session.id.clone(), e.archive.is_some())
+        };
+        if archived {
+            return Self::archived_history_page(&src, q);
+        }
+        let evs = adapter.history(&src, &id, q)?;
+        let first = evs.first().and_then(|e| e.pos);
+        let more = match first {
+            Some(0) | None => false,
+            Some(pos) => !adapter.history(&src, &id, &HistoryQuery { before: Some(pos), limit: 1 })?.is_empty(),
+        };
+        Ok((evs, first.filter(|_| more)))
     }
 
     /// Blocking: first events of a session in source order, keeping later updates to those ids.
@@ -495,23 +680,36 @@ impl Engine {
         Ok(groups.into_values().flatten().collect())
     }
 
-    pub fn harnesses(&self) -> Vec<Harness> {
-        let st = self.state.read().unwrap();
-        let mut counts: HashMap<&str, (usize, usize)> = HashMap::new();
-        for e in st.sessions.values() {
-            let c = counts.entry(self.adapters[e.adapter].info().id).or_default();
-            c.0 += 1;
-            c.1 += usize::from(e.session.status == Status::Work);
+    fn refresh_roots_cache(&self) -> Vec<Vec<String>> {
+        let roots: Vec<Vec<String>> =
+            self.adapters.iter().map(|a| a.roots().iter().map(|p| p.display().to_string()).collect()).collect();
+        *self.roots_cache.write().unwrap() = (Some(Instant::now()), roots.clone());
+        roots
+    }
+
+    fn cached_roots(&self) -> Vec<Vec<String>> {
+        {
+            let g = self.roots_cache.read().unwrap();
+            if g.0.is_some_and(|t| t.elapsed() < ROOTS_TTL) && g.1.len() == self.adapters.len() {
+                return g.1.clone();
+            }
         }
+        self.refresh_roots_cache()
+    }
+
+    pub fn harnesses(&self) -> Vec<Harness> {
+        let snap = self.sessions_snapshot();
+        let roots = self.cached_roots();
         self.adapters
             .iter()
-            .map(|a| {
+            .enumerate()
+            .map(|(i, a)| {
                 let info = a.info();
-                let (sessions, working) = counts.get(info.id).copied().unwrap_or_default();
+                let (sessions, working) = snap.by_adapter.get(i).copied().unwrap_or_default();
                 Harness {
                     id: info.id.into(),
                     name: info.name.into(),
-                    roots: a.roots().iter().map(|p| p.display().to_string()).collect(),
+                    roots: roots.get(i).cloned().unwrap_or_default(),
                     sessions,
                     working,
                     icon: None,
@@ -522,14 +720,13 @@ impl Engine {
 
     pub fn stats(&self) -> Stats {
         let mut s = self.stats.lock().unwrap().clone();
-        let st = self.state.read().unwrap();
+        let snap = self.sessions_snapshot();
         s.uptime_ms = now_ms() - self.started;
         s.seq = self.seq.load(Ordering::SeqCst);
-        s.sources = st.sources.len();
-        s.sessions = st.sessions.len();
-        s.working = st.sessions.values().filter(|e| e.session.status == Status::Work).count();
+        s.sources = snap.sources;
+        s.sessions = snap.sorted.len();
+        s.working = snap.working;
         s.subscribers = self.tx.receiver_count();
-        drop(st);
         s.usage = self.opts.usage.then(|| self.usage_progress());
         s
     }
@@ -607,12 +804,12 @@ impl Engine {
             for k in &source.keys {
                 if let Some(e) = st.sessions.get_mut(k) {
                     e.tracker = StatusTracker::default();
-                    e.session.preview = None;
+                    Arc::make_mut(&mut e.session).preview = None;
                 }
             }
         }
         source.cursor = out.cursor.clone();
-        let mut before: HashMap<String, Option<Session>> = HashMap::new();
+        let mut before: HashMap<String, Option<Arc<Session>>> = HashMap::new();
         for (id, rec) in out.batch.items {
             let key = session_key(harness, &id);
             let source = st.sources.get_mut(src).unwrap();
@@ -644,7 +841,7 @@ impl Engine {
         for (key, prev) in before {
             let Some(entry) = st.sessions.get_mut(&key) else { continue };
             if entry.session.updated_at == 0 {
-                entry.session.updated_at = out.cursor.mtime_ms;
+                Arc::make_mut(&mut entry.session).updated_at = out.cursor.mtime_ms;
             }
             let changed = entry.refresh(now, stale);
             let is_new = prev.is_none();
@@ -652,7 +849,7 @@ impl Engine {
                 linked.push(key.clone());
             }
             if live && (is_new || changed || prev.is_some_and(|p| sig(&p) != sig(&entry.session))) {
-                pending.push(Pending::Session(entry.session.clone()));
+                pending.push(Pending::Session((*entry.session).clone()));
                 sent.insert(key);
             }
         }
@@ -663,10 +860,11 @@ impl Engine {
         roots.extend(linked);
         for k in st.recompute_families(&roots) {
             if live && sent.insert(k.clone()) {
-                pending.extend(st.sessions.get(&k).map(|e| Pending::Session(e.session.clone())));
+                pending.extend(st.sessions.get(&k).map(|e| Pending::Session((*e.session).clone())));
             }
         }
         self.dirty.store(true, Ordering::Relaxed);
+        self.bump_state();
         // Session snapshots first so clients learn a session before its events.
         pending.sort_by_key(|p| !matches!(p, Pending::Session(_)));
         pending
@@ -686,8 +884,9 @@ impl Engine {
         }
         // The families above the removed sessions shrink.
         for k in st.recompute_families(&above) {
-            out.extend(st.sessions.get(&k).map(|e| Pending::Session(e.session.clone())));
+            out.extend(st.sessions.get(&k).map(|e| Pending::Session((*e.session).clone())));
         }
+        self.bump_state();
         out
     }
 
@@ -695,38 +894,86 @@ impl Engine {
         let harness = self.adapters[adapter].info().id;
         let by_key: HashMap<String, LiveSession> = list.into_iter().map(|l| (session_key(harness, &l.id), l)).collect();
         let stale = self.windows();
+        // Fast read-only pass: skip taking `state.write()` when no session's live state changed.
+        {
+            let st = self.state.read().unwrap();
+            let any_change = st.sessions.values().filter(|e| e.adapter == adapter && e.archive.is_none()).any(|e| {
+                let next = by_key.get(&e.session.key);
+                let (pid, status) = (next.map(|l| l.pid), next.and_then(|l| l.status));
+                pid != e.live_pid || status != e.live_status
+            });
+            if !any_change {
+                return Vec::new();
+            }
+        }
         let mut st = self.state.write().unwrap();
         let mut pending = Vec::new();
+        let mut mutated = false;
         for e in st.sessions.values_mut().filter(|e| e.adapter == adapter && e.archive.is_none()) {
             let next = by_key.get(&e.session.key);
             let (pid, status) = (next.map(|l| l.pid), next.and_then(|l| l.status));
             if pid == e.live_pid && status == e.live_status {
                 continue;
             }
+            mutated = true;
             if e.live_pid.is_some() && pid.is_none() && e.tracker.status == Status::Work {
                 e.tracker.force(Status::Idle, "exited", now);
             }
             e.live_pid = pid;
             e.live_status = status;
             if e.refresh(now, stale) {
-                pending.push(Pending::Session(e.session.clone()));
+                pending.push(Pending::Session((*e.session).clone()));
             }
+        }
+        if mutated {
+            self.bump_state();
         }
         pending
     }
 
     fn tick(&self, now: i64) -> Vec<Pending> {
         let stale = self.windows();
+        // Read-only pass collects hot sources and checks whether any working session actually transitions.
+        let (hot, need_write) = {
+            let st = self.state.read().unwrap();
+            let mut need_write = false;
+            // Sources likely to change soon: working sessions and anything touched in the last
+            // minute. An idle session whose process merely stays open is left to the watcher: agents
+            // keep dozens of those, and polling each five times a second cost more than the rest.
+            let mut hot: Vec<PathBuf> = Vec::new();
+            for e in st.sessions.values() {
+                if (e.session.status == Status::Work || e.tracker.status == Status::Work) && e.would_change(now, stale)
+                {
+                    need_write = true;
+                }
+                if e.session.status == Status::Work || now - e.session.updated_at < 60_000 {
+                    hot.push(e.src.clone());
+                }
+            }
+            hot.sort();
+            hot.dedup();
+            (hot, need_write)
+        };
+        if !need_write {
+            *self.hot.lock().unwrap() = hot;
+            return Vec::new();
+        }
         let mut st = self.state.write().unwrap();
-        let pending = st
-            .sessions
-            .values_mut()
-            .filter(|e| e.session.status == Status::Work || e.tracker.status == Status::Work)
-            .filter_map(|e| e.refresh(now, stale).then(|| Pending::Session(e.session.clone())))
-            .collect();
-        // Sources likely to change soon: working sessions and anything touched in the last
-        // minute. An idle session whose process merely stays open is left to the watcher: agents
-        // keep dozens of those, and polling each five times a second cost more than the rest.
+        let mut pending = Vec::new();
+        let mut mutated = false;
+        for e in
+            st.sessions.values_mut().filter(|e| e.session.status == Status::Work || e.tracker.status == Status::Work)
+        {
+            if e.would_change(now, stale) {
+                mutated = true;
+                if e.refresh(now, stale) {
+                    pending.push(Pending::Session((*e.session).clone()));
+                }
+            }
+        }
+        if mutated {
+            self.bump_state();
+        }
         let mut hot: Vec<PathBuf> = st
             .sessions
             .values()
@@ -816,6 +1063,7 @@ impl Engine {
             let mut st = self.state.write().unwrap();
             self.load_archived(&mut st);
             st.recompute_all_families();
+            self.bump_state();
         }
         for i in 0..self.adapters.len() {
             if let Some(list) = self.adapters[i].live() {
@@ -823,12 +1071,15 @@ impl Engine {
             }
         }
         self.tick(now_ms());
+        self.refresh_roots_cache();
+        // Pre-warm the published snapshot so the very first HTTP request hits the fast path.
+        let snap = self.sessions_snapshot();
         let report = IndexReport {
             ms: t0.elapsed().as_millis() as u64,
             files: discovered.len(),
             read: jobs.len(),
             restored,
-            sessions: self.state.read().unwrap().sessions.len(),
+            sessions: snap.sorted.len(),
             errors: errors.load(Ordering::Relaxed),
         };
         {
@@ -845,11 +1096,13 @@ impl Engine {
         let mut keys = Vec::new();
         for cs in c.sessions {
             let key = cs.session.key.clone();
+            let key_arc: Arc<str> = Arc::from(key.as_str());
             keys.push(key.clone());
             st.sessions.insert(
                 key,
                 Entry {
-                    session: cs.session,
+                    key_arc,
+                    session: Arc::new(cs.session),
                     tracker_since: cs.tracker.since,
                     turn_ended: false,
                     tracker: cs.tracker,
@@ -874,29 +1127,40 @@ impl Engine {
 
     pub fn save_cache(&self) -> Result<()> {
         let Some(path) = &self.opts.cache_path else { return Ok(()) };
-        let file = {
+        // Hold `state.read()` only long enough to copy lightweight Arc pointers & cursors;
+        // deep cloning and JSON serialization run completely lock-free afterwards.
+        let raw = {
             let st = self.state.read().unwrap();
-            let sources = st
-                .sources
+            st.sources
                 .iter()
-                .map(|(p, s)| CachedSource {
-                    harness: self.adapters[s.adapter].info().id.to_owned(),
-                    path: p.clone(),
-                    cursor: s.cursor.clone(),
-                    sessions: s
+                .map(|(p, s)| {
+                    let sessions: Vec<_> = s
                         .keys
                         .iter()
                         .filter_map(|k| st.sessions.get(k))
-                        .map(|e| CachedSession {
-                            session: Session { pid: None, ..e.session.clone() },
-                            tracker: e.tracker.clone(),
-                            title_rank: e.title_rank,
-                        })
-                        .collect(),
+                        .map(|e| (e.session.clone(), e.tracker.clone(), e.title_rank))
+                        .collect();
+                    (s.adapter, p.clone(), s.cursor.clone(), sessions)
                 })
-                .collect();
-            CacheFile { tag: self.tag.clone(), sources }
+                .collect::<Vec<_>>()
         };
+        let sources = raw
+            .into_iter()
+            .map(|(adapter, path, cursor, sessions)| CachedSource {
+                harness: self.adapters[adapter].info().id.to_owned(),
+                path,
+                cursor,
+                sessions: sessions
+                    .into_iter()
+                    .map(|(session, tracker, title_rank)| CachedSession {
+                        session: Session { pid: None, ..(*session).clone() },
+                        tracker,
+                        title_rank,
+                    })
+                    .collect(),
+            })
+            .collect();
+        let file = CacheFile { tag: self.tag.clone(), sources };
         cache::save(path, &file)?;
         self.dirty.store(false, Ordering::Relaxed);
         Ok(())
@@ -971,7 +1235,7 @@ impl Engine {
                     if update { self.spawn_update_check(tx.clone()); }
                 }
                 _ = hot.tick() => {
-                    for p in self.hot_sources() { self.clone().process(p).await; }
+                    for p in self.clone().hot_sources().await { self.clone().process(p).await; }
                 }
                 _ = tick.tick() => {
                     let p = self.tick(now_ms());
@@ -1043,32 +1307,59 @@ impl Engine {
     }
 
     /// The hot sources (see [`Engine::tick`]) that moved past their cursor.
-    fn hot_sources(&self) -> Vec<PathBuf> {
+    /// Copies cursors under a brief read lock, then runs `changed()` stat checks off the async loop.
+    async fn hot_sources(self: Arc<Self>) -> Vec<PathBuf> {
         let hot = self.hot.lock().unwrap().clone();
-        let st = self.state.read().unwrap();
-        hot.into_iter()
-            .filter(|p| st.sources.get(p).is_some_and(|s| self.adapters[s.adapter].changed(p, &s.cursor)))
-            .collect()
+        if hot.is_empty() {
+            return Vec::new();
+        }
+        let check: Vec<(PathBuf, usize, Cursor)> = {
+            let st = self.state.read().unwrap();
+            hot.into_iter().filter_map(|p| st.sources.get(&p).map(|s| (p, s.adapter, s.cursor.clone()))).collect()
+        };
+        if check.is_empty() {
+            return Vec::new();
+        }
+        tokio::task::spawn_blocking(move || {
+            check.into_iter().filter(|(p, a, c)| self.adapters[*a].changed(p, c)).map(|(p, _, _)| p).collect()
+        })
+        .await
+        .unwrap_or_default()
     }
 
     async fn rescan(self: Arc<Self>) -> Vec<PathBuf> {
         let me = self.clone();
         let found = tokio::task::spawn_blocking(move || {
+            me.refresh_roots_cache();
             me.adapters.iter().flat_map(|a| a.discover()).collect::<HashSet<PathBuf>>()
         })
         .await
         .unwrap_or_default();
-        let (new, gone): (Vec<PathBuf>, Vec<PathBuf>) = {
+        // Snapshot source metadata under a brief read lock, then run all filesystem stat checks
+        // in `spawn_blocking` so `state.read()` is never held across disk I/O.
+        let (unseen, known, missing) = {
             let st = self.state.read().unwrap();
-            // New sources, plus known ones that moved without a notification (dropped events).
-            let new = found
-                .iter()
-                .filter(|p| st.sources.get(*p).is_none_or(|s| self.adapters[s.adapter].changed(p, &s.cursor)))
-                .cloned()
-                .collect();
-            let gone = st.sources.keys().filter(|p| !found.contains(*p) && !p.exists()).cloned().collect();
-            (new, gone)
+            let mut unseen = Vec::new();
+            let mut known = Vec::new();
+            for p in &found {
+                match st.sources.get(p) {
+                    Some(s) => known.push((p.clone(), s.adapter, s.cursor.clone())),
+                    None => unseen.push(p.clone()),
+                }
+            }
+            let missing: Vec<PathBuf> = st.sources.keys().filter(|p| !found.contains(*p)).cloned().collect();
+            (unseen, known, missing)
         };
+        let me = self.clone();
+        let (mut new, gone) = tokio::task::spawn_blocking(move || {
+            let changed: Vec<PathBuf> =
+                known.into_iter().filter(|(p, a, c)| me.adapters[*a].changed(p, c)).map(|(p, _, _)| p).collect();
+            let gone: Vec<PathBuf> = missing.into_iter().filter(|p| !p.exists()).collect();
+            (changed, gone)
+        })
+        .await
+        .unwrap_or_default();
+        new.extend(unseen);
         if !gone.is_empty() {
             let mut st = self.state.write().unwrap();
             let pending: Vec<Pending> = gone.iter().flat_map(|p| self.remove_source(&mut st, p)).collect();
@@ -1079,7 +1370,9 @@ impl Engine {
     }
 
     async fn process(self: Arc<Self>, src: PathBuf) {
-        if !src.exists() {
+        let p = src.clone();
+        let exists = tokio::task::spawn_blocking(move || p.exists()).await.unwrap_or(true);
+        if !exists {
             let pending = {
                 let mut st = self.state.write().unwrap();
                 self.remove_source(&mut st, &src)
@@ -1108,9 +1401,14 @@ impl Engine {
         };
         let a = self.adapters[adapter].clone();
         let path = src.clone();
-        let res = tokio::task::spawn_blocking(move || a.read(&path, cursor.as_ref())).await;
+        let res = tokio::task::spawn_blocking(move || {
+            let out = a.read(&path, cursor.as_ref());
+            let still_there = out.is_ok() || path.exists();
+            (out, still_there)
+        })
+        .await;
         match res {
-            Ok(Ok(out)) => {
+            Ok((Ok(out), _)) => {
                 let pending = {
                     let mut st = self.state.write().unwrap();
                     self.apply(&mut st, adapter, &src, out, true, now_ms())
@@ -1118,8 +1416,8 @@ impl Engine {
                 self.publish(pending);
                 self.usage_touch(&src);
             }
-            Ok(Err(err)) => {
-                if !self.tombstoned(&src) && src.exists() {
+            Ok((Err(err), still_there)) => {
+                if !self.tombstoned(&src) && still_there {
                     self.note_error(&format!("{}: {err:#}", src.display()));
                 }
             }
@@ -1176,6 +1474,7 @@ impl Engine {
         if let Some(pre) = &info.latest_prerelease {
             tracing::info!("检测到预发布 {pre}（不保证稳定），如需试用：`uniflo update --pre`");
         }
+        *self.update_info.write().unwrap() = Some(info.clone());
         self.stats.lock().unwrap().update = Some(info);
     }
 

@@ -69,7 +69,10 @@ impl Engine {
     // ---------------------------------------------------------------- queries
 
     pub fn usage_progress(&self) -> UsageProgress {
-        self.usage.read().unwrap().progress()
+        let total = self.usage_total.load(Ordering::Acquire);
+        let done = self.usage_done.load(Ordering::Acquire);
+        let started = self.usage_started.load(Ordering::Acquire);
+        UsageProgress { ready: started && done == total, done, total }
     }
 
     /// Aggregate `sessions` (filtered by the caller) per `q`.
@@ -131,7 +134,7 @@ impl Engine {
                 .sessions
                 .values()
                 .filter(|c| c.session.parent.as_deref() == Some(key))
-                .map(|c| c.session.clone())
+                .map(|c| (*c.session).clone())
                 .collect();
             (
                 self.adapters[e.adapter].clone(),
@@ -209,6 +212,7 @@ impl Engine {
                 restored.push(key);
             }
             u.started = true;
+            self.note_usage_change(&u);
         }
         self.refresh_sessions(&restored, false);
         queue.sort_by_key(|a| std::cmp::Reverse(a.0));
@@ -227,7 +231,10 @@ impl Engine {
             })
         };
         let Some((adapter, harness, ids)) = known else {
-            self.usage.write().unwrap().remove_source(path);
+            let mut u = self.usage.write().unwrap();
+            if u.remove_source(path).is_some() {
+                self.note_usage_change(&u);
+            }
             return;
         };
         let generation = self.pricing.generation();
@@ -264,6 +271,7 @@ impl Engine {
             let s = SourceLedger { adapter, harness: harness.to_owned(), cursor, phase: Phase::Ready, ledgers };
             u.put_source(path.to_path_buf(), s);
             u.dirty = true;
+            self.note_usage_change(&u);
         }
         if self.pricing.generation() != generation {
             self.reprice(Some(&keys));
@@ -342,10 +350,11 @@ impl Engine {
                     touched.insert(key);
                 }
             }
-            if let Some(s) = u.source_mut(path) {
-                s.cursor = Some(out.cursor);
-            }
+            u.set_cursor(path, out.cursor);
             u.dirty |= !touched.is_empty();
+            if !touched.is_empty() {
+                self.note_usage_change(&u);
+            }
         }
         let keys: Vec<String> = touched.into_iter().collect();
         self.refresh_sessions(&keys, true);
@@ -356,13 +365,11 @@ impl Engine {
         let st = self.state.read().unwrap();
         let Some(s) = st.sources.get(path) else { return false };
         let mut u = self.usage.write().unwrap();
-        match u.source_mut(path) {
-            Some(e) => e.phase = Phase::Queued,
-            None => {
-                let harness = self.adapters[s.adapter].info().id.to_owned();
-                u.put_source(path.to_path_buf(), SourceLedger::queued(s.adapter, harness));
-            }
+        if !u.set_phase(path, Phase::Queued) {
+            let harness = self.adapters[s.adapter].info().id.to_owned();
+            u.put_source(path.to_path_buf(), SourceLedger::queued(s.adapter, harness));
         }
+        self.note_usage_change(&u);
         true
     }
 
@@ -370,6 +377,7 @@ impl Engine {
         let mut u = self.usage.write().unwrap();
         if u.remove_source(path).is_some() {
             u.dirty = true;
+            self.note_usage_change(&u);
         }
     }
 
@@ -384,6 +392,9 @@ impl Engine {
                 l.reprice(&p, generation);
                 changed.push(k.clone());
             }
+        }
+        if !changed.is_empty() {
+            self.note_usage_change(&u);
         }
         changed.sort();
         changed.dedup();
@@ -402,6 +413,7 @@ impl Engine {
             keys.iter().map(|k| (k, u.view(k).and_then(|l| l.summary(&p)).map(Box::new))).collect()
         };
         let mut out = Vec::new();
+        let mut any_changed = false;
         {
             let mut st = self.state.write().unwrap();
             let mut moved: Vec<String> = Vec::new();
@@ -409,7 +421,7 @@ impl Engine {
                 if let Some(e) = st.sessions.get_mut(k)
                     && e.session.usage != sum
                 {
-                    e.session.usage = sum;
+                    Arc::make_mut(&mut e.session).usage = sum;
                     moved.push(k.clone());
                 }
             }
@@ -417,22 +429,29 @@ impl Engine {
             let roots = st.family_roots(moved.iter().map(String::as_str));
             let seen: HashSet<String> = moved.iter().cloned().collect();
             moved.extend(st.recompute_families(&roots).into_iter().filter(|k| !seen.contains(k)));
+            if !moved.is_empty() {
+                any_changed = true;
+                self.bump_state();
+            }
             if publish {
                 out.extend(
-                    moved.iter().filter_map(|k| st.sessions.get(k)).map(|e| Pending::Session(e.session.clone())),
+                    moved.iter().filter_map(|k| st.sessions.get(k)).map(|e| Pending::Session((*e.session).clone())),
                 );
             }
         }
-        self.dirty.store(true, Ordering::Relaxed);
+        if any_changed {
+            self.dirty.store(true, Ordering::Relaxed);
+        }
         self.publish(out);
     }
 
     /// Persist ledgers next to the index cache (no-op without a cache path).
+    /// Holds `usage.read()` only long enough to clone `Arc<SourceLedger>` pointers, so
+    /// 50+ MB JSON serialization and disk writes never block concurrent queries or writers.
     pub fn save_usage_cache(&self) -> Result<()> {
         let Some(path) = self.usage_cache_path() else { return Ok(()) };
-        let u = self.usage.read().unwrap();
-        store::save(&path, &self.usage_tag(), &u)?;
-        drop(u);
+        let snapshot = self.usage.read().unwrap().source_snapshot();
+        store::save_snapshot(&path, &self.usage_tag(), &snapshot)?;
         self.usage.write().unwrap().dirty = false;
         Ok(())
     }

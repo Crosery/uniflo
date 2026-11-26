@@ -44,6 +44,20 @@ pub fn file_sig(paths: &[PathBuf]) -> FileSig {
     paths.iter().map(|p| std::fs::metadata(p).map_or((0, 0), |m| (file_mtime_ms(&m), m.len()))).collect()
 }
 
+/// Compare `SideState::sig` stored in `cursor.state["sig"]` by reference without cloning or
+/// deserializing the full decoder state tree.
+fn sig_matches(state: &Value, current: &[(i64, u64)]) -> bool {
+    let Some(arr) = state.get("sig").and_then(Value::as_array) else {
+        return false;
+    };
+    if arr.len() != current.len() {
+        return false;
+    }
+    arr.iter().zip(current).all(|(v, &(m, s))| {
+        v.as_array().is_some_and(|pair| pair.len() == 2 && pair[0].as_i64() == Some(m) && pair[1].as_u64() == Some(s))
+    })
+}
+
 /// A JSONL transcript whose session metadata lives in sibling files rewritten in place
 /// (title, cwd, per-turn usage). [`WithSidecars`] re-reads them after every read, so a
 /// change to a sibling alone still lands.
@@ -52,6 +66,12 @@ pub trait Sidecar: LineDecoder {
     fn transcript_of(&self, path: &Path) -> Option<PathBuf>;
     /// Siblings of `src` whose change means `src` must be read again.
     fn sidecars(&self, src: &Path) -> Vec<PathBuf>;
+    /// Cheap per-session change signature for sidecar state. Defaults to `file_sig(&self.sidecars(src))`;
+    /// adapters whose sidecars include shared multi-session databases can override this to hash only
+    /// this session's entry so unrelated sessions do not re-read on every DB write.
+    fn sidecar_sig(&self, src: &Path) -> FileSig {
+        file_sig(&self.sidecars(src))
+    }
     /// Records derived from the siblings after a read of `src`. Called only once the session
     /// has events: a shell without conversation stays unlisted.
     fn sidecar(&self, src: &Path, state: &mut Self::State) -> Vec<Record>;
@@ -142,7 +162,7 @@ impl<D: Sidecar> WithSidecars<D> {
         emit: Option<&[(i64, u64)]>,
         push: &mut dyn FnMut(&str, Record),
     ) {
-        let sig = file_sig(&self.inner.decoder.sidecars(src));
+        let sig = self.inner.decoder.sidecar_sig(src);
         let mut st: D::State = serde_json::from_value(cursor.state.clone()).unwrap_or_default();
         if content && emit.is_none_or(|prev| prev != sig.as_slice()) {
             let id = self.inner.decoder.identify(src).map(|s| s.id).unwrap_or_default();
@@ -232,8 +252,7 @@ impl<D: Sidecar> Adapter for WithSidecars<D> {
     }
 
     fn changed(&self, src: &Path, cursor: &Cursor) -> bool {
-        let (inner, side) = Self::split(cursor);
-        self.inner.changed(src, &inner) || side.sig != file_sig(&self.inner.decoder.sidecars(src))
+        self.inner.changed(src, cursor) || !sig_matches(&cursor.state, &self.inner.decoder.sidecar_sig(src))
     }
 
     fn live(&self) -> Option<Vec<LiveSession>> {

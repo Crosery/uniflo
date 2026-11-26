@@ -14,7 +14,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 use uniflo_schema::{CatalogEntry, CostSource, MatchKind, PricingStatus};
@@ -88,7 +88,7 @@ pub struct Loaded {
     pub synced: Option<(String, i64)>,
     pub state: sync::SyncState,
     pub problem: Option<String>,
-    memo: Mutex<HashMap<String, (MatchKind, Option<usize>)>>,
+    memo: RwLock<HashMap<String, (MatchKind, Option<usize>)>>,
 }
 
 impl Loaded {
@@ -122,7 +122,7 @@ impl Loaded {
             synced: synced_meta,
             state,
             problem,
-            memo: Mutex::new(HashMap::new()),
+            memo: RwLock::new(HashMap::new()),
         }
     }
 
@@ -131,13 +131,11 @@ impl Loaded {
     }
 
     pub fn resolve(&self, model: &str) -> Resolved {
-        let hit = {
-            let mut memo = self.memo.lock().unwrap();
-            match memo.get(model) {
-                Some(r) => *r,
-                None => *memo.entry(model.to_owned()).or_insert_with(|| self.catalog.resolve(model)),
-            }
-        };
+        if let Some(&hit) = self.memo.read().unwrap().get(model) {
+            return Resolved { kind: hit.0, entry: hit.1.map(|i| self.shared[i].clone()) };
+        }
+        let hit = self.catalog.resolve(model);
+        self.memo.write().unwrap().entry(model.to_owned()).or_insert(hit);
         Resolved { kind: hit.0, entry: hit.1.map(|i| self.shared[i].clone()) }
     }
 
@@ -167,6 +165,7 @@ pub struct Pricing {
     dir: Option<PathBuf>,
     loaded: RwLock<Arc<Loaded>>,
     generation: AtomicU64,
+    last_check_ms: AtomicI64,
     stamps: Mutex<(Option<Instant>, Stamps)>,
     sync_enabled: AtomicBool,
 }
@@ -179,6 +178,7 @@ impl Pricing {
             loaded: RwLock::new(Arc::new(Loaded::build(dir.as_deref()))),
             dir,
             generation: AtomicU64::new(1),
+            last_check_ms: AtomicI64::new(crate::util::now_ms()),
             stamps: Mutex::new((Some(Instant::now()), stamps)),
             sync_enabled: AtomicBool::new(false),
         }
@@ -205,11 +205,17 @@ impl Pricing {
     /// Returns whether prices were reloaded.
     pub fn refresh(&self) -> bool {
         let Some(dir) = &self.dir else { return false };
+        let now_ms = crate::util::now_ms();
+        let last = self.last_check_ms.load(Ordering::Relaxed);
+        if now_ms >= last && now_ms - last < RECHECK.as_millis() as i64 {
+            return false;
+        }
         let mut st = self.stamps.lock().unwrap();
         if st.0.is_some_and(|t| t.elapsed() < RECHECK) {
             return false;
         }
         st.0 = Some(Instant::now());
+        self.last_check_ms.store(now_ms, Ordering::Relaxed);
         let now = file_stamps(dir);
         if now == st.1 {
             return false;
@@ -226,6 +232,7 @@ impl Pricing {
         *self.loaded.write().unwrap() = next;
         if let Some(d) = &self.dir {
             *self.stamps.lock().unwrap() = (Some(Instant::now()), file_stamps(d));
+            self.last_check_ms.store(crate::util::now_ms(), Ordering::Relaxed);
         }
         self.generation.fetch_add(1, Ordering::AcqRel);
     }

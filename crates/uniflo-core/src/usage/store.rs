@@ -45,8 +45,16 @@ pub fn path_for(index_cache: &Path) -> PathBuf {
 }
 
 pub fn save(path: &Path, tag: &str, index: &UsageIndex) -> Result<()> {
+    save_sources(path, tag, index.sources())
+}
+
+pub fn save_snapshot(path: &Path, tag: &str, snapshot: &[(PathBuf, Arc<SourceLedger>)]) -> Result<()> {
+    save_sources(path, tag, snapshot.iter().map(|(p, s)| (p, s.as_ref())))
+}
+
+fn save_sources<'a>(path: &Path, tag: &str, iter: impl Iterator<Item = (&'a PathBuf, &'a SourceLedger)>) -> Result<()> {
     let mut sources = Vec::new();
-    for (p, s) in index.sources() {
+    for (p, s) in iter {
         let (Phase::Ready, Some(cursor)) = (s.phase, &s.cursor) else { continue };
         let mut models: Vec<String> = Vec::new();
         let mut ids: HashMap<Arc<str>, u32> = HashMap::new();

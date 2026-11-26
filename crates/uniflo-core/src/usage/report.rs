@@ -4,10 +4,11 @@ use super::tz::Tz;
 use super::{Ledger, UsageIndex};
 use crate::pricing::Loaded;
 use crate::pricing::catalog::base_name;
+use chrono::Datelike;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{OnceLock, RwLock};
 use uniflo_schema::{MatchKind, PricingBrief, Session, UsageReport, UsageRow};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -164,16 +165,16 @@ impl Acc {
 
 /// Git root above `cwd` (only `stat`s, memoized per process), else `cwd` itself.
 pub fn project_of(cwd: &str) -> String {
-    static MEMO: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+    static MEMO: OnceLock<RwLock<HashMap<String, String>>> = OnceLock::new();
     let memo = MEMO.get_or_init(Default::default);
-    if let Some(r) = memo.lock().unwrap().get(cwd) {
+    if let Some(r) = memo.read().unwrap().get(cwd) {
         return r.clone();
     }
     let root = Path::new(cwd)
         .ancestors()
         .find(|d| d.join(".git").exists())
         .map_or_else(|| cwd.to_owned(), |d| d.display().to_string());
-    memo.lock().unwrap().insert(cwd.to_owned(), root.clone());
+    memo.write().unwrap().insert(cwd.to_owned(), root.clone());
     root
 }
 
@@ -264,24 +265,7 @@ pub fn report(index: &UsageIndex, sessions: &[&Session], q: &Query, p: &Loaded, 
             })
             .clone()
     };
-    let time_key = |ts: i64| -> (String, String) {
-        if ts <= 0 {
-            return (String::new(), "(unknown time)".into());
-        }
-        let c = q.tz.civil(ts);
-        match q.group_by {
-            GroupBy::Day => {
-                let k = format!("{:04}-{:02}-{:02}", c.year, c.month, c.day);
-                (k.clone(), k)
-            }
-            GroupBy::Hour => (format!("{:02}", c.hour), format!("{:02}:00", c.hour)),
-            GroupBy::WeekdayHour => (
-                format!("{}-{:02}", c.weekday, c.hour),
-                format!("{} {:02}:00", WEEKDAYS[(c.weekday as usize).saturating_sub(1) % 7], c.hour),
-            ),
-            _ => (c.weekday.to_string(), WEEKDAYS[(c.weekday as usize).saturating_sub(1) % 7].into()),
-        }
-    };
+    let mut model_filter_cache: HashMap<&str, bool> = HashMap::new();
     let session_key = |s: &Session| -> (String, String) {
         match q.group_by {
             GroupBy::Harness => (s.harness.clone(), s.harness.clone()),
@@ -315,59 +299,294 @@ pub fn report(index: &UsageIndex, sessions: &[&Session], q: &Query, p: &Loaded, 
         }
     };
 
-    let mut rows: HashMap<String, Acc> = HashMap::new();
+    let need_turn_model = q.model.is_some() || q.group_by == GroupBy::Model;
+    let mut turn_model: HashMap<u32, Option<&str>> = HashMap::new();
     let mut all_sessions = 0u64;
-    for (si, (s, l)) in picked.iter().enumerate() {
-        let si = si as u32;
-        let fixed = (!q.group_by.by_time() && q.group_by != GroupBy::Model).then(|| session_key(s));
-        let mut any = false;
-        let mut turn_model: HashMap<u32, Option<&str>> = HashMap::new();
-        for st in &l.steps {
-            turn_model.entry(st.turn).or_insert(st.model.as_deref());
-            if !in_window(st.ts) || q.model.as_ref().is_some_and(|m| model_key(st.model.as_deref()).0 != *m) {
-                continue;
-            }
-            any = true;
-            let (k, label) = match &fixed {
-                Some(f) => f.clone(),
-                None if q.group_by == GroupBy::Model => model_key(st.model.as_deref()),
-                None => time_key(st.ts),
-            };
-            let a = rows.entry(k).or_insert_with(|| Acc { label, ..Default::default() });
-            a.session(si);
-            a.steps += 1;
-            a.input += st.input;
-            a.output += st.output;
-            a.cache_read += st.cache_read;
-            a.cache_write += st.cache_write;
-            a.reasoning += st.reasoning;
-            match st.cost {
-                Some(c) => {
-                    a.cost += c;
-                    a.priced += 1;
-                }
-                None => a.unpriced += 1,
-            }
-        }
-        for pr in &l.prompts {
-            let pm = turn_model.get(&pr.turn).copied().flatten().or(l.model.as_deref());
-            if !in_window(pr.ts) || q.model.as_ref().is_some_and(|m| model_key(pm).0 != *m) {
-                continue;
-            }
-            any = true;
-            let (k, label) = match &fixed {
-                Some(f) => f.clone(),
-                None if q.group_by == GroupBy::Model => model_key(pm),
-                None => time_key(pr.ts),
-            };
-            let a = rows.entry(k).or_insert_with(|| Acc { label, ..Default::default() });
-            a.session(si);
-            a.prompts += 1;
-        }
-        all_sessions += u64::from(any);
-    }
 
-    let mut list: Vec<(String, Acc)> = rows.into_iter().collect();
+    let mut list: Vec<(String, Acc)> = if !q.group_by.by_time() && q.group_by != GroupBy::Model {
+        // Session-level dimensions: accumulate each session on the stack and touch `rows` ONCE per session.
+        let mut rows: HashMap<String, Acc> = HashMap::new();
+        for (si, (s, l)) in picked.iter().enumerate() {
+            if !l.overlaps(q.since, q.until) {
+                continue;
+            }
+            let si = si as u32;
+            let (steps, prompts, input, output, cache_read, cache_write, reasoning, cost, priced, unpriced) =
+                if q.model.is_none() && l.contained_in(q.since, q.until) {
+                    let t = l.totals;
+                    (
+                        t.steps,
+                        t.prompts,
+                        t.input,
+                        t.output,
+                        t.cache_read,
+                        t.cache_write,
+                        t.reasoning,
+                        t.cost,
+                        t.priced,
+                        t.unpriced,
+                    )
+                } else {
+                    let mut steps = 0u64;
+                    let mut prompts = 0u64;
+                    let mut input = 0u64;
+                    let mut output = 0u64;
+                    let mut cache_read = 0u64;
+                    let mut cache_write = 0u64;
+                    let mut reasoning = 0u64;
+                    let mut cost = 0.0f64;
+                    let mut priced = 0u64;
+                    let mut unpriced = 0u64;
+                    if need_turn_model {
+                        turn_model.clear();
+                    }
+                    for st in &l.steps {
+                        let sm = st.model.as_deref();
+                        if need_turn_model {
+                            turn_model.entry(st.turn).or_insert(sm);
+                        }
+                        if !in_window(st.ts) {
+                            continue;
+                        }
+                        if let Some(want) = &q.model {
+                            let raw = sm.unwrap_or("");
+                            let ok = *model_filter_cache.entry(raw).or_insert_with(|| model_key(sm).0 == *want);
+                            if !ok {
+                                continue;
+                            }
+                        }
+                        steps += 1;
+                        input += st.input;
+                        output += st.output;
+                        cache_read += st.cache_read;
+                        cache_write += st.cache_write;
+                        reasoning += st.reasoning;
+                        match st.cost {
+                            Some(c) => {
+                                cost += c;
+                                priced += 1;
+                            }
+                            None => unpriced += 1,
+                        }
+                    }
+                    for pr in &l.prompts {
+                        if !in_window(pr.ts) {
+                            continue;
+                        }
+                        if let Some(want) = &q.model {
+                            let pm = turn_model.get(&pr.turn).copied().flatten().or(l.model.as_deref());
+                            let raw = pm.unwrap_or("");
+                            let ok = *model_filter_cache.entry(raw).or_insert_with(|| model_key(pm).0 == *want);
+                            if !ok {
+                                continue;
+                            }
+                        }
+                        prompts += 1;
+                    }
+                    (steps, prompts, input, output, cache_read, cache_write, reasoning, cost, priced, unpriced)
+                };
+            if steps > 0 || prompts > 0 {
+                all_sessions += 1;
+                let (k, label) = session_key(s);
+                let a = rows.entry(k).or_insert_with(|| Acc { label, ..Default::default() });
+                a.session(si);
+                a.steps += steps;
+                a.prompts += prompts;
+                a.input += input;
+                a.output += output;
+                a.cache_read += cache_read;
+                a.cache_write += cache_write;
+                a.reasoning += reasoning;
+                a.cost += cost;
+                a.priced += priced;
+                a.unpriced += unpriced;
+            }
+        }
+        rows.into_iter().collect()
+    } else if q.group_by == GroupBy::Model {
+        // Model dimension: map raw model name -> bucket index once, zero String clones per step.
+        let mut buckets: Vec<(String, Acc)> = Vec::new();
+        let mut by_key: HashMap<String, usize> = HashMap::new();
+        let mut raw_to_idx: HashMap<&str, usize> = HashMap::new();
+        for (si, (_, l)) in picked.iter().enumerate() {
+            if !l.overlaps(q.since, q.until) {
+                continue;
+            }
+            let si = si as u32;
+            let mut any = false;
+            turn_model.clear();
+            for st in &l.steps {
+                let sm = st.model.as_deref();
+                turn_model.entry(st.turn).or_insert(sm);
+                if !in_window(st.ts) {
+                    continue;
+                }
+                let raw = sm.unwrap_or("");
+                let idx = *raw_to_idx.entry(raw).or_insert_with(|| {
+                    let (k, label) = model_key(sm);
+                    *by_key.entry(k.clone()).or_insert_with(|| {
+                        let i = buckets.len();
+                        buckets.push((k, Acc { label, ..Default::default() }));
+                        i
+                    })
+                });
+                if q.model.as_ref().is_some_and(|want| buckets[idx].0 != *want) {
+                    continue;
+                }
+                any = true;
+                let a = &mut buckets[idx].1;
+                a.session(si);
+                a.steps += 1;
+                a.input += st.input;
+                a.output += st.output;
+                a.cache_read += st.cache_read;
+                a.cache_write += st.cache_write;
+                a.reasoning += st.reasoning;
+                match st.cost {
+                    Some(c) => {
+                        a.cost += c;
+                        a.priced += 1;
+                    }
+                    None => a.unpriced += 1,
+                }
+            }
+            for pr in &l.prompts {
+                if !in_window(pr.ts) {
+                    continue;
+                }
+                let pm = turn_model.get(&pr.turn).copied().flatten().or(l.model.as_deref());
+                let raw = pm.unwrap_or("");
+                let idx = *raw_to_idx.entry(raw).or_insert_with(|| {
+                    let (k, label) = model_key(pm);
+                    *by_key.entry(k.clone()).or_insert_with(|| {
+                        let i = buckets.len();
+                        buckets.push((k, Acc { label, ..Default::default() }));
+                        i
+                    })
+                });
+                if q.model.as_ref().is_some_and(|want| buckets[idx].0 != *want) {
+                    continue;
+                }
+                any = true;
+                let a = &mut buckets[idx].1;
+                a.session(si);
+                a.prompts += 1;
+            }
+            all_sessions += u64::from(any);
+        }
+        buckets.into_iter().filter(|(_, a)| a.steps > 0 || a.prompts > 0).collect()
+    } else {
+        // Time dimensions (`Day`, `Hour`, `Weekday`, `WeekdayHour`): resolve TZ once and bucket by integer,
+        // formatting bucket strings ONCE at the end.
+        let rtz = q.tz.resolve();
+        let time_bucket = |ts: i64| -> i32 {
+            if ts <= 0 {
+                return i32::MIN;
+            }
+            let local = rtz.local_secs(ts);
+            let day = local.div_euclid(86_400);
+            match q.group_by {
+                GroupBy::Day => day as i32,
+                GroupBy::Hour => (local.rem_euclid(86_400) / 3600) as i32,
+                GroupBy::Weekday => ((day + 3).rem_euclid(7) + 1) as i32,
+                _ => {
+                    let wd = ((day + 3).rem_euclid(7) + 1) as i32;
+                    let hr = (local.rem_euclid(86_400) / 3600) as i32;
+                    wd * 24 + hr
+                }
+            }
+        };
+        let mut by_num: HashMap<i32, Acc> = HashMap::new();
+        for (si, (_, l)) in picked.iter().enumerate() {
+            if !l.overlaps(q.since, q.until) {
+                continue;
+            }
+            let si = si as u32;
+            let mut any = false;
+            if need_turn_model {
+                turn_model.clear();
+            }
+            for st in &l.steps {
+                let sm = st.model.as_deref();
+                if need_turn_model {
+                    turn_model.entry(st.turn).or_insert(sm);
+                }
+                if !in_window(st.ts) {
+                    continue;
+                }
+                if let Some(want) = &q.model {
+                    let raw = sm.unwrap_or("");
+                    let ok = *model_filter_cache.entry(raw).or_insert_with(|| model_key(sm).0 == *want);
+                    if !ok {
+                        continue;
+                    }
+                }
+                any = true;
+                let a = by_num.entry(time_bucket(st.ts)).or_default();
+                a.session(si);
+                a.steps += 1;
+                a.input += st.input;
+                a.output += st.output;
+                a.cache_read += st.cache_read;
+                a.cache_write += st.cache_write;
+                a.reasoning += st.reasoning;
+                match st.cost {
+                    Some(c) => {
+                        a.cost += c;
+                        a.priced += 1;
+                    }
+                    None => a.unpriced += 1,
+                }
+            }
+            for pr in &l.prompts {
+                if !in_window(pr.ts) {
+                    continue;
+                }
+                if let Some(want) = &q.model {
+                    let pm = turn_model.get(&pr.turn).copied().flatten().or(l.model.as_deref());
+                    let raw = pm.unwrap_or("");
+                    let ok = *model_filter_cache.entry(raw).or_insert_with(|| model_key(pm).0 == *want);
+                    if !ok {
+                        continue;
+                    }
+                }
+                any = true;
+                let a = by_num.entry(time_bucket(pr.ts)).or_default();
+                a.session(si);
+                a.prompts += 1;
+            }
+            all_sessions += u64::from(any);
+        }
+        by_num
+            .into_iter()
+            .map(|(b, mut a)| {
+                let (k, label) = if b == i32::MIN {
+                    (String::new(), "(unknown time)".into())
+                } else {
+                    match q.group_by {
+                        GroupBy::Day => {
+                            let d =
+                                chrono::DateTime::from_timestamp(b as i64 * 86_400, 0).unwrap_or_default().naive_utc();
+                            let k = format!("{:04}-{:02}-{:02}", d.year(), d.month(), d.day());
+                            (k.clone(), k)
+                        }
+                        GroupBy::Hour => (format!("{b:02}"), format!("{b:02}:00")),
+                        GroupBy::Weekday => (b.to_string(), WEEKDAYS[(b as usize).saturating_sub(1) % 7].into()),
+                        _ => {
+                            let wd = (b / 24) as u32;
+                            let hr = (b % 24) as u32;
+                            (
+                                format!("{wd}-{hr:02}"),
+                                format!("{} {hr:02}:00", WEEKDAYS[(wd as usize).saturating_sub(1) % 7]),
+                            )
+                        }
+                    }
+                };
+                a.label = label;
+                (k, a)
+            })
+            .collect()
+    };
     let sort = match q.sort {
         Sort::Auto if q.group_by.by_time() => Sort::Key,
         Sort::Auto => Sort::Cost,

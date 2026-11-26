@@ -222,15 +222,6 @@ impl<D: LineDecoder> JsonlAdapter<D> {
         sink.flush_meta();
     }
 
-    /// [`LineDecoder::page_start`] on raw lines; an unparsable line is a boundary.
-    fn page_start(&self, prev: &[u8], line: &[u8]) -> bool {
-        let parse = |l: &[u8]| serde_json::from_slice::<Value>(trim_line(l)).ok();
-        match (parse(prev), parse(line)) {
-            (Some(p), Some(l)) => self.decoder.page_start(&p, &l),
-            _ => true,
-        }
-    }
-
     fn decode_line(&self, line: &[u8], pos: u64, at: At<'_>, state: &mut D::State, sink: &mut Sink) {
         let line = trim_line(line);
         if line.is_empty() {
@@ -387,24 +378,37 @@ impl<D: LineDecoder> Adapter for JsonlAdapter<D> {
         let end = q.before.map_or(size, |b| b.min(size));
         let mut rev = RevLines::new(&mut f, end);
         // Newest first. Past `limit`, keep going back until the oldest line can start a page.
-        let mut lines: Vec<(u64, Vec<u8>)> = Vec::new();
+        // Parse each JSON line once and reuse the parsed Value for the forward decode pass.
+        let mut lines: Vec<(u64, Option<Value>)> = Vec::new();
         let mut estimate = 0usize;
-        while let Some((pos, line)) = rev.next_line()? {
-            if estimate >= limit && lines.last().is_none_or(|(_, newer)| self.page_start(&line, newer)) {
-                break;
+        while let Some((pos, raw)) = rev.next_line()? {
+            let trimmed = trim_line(&raw);
+            let parsed = if trimmed.is_empty() { None } else { serde_json::from_slice::<Value>(trimmed).ok() };
+            if estimate >= limit {
+                let boundary = match (&parsed, lines.last().and_then(|(_, newer)| newer.as_ref())) {
+                    (Some(prev), Some(newer)) => self.decoder.page_start(prev, newer),
+                    _ => true,
+                };
+                if boundary {
+                    break;
+                }
             }
-            // Per line with fresh state; fragments still open at its end are not counted.
-            let mut probe = Sink::default();
-            let mut st = D::State::default();
-            self.decode_line(&line, pos, At { src, key: &key }, &mut st, &mut probe);
-            estimate += probe.records.iter().filter(|r| matches!(r, Record::Event(_))).count();
-            lines.push((pos, line));
+            if let Some(v) = &parsed {
+                // Per line with fresh state; fragments still open at its end are not counted.
+                let mut probe = Sink::default();
+                let mut st = D::State::default();
+                self.decode_value(v, At { src, key: &key }, pos, &mut st, &mut probe);
+                estimate += probe.records.iter().filter(|r| matches!(r, Record::Event(_))).count();
+            }
+            lines.push((pos, parsed));
         }
         lines.reverse();
         let mut sink = Sink::default();
         let mut state = D::State::default();
-        for (pos, line) in &lines {
-            self.decode_line(line, *pos, At { src, key: &key }, &mut state, &mut sink);
+        for (pos, parsed) in &lines {
+            if let Some(v) = parsed {
+                self.decode_value(v, At { src, key: &key }, *pos, &mut state, &mut sink);
+            }
         }
         self.finish(At { src, key: &key }, end, &mut state, &mut sink, end < size);
         // A merged message sits at its first fragment though it is emitted when it closes;

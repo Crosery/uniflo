@@ -40,7 +40,7 @@ mod watch;
 pub mod window;
 
 pub use adapter::{Adapter, Cursor, HarnessInfo, HistoryQuery, LiveSession, MetaPatch, ReadOutput, Record};
-pub use engine::{Engine, EngineOptions, IndexReport, PriceSync, Stats};
+pub use engine::{Engine, EngineOptions, HealthSnapshot, IndexReport, PriceSync, SessionSnapshot, Stats};
 pub use jsonl::{Cx, JsonlAdapter, LineDecoder, SourceId, decode_record};
 pub use update::UpdateInfo;
 pub use window::Window;

@@ -29,6 +29,7 @@
 //! request (any method but GET / HEAD / OPTIONS) also passes [`write::check`].
 
 pub mod agent;
+mod cache;
 pub mod cleanup;
 mod guard;
 pub mod icons;
@@ -46,6 +47,7 @@ use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
+use cache::{CacheKey, CachedBody, NS_SESSIONS, ResponseCache, Singleflight, query_has_relative_time};
 use futures_util::StreamExt;
 use serde::Deserialize;
 use std::convert::Infallible;
@@ -55,7 +57,7 @@ use uniflo_core::util::now_ms;
 use uniflo_core::{Engine, HistoryQuery};
 use uniflo_schema::{Envelope, SCHEMA_VERSION};
 use uniflo_search::fts::Fts;
-use uniflo_search::{Query as SearchQuery, search};
+use uniflo_search::{Query as SearchQuery, search_refs};
 
 pub const DEFAULT_MAX_TEXT: usize = 32 * 1024;
 
@@ -65,6 +67,11 @@ struct AppState {
     fts: Option<Arc<Fts>>,
     cleanup: Option<Arc<Cleanup>>,
     read_only: bool,
+    cache: Arc<ResponseCache>,
+    flights: Arc<Singleflight>,
+    /// Caps concurrent CPU-heavy `spawn_blocking` tasks so bursts of cache-miss fuzzy/usage/FTS
+    /// queries never starve Tokio worker threads serving `/v1/health`, cached lists, and streams.
+    cpu_permits: Arc<tokio::sync::Semaphore>,
 }
 
 /// Optional services behind the router; a missing one answers 503.
@@ -84,7 +91,16 @@ pub fn router_with_fts(engine: Arc<Engine>, guard: GuardOptions, fts: Option<Arc
 }
 
 pub fn router_with(engine: Arc<Engine>, guard: GuardOptions, services: Services) -> Router {
-    let state = AppState { engine, fts: services.fts, cleanup: services.cleanup, read_only: guard.read_only };
+    let cpu_budget = std::thread::available_parallelism().map_or(4, |n| n.get().saturating_sub(2).clamp(4, 8));
+    let state = AppState {
+        engine,
+        fts: services.fts,
+        cleanup: services.cleanup,
+        read_only: guard.read_only,
+        cache: Arc::new(ResponseCache::default()),
+        flights: Arc::new(Singleflight::default()),
+        cpu_permits: Arc::new(tokio::sync::Semaphore::new(cpu_budget)),
+    };
     let guard = Arc::new(guard);
     Router::new()
         .route("/", get(index))
@@ -142,16 +158,6 @@ fn with_seq(engine: &Engine, mut resp: Response) -> Response {
     resp
 }
 
-fn ndjson_body<T: serde::Serialize>(items: impl IntoIterator<Item = T>) -> Response {
-    let mut out = Vec::new();
-    for it in items {
-        if serde_json::to_writer(&mut out, &it).is_ok() {
-            out.push(b'\n');
-        }
-    }
-    ([(header::CONTENT_TYPE, "application/x-ndjson")], out).into_response()
-}
-
 async fn index() -> impl IntoResponse {
     Json(serde_json::json!({
         "name": "uniflo",
@@ -166,7 +172,7 @@ async fn demo() -> impl IntoResponse {
 }
 
 async fn health(State(s): State<AppState>) -> impl IntoResponse {
-    let st = s.engine.stats();
+    let st = s.engine.health_snapshot();
     Json(serde_json::json!({
         "ok": true,
         "version": env!("CARGO_PKG_VERSION"),
@@ -191,8 +197,15 @@ async fn harnesses(State(s): State<AppState>) -> impl IntoResponse {
 }
 
 async fn stats(State(s): State<AppState>) -> impl IntoResponse {
-    let mut v = serde_json::to_value(s.engine.stats()).unwrap_or_default();
-    v["fts"] = serde_json::to_value(s.fts.as_ref().map(|f| f.status())).unwrap_or_default();
+    let engine = s.engine.clone();
+    let fts = s.fts.clone();
+    let v = tokio::task::spawn_blocking(move || {
+        let mut v = serde_json::to_value(engine.stats()).unwrap_or_default();
+        v["fts"] = serde_json::to_value(fts.as_ref().map(|f| f.status())).unwrap_or_default();
+        v
+    })
+    .await
+    .unwrap_or_default();
     Json(v)
 }
 
@@ -204,17 +217,54 @@ struct ListParams {
 }
 
 async fn sessions(State(s): State<AppState>, Query(p): Query<ListParams>) -> Response {
-    let all = s.engine.sessions();
-    let q = SearchQuery::parse(p.q.as_deref().unwrap_or(""), now_ms());
-    let hits = search(&all, &q, p.limit.unwrap_or(100).min(100_000));
-    let list: Vec<_> = hits.iter().map(|h| h.session).collect();
-    let resp = if p.format.as_deref() == Some("ndjson") { ndjson_body(list) } else { Json(list).into_response() };
-    with_seq(&s.engine, resp)
+    let q_raw = p.q.as_deref().unwrap_or("");
+    let limit = p.limit.unwrap_or(100).min(100_000);
+    let ndjson = p.format.as_deref() == Some("ndjson");
+    let snap = s.engine.sessions_snapshot();
+    let cacheable = !query_has_relative_time(q_raw);
+    let cache_key =
+        CacheKey { ns: NS_SESSIONS, gen_tag: (snap.generation, 0, 0), key: format!("{q_raw}\0{limit}\0{ndjson}") };
+    if cacheable && let Some(hit) = s.cache.get(&cache_key) {
+        return with_seq(&s.engine, hit.into_response());
+    }
+    let q = SearchQuery::parse(q_raw, now_ms());
+    let has_text = !q.text.is_empty();
+    let flight_key = format!("sess:{}:{q_raw}\0{limit}\0{ndjson}", snap.generation);
+    let cache = s.cache.clone();
+    let cache_key_save = cache_key.clone();
+    let permits = s.cpu_permits.clone();
+    let res = s
+        .flights
+        .run(flight_key, move || async move {
+            let compute = move || {
+                let hits = search_refs(&snap.sorted, &q, limit);
+                let list: Vec<_> = hits.iter().map(|h| h.session).collect();
+                if ndjson { Ok(CachedBody::ndjson(list)) } else { CachedBody::json(&list) }
+            };
+            let out = if has_text {
+                let _permit = permits.acquire_owned().await.ok();
+                match tokio::task::spawn_blocking(compute).await {
+                    Ok(r) => r,
+                    Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+                }
+            } else {
+                compute()
+            };
+            if cacheable && let Ok(ref body) = out {
+                cache.insert(cache_key_save, body.clone());
+            }
+            out
+        })
+        .await;
+    match res {
+        Ok(body) => with_seq(&s.engine, body.into_response()),
+        Err((code, msg)) => ApiError(code, msg).into_response(),
+    }
 }
 
 async fn session(State(s): State<AppState>, Path(key): Path<String>) -> Response {
-    match s.engine.session(&key) {
-        Some(sess) => with_seq(&s.engine, Json(sess).into_response()),
+    match s.engine.session_arc(&key) {
+        Some(sess) => with_seq(&s.engine, Json(&*sess).into_response()),
         None => ApiError(StatusCode::NOT_FOUND, format!("unknown session {key}")).into_response(),
     }
 }
@@ -232,48 +282,53 @@ struct EventParams {
 }
 
 async fn events(State(s): State<AppState>, Path(key): Path<String>, Query(p): Query<EventParams>) -> Response {
-    if s.engine.session(&key).is_none() {
+    if s.engine.session_arc(&key).is_none() {
         return ApiError(StatusCode::NOT_FOUND, format!("unknown session {key}")).into_response();
     }
     if let Some(id) = p.around {
         let (limit, max) = (p.limit.unwrap_or(200).clamp(1, 10_000), p.max_text.unwrap_or(DEFAULT_MAX_TEXT));
-        return search::around(s.engine.clone(), key, id, limit, max, p.format.as_deref() == Some("ndjson")).await;
+        return search::around(&s, key, id, limit, max, p.format.as_deref() == Some("ndjson")).await;
     }
     let limit = p.limit.unwrap_or(200).clamp(1, 10_000);
     let oldest = p.oldest.unwrap_or(false);
-    let q = HistoryQuery { before: p.before, limit };
-    let engine = s.engine.clone();
-    let k = key.clone();
-    let res = tokio::task::spawn_blocking(move || {
-        if oldest {
-            return anyhow::Ok((engine.oldest(&k, limit)?, None));
-        }
-        let evs = engine.history(&k, &q)?;
-        // Page sizes vary (upserts dedupe, one line can yield several events), so probe one
-        // event further back: `next_before` is null exactly when nothing older exists.
-        let first = evs.first().and_then(|e| e.pos);
-        let more = match first {
-            Some(pos) => !engine.history(&k, &HistoryQuery { before: Some(pos), limit: 1 })?.is_empty(),
-            None => false,
-        };
-        anyhow::Ok((evs, first.filter(|_| more)))
-    })
-    .await;
-    let (mut evs, next_before) = match res {
-        Ok(Ok(page)) => page,
-        Ok(Err(err)) => return ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("{err:#}")).into_response(),
-        Err(err) => return ApiError(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
-    };
     let max = p.max_text.unwrap_or(DEFAULT_MAX_TEXT);
-    for e in &mut evs {
-        e.truncate_text(max);
+    let ndjson = p.format.as_deref() == Some("ndjson");
+    let q = HistoryQuery { before: p.before, limit };
+    let flight_key = format!("ev:{key}:{limit}:{:?}:{oldest}:{max}:{ndjson}", p.before);
+    let engine = s.engine.clone();
+    let res = s
+        .flights
+        .run(flight_key, move || async move {
+            let k = key.clone();
+            let page = tokio::task::spawn_blocking(move || {
+                let (mut evs, next_before) =
+                    if oldest { (engine.oldest(&k, limit)?, None) } else { engine.history_page(&k, &q)? };
+                for e in &mut evs {
+                    e.truncate_text(max);
+                }
+                if ndjson {
+                    anyhow::Ok(CachedBody::ndjson(evs))
+                } else {
+                    let body = serde_json::to_vec(&serde_json::json!({
+                        "session": k,
+                        "events": evs,
+                        "next_before": next_before,
+                    }))?;
+                    anyhow::Ok(CachedBody { content_type: "application/json", body: Bytes::from(body) })
+                }
+            })
+            .await;
+            match page {
+                Ok(Ok(body)) => Ok(body),
+                Ok(Err(err)) => Err((StatusCode::INTERNAL_SERVER_ERROR, format!("{err:#}"))),
+                Err(err) => Err((StatusCode::INTERNAL_SERVER_ERROR, err.to_string())),
+            }
+        })
+        .await;
+    match res {
+        Ok(body) => with_seq(&s.engine, body.into_response()),
+        Err((code, msg)) => ApiError(code, msg).into_response(),
     }
-    let resp = if p.format.as_deref() == Some("ndjson") {
-        ndjson_body(evs)
-    } else {
-        Json(serde_json::json!({ "session": key, "events": evs, "next_before": next_before })).into_response()
-    };
-    with_seq(&s.engine, resp)
 }
 
 fn last_event_id(h: &HeaderMap) -> Option<u64> {

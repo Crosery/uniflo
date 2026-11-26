@@ -2,6 +2,9 @@
 //! `/v1/sessions/{key}/trajectory`, `/v1/models`, `/v1/pricing`. [`UsageParams::report`] is also what `uniflo usage --local` runs, so the
 //! CLI and REST answer from the same code.
 
+use super::cache::{
+    CacheKey, CachedBody, NS_MODELS, NS_SESSION_USAGE, NS_USAGE, is_relative_time, query_has_relative_time,
+};
 use super::{ApiError, AppState, with_seq};
 use axum::Json;
 use axum::extract::{Path, Query, State};
@@ -13,7 +16,7 @@ use uniflo_core::usage::report::{self, GroupBy, Sort, expand_home, parse_time};
 use uniflo_core::usage::tz::Tz;
 use uniflo_core::util::{home, now_ms};
 use uniflo_schema::{Session, UsageReport};
-use uniflo_search::{Query as SearchQuery, search};
+use uniflo_search::{Query as SearchQuery, search_refs};
 
 /// `GET /v1/usage` query parameters (all optional).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -55,8 +58,8 @@ impl UsageParams {
             sort: Sort::parse(self.sort.as_deref().unwrap_or(""))?,
             model: self.model.clone().filter(|m| !m.is_empty()),
         };
-        let all = engine.sessions();
-        let picked: Vec<&Session> = search(&all, &sq, usize::MAX).into_iter().map(|h| h.session).collect();
+        let snap = engine.sessions_snapshot();
+        let picked: Vec<&Session> = search_refs(&snap.sorted, &sq, usize::MAX).into_iter().map(|h| h.session).collect();
         Ok(engine.usage_report(&picked, &q))
     }
 }
@@ -68,36 +71,99 @@ fn tilde(p: &str, home: &str) -> String {
     }
 }
 
+fn usage_cacheable(p: &UsageParams) -> bool {
+    !p.since.as_deref().is_some_and(is_relative_time)
+        && !p.until.as_deref().is_some_and(is_relative_time)
+        && !p.q.as_deref().is_some_and(query_has_relative_time)
+}
+
 pub(super) async fn usage(State(s): State<AppState>, Query(p): Query<UsageParams>) -> Response {
+    let gen_tag = (s.engine.state_gen(), s.engine.usage_gen(), s.engine.pricing().generation());
+    let key_str = format!(
+        "{:?}\0{:?}\0{:?}\0{:?}\0{:?}\0{:?}\0{:?}\0{:?}\0{:?}\0{:?}",
+        p.group_by, p.q, p.since, p.until, p.tz, p.under, p.depth, p.limit, p.sort, p.model
+    );
+    let cacheable = usage_cacheable(&p);
+    let cache_key = CacheKey { ns: NS_USAGE, gen_tag, key: key_str.clone() };
+    if cacheable && let Some(hit) = s.cache.get(&cache_key) {
+        return with_seq(&s.engine, hit.into_response());
+    }
+    let flight_key = format!("usage:{}:{}:{}:{key_str}", gen_tag.0, gen_tag.1, gen_tag.2);
     let engine = s.engine.clone();
-    match tokio::task::spawn_blocking(move || p.report(&engine)).await {
-        Ok(Ok(r)) => with_seq(&s.engine, Json(r).into_response()),
-        Ok(Err(msg)) => ApiError(StatusCode::BAD_REQUEST, msg).into_response(),
-        Err(err) => ApiError(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
+    let cache = s.cache.clone();
+    let permits = s.cpu_permits.clone();
+    let res = s
+        .flights
+        .run(flight_key, move || async move {
+            let _permit = permits.acquire_owned().await.ok();
+            let out = match tokio::task::spawn_blocking(move || p.report(&engine)).await {
+                Ok(Ok(r)) => CachedBody::json(&r),
+                Ok(Err(msg)) => Err((StatusCode::BAD_REQUEST, msg)),
+                Err(err) => Err((StatusCode::INTERNAL_SERVER_ERROR, err.to_string())),
+            };
+            if cacheable && let Ok(ref body) = out {
+                cache.insert(cache_key, body.clone());
+            }
+            out
+        })
+        .await;
+    match res {
+        Ok(body) => with_seq(&s.engine, body.into_response()),
+        Err((code, msg)) => ApiError(code, msg).into_response(),
     }
 }
 
 pub(super) async fn session_usage(State(s): State<AppState>, Path(key): Path<String>) -> Response {
-    if s.engine.session(&key).is_none() {
+    if s.engine.session_arc(&key).is_none() {
         return ApiError(StatusCode::NOT_FOUND, format!("unknown session {key}")).into_response();
     }
+    let gen_tag = (s.engine.state_gen(), s.engine.usage_gen(), s.engine.pricing().generation());
+    let cache_key = CacheKey { ns: NS_SESSION_USAGE, gen_tag, key: key.clone() };
+    if let Some(hit) = s.cache.get(&cache_key) {
+        return with_seq(&s.engine, hit.into_response());
+    }
+    let flight_key = format!("susage:{}:{}:{}:{key}", gen_tag.0, gen_tag.1, gen_tag.2);
     let engine = s.engine.clone();
-    match tokio::task::spawn_blocking(move || engine.session_usage(&key)).await {
-        Ok(Ok(d)) => with_seq(&s.engine, Json(d).into_response()),
-        Ok(Err(err)) => ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("{err:#}")).into_response(),
-        Err(err) => ApiError(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
+    let cache = s.cache.clone();
+    let res = s
+        .flights
+        .run(flight_key, move || async move {
+            let out = match tokio::task::spawn_blocking(move || engine.session_usage(&key)).await {
+                Ok(Ok(d)) => CachedBody::json(&d),
+                Ok(Err(err)) => Err((StatusCode::INTERNAL_SERVER_ERROR, format!("{err:#}"))),
+                Err(err) => Err((StatusCode::INTERNAL_SERVER_ERROR, err.to_string())),
+            };
+            if let Ok(ref body) = out {
+                cache.insert(cache_key, body.clone());
+            }
+            out
+        })
+        .await;
+    match res {
+        Ok(body) => with_seq(&s.engine, body.into_response()),
+        Err((code, msg)) => ApiError(code, msg).into_response(),
     }
 }
 
 pub(super) async fn session_trajectory(State(s): State<AppState>, Path(key): Path<String>) -> Response {
-    if s.engine.session(&key).is_none() {
+    if s.engine.session_arc(&key).is_none() {
         return ApiError(StatusCode::NOT_FOUND, format!("unknown session {key}")).into_response();
     }
+    let flight_key = format!("traj:{key}");
     let engine = s.engine.clone();
-    match tokio::task::spawn_blocking(move || engine.session_trajectory(&key)).await {
-        Ok(Ok(t)) => with_seq(&s.engine, Json(t).into_response()),
-        Ok(Err(err)) => ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("{err:#}")).into_response(),
-        Err(err) => ApiError(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
+    let res = s
+        .flights
+        .run(flight_key, move || async move {
+            match tokio::task::spawn_blocking(move || engine.session_trajectory(&key)).await {
+                Ok(Ok(t)) => CachedBody::json(&t),
+                Ok(Err(err)) => Err((StatusCode::INTERNAL_SERVER_ERROR, format!("{err:#}"))),
+                Err(err) => Err((StatusCode::INTERNAL_SERVER_ERROR, err.to_string())),
+            }
+        })
+        .await;
+    match res {
+        Ok(body) => with_seq(&s.engine, body.into_response()),
+        Err((code, msg)) => ApiError(code, msg).into_response(),
     }
 }
 
@@ -107,18 +173,43 @@ pub(super) struct ModelParams {
 }
 
 pub(super) async fn models(State(s): State<AppState>, Query(p): Query<ModelParams>) -> Response {
+    let q_raw = p.q.as_deref().unwrap_or("");
+    let gen_tag = (s.engine.state_gen(), s.engine.usage_gen(), s.engine.pricing().generation());
+    let cacheable = !query_has_relative_time(q_raw);
+    let cache_key = CacheKey { ns: NS_MODELS, gen_tag, key: q_raw.to_owned() };
+    if cacheable && let Some(hit) = s.cache.get(&cache_key) {
+        return hit.into_response();
+    }
+    let flight_key = format!("models:{}:{}:{}:{q_raw}", gen_tag.0, gen_tag.1, gen_tag.2);
     let engine = s.engine.clone();
-    let res = tokio::task::spawn_blocking(move || {
-        let home = home().to_string_lossy().into_owned();
-        let sq = SearchQuery::parse(&expand_home(p.q.as_deref().unwrap_or(""), &home), now_ms());
-        let all = engine.sessions();
-        let picked: Vec<&Session> = search(&all, &sq, usize::MAX).into_iter().map(|h| h.session).collect();
-        engine.models(&picked)
-    })
-    .await;
+    let cache = s.cache.clone();
+    let permits = s.cpu_permits.clone();
+    let res = s
+        .flights
+        .run(flight_key, move || async move {
+            let _permit = permits.acquire_owned().await.ok();
+            let out = match tokio::task::spawn_blocking(move || {
+                let home = home().to_string_lossy().into_owned();
+                let sq = SearchQuery::parse(&expand_home(p.q.as_deref().unwrap_or(""), &home), now_ms());
+                let snap = engine.sessions_snapshot();
+                let picked: Vec<&Session> =
+                    search_refs(&snap.sorted, &sq, usize::MAX).into_iter().map(|h| h.session).collect();
+                engine.models(&picked)
+            })
+            .await
+            {
+                Ok(m) => CachedBody::json(&m),
+                Err(err) => Err((StatusCode::INTERNAL_SERVER_ERROR, err.to_string())),
+            };
+            if cacheable && let Ok(ref body) = out {
+                cache.insert(cache_key, body.clone());
+            }
+            out
+        })
+        .await;
     match res {
-        Ok(m) => Json(m).into_response(),
-        Err(err) => ApiError(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
+        Ok(body) => body.into_response(),
+        Err((code, msg)) => ApiError(code, msg).into_response(),
     }
 }
 

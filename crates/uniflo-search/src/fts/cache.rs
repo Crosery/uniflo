@@ -5,29 +5,35 @@
 
 use super::store;
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
 
 struct Entry {
     rows: Arc<Vec<store::Row>>,
     bytes: usize,
-    used: u64,
+    used: AtomicU64,
 }
 
 struct Inner {
     entries: HashMap<i64, Entry>,
-    clock: u64,
     bytes: usize,
 }
 
 /// Decompressed cold blocks, LRU-evicted once their total size passes a byte budget.
+/// Concurrent cache hits take a shared read lock + atomic timestamp touch, avoiding Mutex stalls.
 pub struct BlockCache {
-    inner: Mutex<Inner>,
+    inner: RwLock<Inner>,
+    clock: AtomicU64,
     budget: usize,
 }
 
 impl BlockCache {
     pub fn new(budget_bytes: usize) -> BlockCache {
-        BlockCache { inner: Mutex::new(Inner { entries: HashMap::new(), clock: 0, bytes: 0 }), budget: budget_bytes }
+        BlockCache {
+            inner: RwLock::new(Inner { entries: HashMap::new(), bytes: 0 }),
+            clock: AtomicU64::new(0),
+            budget: budget_bytes,
+        }
     }
 
     /// The block's rows, from cache or computed by `load` (which also reports its decompressed
@@ -45,25 +51,22 @@ impl BlockCache {
     }
 
     pub fn get(&self, bid: i64) -> Option<Arc<Vec<store::Row>>> {
-        let mut inner = self.inner.lock().unwrap();
-        inner.clock += 1;
-        let now = inner.clock;
-        inner.entries.get_mut(&bid).map(|e| {
-            e.used = now;
-            e.rows.clone()
-        })
+        let inner = self.inner.read().unwrap();
+        let e = inner.entries.get(&bid)?;
+        let now = self.clock.fetch_add(1, Ordering::Relaxed) + 1;
+        e.used.store(now, Ordering::Relaxed);
+        Some(e.rows.clone())
     }
 
     /// Cache a decoded block (`bytes`: its decompressed size); returns the cached rows (an earlier
     /// insert of the same block by another thread wins, so callers share one copy).
     pub fn insert(&self, bid: i64, bytes: usize, rows: Vec<store::Row>) -> Arc<Vec<store::Row>> {
         let rows = Arc::new(rows);
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.write().unwrap();
         if !inner.entries.contains_key(&bid) {
-            inner.clock += 1;
-            let now = inner.clock;
+            let now = self.clock.fetch_add(1, Ordering::Relaxed) + 1;
             inner.bytes += bytes;
-            inner.entries.insert(bid, Entry { rows: rows.clone(), bytes, used: now });
+            inner.entries.insert(bid, Entry { rows: rows.clone(), bytes, used: AtomicU64::new(now) });
             evict(&mut inner, self.budget);
         }
         inner.entries.get(&bid).map(|e| e.rows.clone()).unwrap_or(rows)
@@ -71,19 +74,22 @@ impl BlockCache {
 
     #[cfg(test)]
     pub fn contains(&self, bid: i64) -> bool {
-        self.inner.lock().unwrap().entries.contains_key(&bid)
+        self.inner.read().unwrap().entries.contains_key(&bid)
     }
 
     #[cfg(test)]
     #[allow(clippy::len_without_is_empty)] // test-only introspection, not a collection API
     pub fn len(&self) -> usize {
-        self.inner.lock().unwrap().entries.len()
+        self.inner.read().unwrap().entries.len()
     }
 }
 
 fn evict(inner: &mut Inner, budget: usize) {
     while inner.bytes > budget && inner.entries.len() > 1 {
-        let Some(&lru) = inner.entries.iter().min_by_key(|(_, e)| e.used).map(|(k, _)| k) else { break };
+        let Some(&lru) = inner.entries.iter().min_by_key(|(_, e)| e.used.load(Ordering::Relaxed)).map(|(k, _)| k)
+        else {
+            break;
+        };
         if let Some(e) = inner.entries.remove(&lru) {
             inner.bytes -= e.bytes;
         }
@@ -147,7 +153,7 @@ struct ColdEntry {
     key: String,
     generation: i64,
     rows: usize,
-    sessions: HashMap<i64, SessionVerify>,
+    sessions: Arc<HashMap<i64, SessionVerify>>,
 }
 
 /// Up to 16 recent queries' already-verified cold sessions, so paging (or repeating) a query does
@@ -175,8 +181,8 @@ impl ColdCache {
     }
 
     /// Already-verified sessions for `key` at `generation`; `None` if nothing is cached (new query, or a
-    /// stale generation).
-    pub fn get(&self, key: &str, generation: i64) -> Option<HashMap<i64, SessionVerify>> {
+    /// stale generation). O(1) Arc clone under lock.
+    pub fn get(&self, key: &str, generation: i64) -> Option<Arc<HashMap<i64, SessionVerify>>> {
         let entries = self.entries.lock().unwrap();
         entries.iter().find(|e| e.key == key && e.generation == generation).map(|e| e.sessions.clone())
     }
@@ -189,14 +195,15 @@ impl ColdCache {
         entries.retain(|e| !(e.key == key && e.generation != generation));
         let mut e = match entries.iter().position(|e| e.key == key && e.generation == generation) {
             Some(pos) => entries.remove(pos).unwrap(),
-            None => ColdEntry { key: key.to_owned(), generation, rows: 0, sessions: HashMap::new() },
+            None => ColdEntry { key: key.to_owned(), generation, rows: 0, sessions: Arc::new(HashMap::new()) },
         };
+        let sessions = Arc::make_mut(&mut e.sessions);
         for (sid, v) in additions {
-            match e.sessions.get(&sid) {
+            match sessions.get(&sid) {
                 Some(old) if old.facts.is_some() && v.facts.is_none() => {}
                 old => {
                     e.rows = e.rows - old.map_or(0, facts_rows) + facts_rows(&v);
-                    e.sessions.insert(sid, v);
+                    sessions.insert(sid, v);
                 }
             }
         }

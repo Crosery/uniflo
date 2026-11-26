@@ -117,6 +117,56 @@ enum Slot {
     Seen,
 }
 
+/// Precomputed whole-ledger totals so session-level reports skip step iteration when a ledger
+/// lies completely inside the requested time window and no model filter is active.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct LedgerTotals {
+    pub steps: u64,
+    pub prompts: u64,
+    pub input: u64,
+    pub output: u64,
+    pub cache_read: u64,
+    pub cache_write: u64,
+    pub reasoning: u64,
+    pub cost: f64,
+    pub priced: u64,
+    pub unpriced: u64,
+}
+
+impl LedgerTotals {
+    fn add_step(&mut self, s: &Step) {
+        self.steps += 1;
+        self.input += s.input;
+        self.output += s.output;
+        self.cache_read += s.cache_read;
+        self.cache_write += s.cache_write;
+        self.reasoning += s.reasoning;
+        match s.cost {
+            Some(c) => {
+                self.cost += c;
+                self.priced += 1;
+            }
+            None => self.unpriced += 1,
+        }
+    }
+
+    fn sub_step(&mut self, s: &Step) {
+        self.steps -= 1;
+        self.input -= s.input;
+        self.output -= s.output;
+        self.cache_read -= s.cache_read;
+        self.cache_write -= s.cache_write;
+        self.reasoning -= s.reasoning;
+        match s.cost {
+            Some(c) => {
+                self.cost -= c;
+                self.priced -= 1;
+            }
+            None => self.unpriced -= 1,
+        }
+    }
+}
+
 /// Usage of one session, in source order.
 #[derive(Debug, Clone, Default)]
 pub struct Ledger {
@@ -133,6 +183,10 @@ pub struct Ledger {
     open: bool,
     /// Pricing generation the step costs were computed with.
     pub priced_at: u64,
+    /// Conservative `[min_ts, max_ts]` covering every step and prompt in this ledger (for O(1) window pruning).
+    ts_range: Option<(i64, i64)>,
+    /// Whole-ledger aggregate kept in sync with `steps` and `prompts`.
+    pub totals: LedgerTotals,
 }
 
 /// Interns model names within one build so steps share their strings.
@@ -154,6 +208,33 @@ impl Ledger {
     /// An empty ledger whose (no) steps count as priced with `generation`.
     pub fn priced(generation: u64) -> Ledger {
         Ledger { priced_at: generation, ..Default::default() }
+    }
+
+    fn note_ts(&mut self, ts: i64) {
+        self.ts_range = Some(match self.ts_range {
+            Some((lo, hi)) => (lo.min(ts), hi.max(ts)),
+            None => (ts, ts),
+        });
+    }
+
+    /// Whether any step or prompt in this ledger can fall in `[since, until)`.
+    pub fn overlaps(&self, since: Option<i64>, until: Option<i64>) -> bool {
+        let Some((lo, hi)) = self.ts_range else { return false };
+        since.is_none_or(|s| hi >= s) && until.is_none_or(|u| lo < u)
+    }
+
+    /// Whether every step and prompt in this ledger falls inside `[since, until)`.
+    pub fn contained_in(&self, since: Option<i64>, until: Option<i64>) -> bool {
+        let Some((lo, hi)) = self.ts_range else { return false };
+        since.is_none_or(|s| lo >= s) && until.is_none_or(|u| hi < u)
+    }
+
+    fn recompute_totals(&mut self) {
+        let mut t = LedgerTotals { prompts: self.prompts.len() as u64, ..Default::default() };
+        for s in &self.steps {
+            t.add_step(s);
+        }
+        self.totals = t;
     }
 
     /// Apply one record. Returns whether totals may have changed.
@@ -187,6 +268,8 @@ impl Ledger {
                 let id = id_hash(&e.id);
                 if self.boundary(id) {
                     self.prompts.push(Prompt { id, ts: e.ts, turn: self.turn });
+                    self.totals.prompts += 1;
+                    self.note_ts(e.ts);
                     return true;
                 }
                 false
@@ -217,21 +300,25 @@ impl Ledger {
                 match self.ids.get(&id) {
                     Some(Slot::Step(i)) => {
                         let old = &mut self.steps[*i as usize];
+                        self.totals.sub_step(old);
                         step.event = old.event;
                         step.turn = old.turn;
                         if u.model.is_none() {
                             step.model = old.model.clone().or(step.model);
                             step.price(p);
                         }
+                        self.totals.add_step(&step);
                         *old = step;
                     }
                     _ => {
                         step.event = (self.events.len() as u32, e.id.len() as u32);
                         self.events.push_str(&e.id);
                         self.ids.insert(id, Slot::Step(self.steps.len() as u32));
+                        self.totals.add_step(&step);
                         self.steps.push(step);
                     }
                 }
+                self.note_ts(e.ts);
                 true
             }
             Body::AssistantMessage { model, .. } => {
@@ -254,29 +341,25 @@ impl Ledger {
         for s in &mut self.steps {
             s.price(p);
         }
+        self.recompute_totals();
         self.priced_at = generation;
     }
 
     pub fn summary(&self, p: &Loaded) -> Option<SessionUsage> {
         let last = self.steps.last()?;
-        let mut u = SessionUsage {
-            steps: self.steps.len() as u64,
+        let t = self.totals;
+        Some(SessionUsage {
+            steps: t.steps,
+            input: t.input,
+            output: t.output,
+            cache_read: t.cache_read,
+            cache_write: t.cache_write,
+            reasoning: t.reasoning,
+            cost_usd: (t.priced > 0).then_some(t.cost),
+            unpriced_steps: t.unpriced,
             last_context_tokens: last.context_tokens(),
             context_limit: last.model.as_deref().and_then(|m| p.resolve(m).entry?.context_limit),
-            ..Default::default()
-        };
-        for s in &self.steps {
-            u.input += s.input;
-            u.output += s.output;
-            u.cache_read += s.cache_read;
-            u.cache_write += s.cache_write;
-            u.reasoning += s.reasoning;
-            match s.cost {
-                Some(c) => u.cost_usd = Some(u.cost_usd.unwrap_or(0.0) + c),
-                None => u.unpriced_steps += 1,
-            }
-        }
-        Some(u)
+        })
     }
 
     pub fn detail(&self, key: &str, p: &Loaded) -> SessionUsageDetail {
@@ -359,11 +442,35 @@ impl Ledger {
         open: bool,
     ) -> Ledger {
         let mut ids: HashMap<u64, Slot> = seen.into_iter().map(|k| (k, Slot::Seen)).collect();
-        let mut l = Ledger { steps, events, prompts, ids: HashMap::new(), model, turn, open, priced_at: 0 };
+        let mut l = Ledger {
+            steps,
+            events,
+            prompts,
+            ids: HashMap::new(),
+            model,
+            turn,
+            open,
+            priced_at: 0,
+            ts_range: None,
+            totals: LedgerTotals::default(),
+        };
+        let mut ts_range: Option<(i64, i64)> = None;
+        let mut note = |ts: i64| {
+            ts_range = Some(match ts_range {
+                Some((lo, hi)) => (lo.min(ts), hi.max(ts)),
+                None => (ts, ts),
+            });
+        };
         for (i, s) in l.steps.iter().enumerate() {
             ids.insert(id_hash(l.event_id(s)), Slot::Step(i as u32));
+            note(s.ts);
+        }
+        for pr in &l.prompts {
+            note(pr.ts);
         }
         l.ids = ids;
+        l.ts_range = ts_range;
+        l.recompute_totals();
         l.shrink();
         l
     }
@@ -377,6 +484,7 @@ impl Ledger {
     /// Drop the spare capacity growing by doubling left behind; ledgers live as long as the
     /// daemon, and a full build leaves a quarter of their memory unused on average.
     pub fn shrink(&mut self) {
+        self.recompute_totals();
         refit(&mut self.steps);
         if self.events.capacity() > self.events.len() {
             self.events = self.events.as_str().to_owned();
@@ -407,10 +515,15 @@ impl Ledger {
             out.prompts.extend(l.prompts.iter().map(|p| Prompt { turn: p.turn + base, ..*p }));
             base += l.turn;
             out.priced_at = out.priced_at.max(l.priced_at);
+            if let Some((lo, hi)) = l.ts_range {
+                out.note_ts(lo);
+                out.note_ts(hi);
+            }
         }
         out.steps.sort_by_key(|s| s.ts);
         out.prompts.sort_by_key(|p| p.ts);
         out.turn = base;
+        out.recompute_totals();
         out
     }
 }
@@ -453,9 +566,10 @@ impl SourceLedger {
 /// All ledgers of an engine.
 #[derive(Default)]
 pub struct UsageIndex {
-    sources: HashMap<PathBuf, SourceLedger>,
+    sources: HashMap<PathBuf, Arc<SourceLedger>>,
     /// Session key → the sources holding a ledger for it (one, unless ids collide).
     owners: HashMap<String, Vec<PathBuf>>,
+    ready_sources: usize,
     pub dirty: bool,
     /// Sources were registered (cache restored, the rest queued): progress is meaningful.
     pub started: bool,
@@ -463,15 +577,36 @@ pub struct UsageIndex {
 
 impl UsageIndex {
     pub fn source(&self, path: &Path) -> Option<&SourceLedger> {
-        self.sources.get(path)
+        self.sources.get(path).map(Arc::as_ref)
     }
 
-    pub fn source_mut(&mut self, path: &Path) -> Option<&mut SourceLedger> {
-        self.sources.get_mut(path)
+    pub fn set_phase(&mut self, path: &Path, phase: Phase) -> bool {
+        let Some(arc) = self.sources.get_mut(path) else { return false };
+        if arc.phase != phase {
+            if arc.phase == Phase::Ready {
+                self.ready_sources -= 1;
+            }
+            if phase == Phase::Ready {
+                self.ready_sources += 1;
+            }
+            Arc::make_mut(arc).phase = phase;
+        }
+        true
+    }
+
+    pub fn set_cursor(&mut self, path: &Path, cursor: Cursor) {
+        if let Some(arc) = self.sources.get_mut(path) {
+            Arc::make_mut(arc).cursor = Some(cursor);
+        }
     }
 
     pub fn sources(&self) -> impl Iterator<Item = (&PathBuf, &SourceLedger)> {
-        self.sources.iter()
+        self.sources.iter().map(|(p, s)| (p, s.as_ref()))
+    }
+
+    /// Cheap pointer-only snapshot for lock-free cache serialization.
+    pub fn source_snapshot(&self) -> Vec<(PathBuf, Arc<SourceLedger>)> {
+        self.sources.iter().map(|(p, s)| (p.clone(), s.clone())).collect()
     }
 
     /// Insert or replace a source with its ledgers.
@@ -480,12 +615,18 @@ impl UsageIndex {
         for k in s.ledgers.keys() {
             self.owners.entry(k.clone()).or_default().push(path.clone());
         }
-        self.sources.insert(path, s);
+        if s.phase == Phase::Ready {
+            self.ready_sources += 1;
+        }
+        self.sources.insert(path, Arc::new(s));
     }
 
     pub fn remove_source(&mut self, path: &Path) -> Option<SourceLedger> {
-        let s = self.sources.remove(path)?;
-        for k in s.ledgers.keys() {
+        let arc = self.sources.remove(path)?;
+        if arc.phase == Phase::Ready {
+            self.ready_sources -= 1;
+        }
+        for k in arc.ledgers.keys() {
             if let Some(v) = self.owners.get_mut(k) {
                 v.retain(|p| p != path);
                 if v.is_empty() {
@@ -493,13 +634,13 @@ impl UsageIndex {
                 }
             }
         }
-        Some(s)
+        Some(Arc::unwrap_or_clone(arc))
     }
 
     /// The ledger of `key` from `path`, created (priced with `generation`) when missing.
     /// `None` when the source is unknown.
     pub fn ledger_mut(&mut self, path: &Path, key: &str, generation: u64) -> Option<&mut Ledger> {
-        let s = self.sources.get_mut(path)?;
+        let s = Arc::make_mut(self.sources.get_mut(path)?);
         if !s.ledgers.contains_key(key) {
             self.owners.entry(key.to_owned()).or_default().push(path.to_path_buf());
         }
@@ -509,13 +650,20 @@ impl UsageIndex {
     /// Every ledger of `key`, in source path order.
     pub fn ledgers(&self, key: &str) -> Vec<&Ledger> {
         let Some(paths) = self.owners.get(key) else { return Vec::new() };
+        if let [only] = paths.as_slice() {
+            return self.sources.get(only).and_then(|s| s.ledgers.get(key)).into_iter().collect();
+        }
         let mut paths: Vec<&PathBuf> = paths.iter().collect();
         paths.sort();
         paths.into_iter().filter_map(|p| self.sources.get(p)?.ledgers.get(key)).collect()
     }
 
-    /// `key`'s usage as one ledger (borrowed in the usual single-source case).
+    /// `key`'s usage as one ledger (borrowed in the usual single-source case, zero allocations).
     pub fn view(&self, key: &str) -> Option<Cow<'_, Ledger>> {
+        let paths = self.owners.get(key)?;
+        if let [only] = paths.as_slice() {
+            return self.sources.get(only)?.ledgers.get(key).map(Cow::Borrowed);
+        }
         match self.ledgers(key).as_slice() {
             [] => None,
             [one] => Some(Cow::Borrowed(*one)),
@@ -524,46 +672,62 @@ impl UsageIndex {
     }
 
     pub fn ledgers_mut(&mut self) -> impl Iterator<Item = (&String, &mut Ledger)> {
-        self.sources.values_mut().flat_map(|s| s.ledgers.iter_mut())
+        self.sources.values_mut().flat_map(|s| Arc::make_mut(s).ledgers.iter_mut())
     }
 
     pub fn progress(&self) -> uniflo_schema::UsageProgress {
         let total = self.sources.len() as u64;
-        let done = self.sources.values().filter(|s| s.phase == Phase::Ready).count() as u64;
+        let done = self.ready_sources as u64;
         uniflo_schema::UsageProgress { ready: self.started && done == total, done, total }
+    }
+
+    /// Visit every ledger of `key` without allocating in the common single-source case.
+    fn visit_ledgers<'s>(&'s self, key: &str, mut f: impl FnMut(&'s Ledger)) {
+        let Some(paths) = self.owners.get(key) else { return };
+        if let [only] = paths.as_slice() {
+            if let Some(l) = self.sources.get(only).and_then(|s| s.ledgers.get(key)) {
+                f(l);
+            }
+            return;
+        }
+        for l in self.ledgers(key) {
+            f(l);
+        }
     }
 
     /// Every model name seen in `keys`' steps, with its catalog match and totals.
     pub fn models<'a>(&self, keys: impl IntoIterator<Item = &'a str>, p: &Loaded) -> Vec<ModelUsage> {
         let mut by: HashMap<&str, (ModelUsage, Option<usize>)> = HashMap::new();
         for (si, key) in keys.into_iter().enumerate() {
-            for s in self.ledgers(key).into_iter().flat_map(|l| &l.steps) {
-                let name = s.model.as_deref().unwrap_or("");
-                let (m, last) = by.entry(name).or_insert_with(|| {
-                    let r = p.resolve(name);
-                    let e = r.entry.as_deref();
-                    let m = ModelUsage {
-                        model: name.to_owned(),
-                        match_kind: Some(r.kind),
-                        catalog_id: e.map(|e| e.id.clone()),
-                        provider: e.map(|e| e.provider.clone()).filter(|p| !p.is_empty()),
-                        prices: e.map(|e| e.prices.clone()).unwrap_or_default(),
-                        context_limit: e.and_then(|e| e.context_limit),
-                        output_limit: e.and_then(|e| e.output_limit),
-                        ..Default::default()
-                    };
-                    (m, None)
-                });
-                if *last != Some(si) {
-                    *last = Some(si);
-                    m.sessions += 1;
+            self.visit_ledgers(key, |l| {
+                for s in &l.steps {
+                    let name = s.model.as_deref().unwrap_or("");
+                    let (m, last) = by.entry(name).or_insert_with(|| {
+                        let r = p.resolve(name);
+                        let e = r.entry.as_deref();
+                        let m = ModelUsage {
+                            model: name.to_owned(),
+                            match_kind: Some(r.kind),
+                            catalog_id: e.map(|e| e.id.clone()),
+                            provider: e.map(|e| e.provider.clone()).filter(|p| !p.is_empty()),
+                            prices: e.map(|e| e.prices.clone()).unwrap_or_default(),
+                            context_limit: e.and_then(|e| e.context_limit),
+                            output_limit: e.and_then(|e| e.output_limit),
+                            ..Default::default()
+                        };
+                        (m, None)
+                    });
+                    if *last != Some(si) {
+                        *last = Some(si);
+                        m.sessions += 1;
+                    }
+                    m.steps += 1;
+                    match s.cost {
+                        Some(c) => m.cost_usd = Some(m.cost_usd.unwrap_or(0.0) + c),
+                        None => m.unpriced_steps += 1,
+                    }
                 }
-                m.steps += 1;
-                match s.cost {
-                    Some(c) => m.cost_usd = Some(m.cost_usd.unwrap_or(0.0) + c),
-                    None => m.unpriced_steps += 1,
-                }
-            }
+            });
         }
         let mut out: Vec<ModelUsage> = by.into_values().map(|(m, _)| m).collect();
         out.sort_by(|a, b| {

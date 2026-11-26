@@ -2,7 +2,7 @@
 //! (`+08:00`, `-0530`) and IANA names read from the system zoneinfo (TZif + POSIX footer).
 
 use chrono::{Datelike, Offset, TimeZone, Timelike};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 #[derive(Debug, Clone, Default)]
 pub enum Tz {
@@ -10,6 +10,17 @@ pub enum Tz {
     Local,
     Fixed(i32),
     Zone(String, Arc<Zone>),
+}
+
+/// Cached `/etc/localtime` TZif parsed once per process (Unix, when `TZ` is unset), avoiding
+/// libc `localtime_r`'s global process-wide timezone mutex on hot aggregation loops.
+#[cfg(unix)]
+fn local_zone() -> Option<&'static Zone> {
+    if std::env::var_os("TZ").is_some() {
+        return None;
+    }
+    static LOCAL: OnceLock<Option<Zone>> = OnceLock::new();
+    LOCAL.get_or_init(|| std::fs::read("/etc/localtime").ok().and_then(|b| Zone::parse(&b))).as_ref()
 }
 
 /// Civil time of an instant in a zone.
@@ -23,7 +34,64 @@ pub struct Civil {
     pub weekday: u32,
 }
 
+/// Pre-resolved timezone handle for hot aggregation loops: resolves `TZ` env and
+/// non-DST constant offsets ONCE per query instead of per step.
+#[derive(Debug, Clone, Copy)]
+pub enum ResolvedTz<'a> {
+    Fixed(i32),
+    /// Non-DST zone (e.g. `Asia/Shanghai`, `Asia/Tokyo`, `UTC`): any timestamp `>= after_sec`
+    /// uses `fixed_off` in a single branch with zero locks and zero binary search.
+    FixedAfter {
+        after_sec: i64,
+        fixed_off: i32,
+        zone: &'a Zone,
+    },
+    Zone(&'a Zone),
+    SystemLocal,
+}
+
+impl ResolvedTz<'_> {
+    #[inline]
+    pub fn offset_at(self, ts_ms: i64) -> i32 {
+        let secs = ts_ms.div_euclid(1000);
+        match self {
+            ResolvedTz::Fixed(o) => o,
+            ResolvedTz::FixedAfter { after_sec, fixed_off, zone } => {
+                if secs >= after_sec {
+                    fixed_off
+                } else {
+                    zone.offset_at(secs)
+                }
+            }
+            ResolvedTz::Zone(z) => z.offset_at(secs),
+            ResolvedTz::SystemLocal => {
+                chrono::Local.timestamp_millis_opt(ts_ms).single().map_or(0, |d| d.offset().fix().local_minus_utc())
+            }
+        }
+    }
+
+    #[inline]
+    pub fn local_secs(self, ts_ms: i64) -> i64 {
+        ts_ms.div_euclid(1000) + self.offset_at(ts_ms) as i64
+    }
+}
+
 impl Tz {
+    /// Resolve once before looping over steps, avoiding repeated `TZ` env lock checks.
+    pub fn resolve(&self) -> ResolvedTz<'_> {
+        match self {
+            Tz::Fixed(o) => ResolvedTz::Fixed(*o),
+            Tz::Zone(_, z) => resolve_zone(z),
+            Tz::Local => {
+                #[cfg(unix)]
+                if let Some(z) = local_zone() {
+                    return resolve_zone(z);
+                }
+                ResolvedTz::SystemLocal
+            }
+        }
+    }
+
     pub fn parse(s: &str) -> Result<Tz, String> {
         Tz::parse_in(s, &["/usr/share/zoneinfo", "/usr/lib/zoneinfo", "/usr/share/lib/zoneinfo"])
     }
@@ -75,6 +143,10 @@ impl Tz {
     pub fn offset_at(&self, ts_ms: i64) -> i32 {
         match self {
             Tz::Local => {
+                #[cfg(unix)]
+                if let Some(z) = local_zone() {
+                    return z.offset_at(ts_ms.div_euclid(1000));
+                }
                 chrono::Local.timestamp_millis_opt(ts_ms).single().map_or(0, |d| d.offset().fix().local_minus_utc())
             }
             Tz::Fixed(o) => *o,
@@ -82,8 +154,13 @@ impl Tz {
         }
     }
 
+    /// Epoch seconds shifted into this zone's wall clock (for fast integer day/hour/weekday bucketing).
+    pub fn local_secs(&self, ts_ms: i64) -> i64 {
+        ts_ms.div_euclid(1000) + self.offset_at(ts_ms) as i64
+    }
+
     pub fn civil(&self, ts_ms: i64) -> Civil {
-        let local = ts_ms.div_euclid(1000) + self.offset_at(ts_ms) as i64;
+        let local = self.local_secs(ts_ms);
         let d = chrono::DateTime::from_timestamp(local, 0).unwrap_or_default().naive_utc();
         Civil {
             year: d.year(),
@@ -113,6 +190,16 @@ fn fixed_offset(s: &str) -> Option<i32> {
         (digits[..split].parse::<i32>().ok()?, digits[split..].parse::<i32>().ok()?)
     };
     (h <= 14 && m < 60).then_some(sign * (h * 3600 + m * 60))
+}
+
+fn resolve_zone(z: &Zone) -> ResolvedTz<'_> {
+    if let Some(r) = &z.rule
+        && r.dst.is_none()
+    {
+        let after_sec = z.transitions.last().map_or(i64::MIN, |(at, _)| *at);
+        return ResolvedTz::FixedAfter { after_sec, fixed_off: r.std, zone: z };
+    }
+    ResolvedTz::Zone(z)
 }
 
 /// A parsed TZif file: explicit transitions, then the POSIX rule of its footer.

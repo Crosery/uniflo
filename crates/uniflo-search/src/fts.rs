@@ -36,20 +36,20 @@ pub mod rank;
 pub mod store;
 pub mod verify;
 
-use crate::{Query as SessionQuery, search as filter_sessions};
+use crate::{Query as SessionQuery, search_refs as filter_sessions};
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension, params_from_iter, types::Value as Sql};
 use std::cell::{Cell, RefCell};
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use store::SessRow;
 use tokio::sync::broadcast::{self, error::TryRecvError};
 use uniflo_core::util::now_ms;
-use uniflo_core::{Engine, HistoryQuery};
+use uniflo_core::{Engine, HistoryQuery, SessionSnapshot};
 use uniflo_schema::search::{
     FtsStatus, FtsWriter, IndexProgress, SearchHit, SearchOrder, SearchResponse, SearchSession,
 };
@@ -252,6 +252,9 @@ struct Shared {
     changed_since: HashMap<String, Instant>,
     /// `progress.done` never goes below this while `indexing` stays true.
     floor: usize,
+    /// Cached `(hot_events, cold_events, cold_blocks)` refreshed on commit/reload so `Fts::status`
+    /// never opens SQLite or scans `blk` on `/v1/stats`.
+    counts: Option<(u64, u64, u64)>,
 }
 
 impl Shared {
@@ -334,6 +337,10 @@ struct Inner {
     /// Other processes writing the index file, as of the last scan (see [`peers`]).
     peers: Mutex<(Option<Instant>, Vec<FtsWriter>)>,
     scanning_peers: AtomicBool,
+    /// Monotonic version bumped on every write commit or reader reload (for response caches).
+    generation: AtomicU64,
+    /// Active helper threads verifying cold blocks across all concurrent searches.
+    active_verify_threads: AtomicUsize,
 }
 
 impl Inner {
@@ -445,12 +452,14 @@ impl Fts {
             }
         };
         let reclaimed_bytes = store::meta_get(&conn, "reclaimed_bytes")?.and_then(|v| v.parse().ok()).unwrap_or(0);
+        let init_counts = read_tier_counts(&conn);
         let mut shared = Shared {
             merging: lease.is_some(),
             warming: true,
             migrating,
             indexing: migrating,
             reclaimed_bytes,
+            counts: init_counts,
             ..Default::default()
         };
         for (k, r) in store::load_sessions(&conn)? {
@@ -478,6 +487,8 @@ impl Fts {
             cold_verified: AtomicUsize::new(0),
             peers: Mutex::new((None, Vec::new())),
             scanning_peers: AtomicBool::new(false),
+            generation: AtomicU64::new(1),
+            active_verify_threads: AtomicUsize::new(0),
         });
         let mut w = Writer {
             inner: inner.clone(),
@@ -533,6 +544,11 @@ impl Fts {
         &self.inner.opts.path
     }
 
+    /// Monotonic version bumped whenever writes commit or a read-only peer reloads.
+    pub fn generation(&self) -> u64 {
+        self.inner.generation.load(Ordering::Acquire)
+    }
+
     pub fn status(&self) -> FtsStatus {
         let path = &self.inner.opts.path;
         let bytes = std::iter::once(path.clone())
@@ -540,14 +556,9 @@ impl Fts {
             .filter_map(|p| std::fs::metadata(p).ok())
             .map(|m| m.len())
             .sum();
-        // SQL before taking `shared`: the writer takes that lock between its steps.
-        let (ct, blocks) = match self.reader() {
-            Ok(c) => {
-                (store::counters(&c).ok(), c.query_row("SELECT count(*) FROM blk", [], |r| r.get::<_, i64>(0)).ok())
-            }
-            Err(_) => (None, None),
-        };
         let foreign_writers = self.inner.foreign_writers();
+        let cached_counts = self.inner.shared.lock().unwrap().counts;
+        let counts = cached_counts.or_else(|| self.reader().ok().and_then(|c| read_tier_counts(&c)));
         let sh = self.inner.shared.lock().unwrap();
         FtsStatus {
             indexing: sh.indexing,
@@ -560,9 +571,9 @@ impl Fts {
             errors: sh.errors,
             last_error: sh.last_error.clone(),
             hot_days: Some(self.inner.opts.hot_days),
-            hot_events: ct.map(|c| c.hot_rows.max(0) as u64),
-            cold_events: ct.map(|c| c.cold_rows.max(0) as u64),
-            cold_blocks: blocks.map(|n| n.max(0) as u64),
+            hot_events: counts.map(|c| c.0),
+            cold_events: counts.map(|c| c.1),
+            cold_blocks: counts.map(|c| c.2),
             migrating: sh.migrating,
             reclaimed_bytes: sh.reclaimed_bytes,
             foreign_writes: sh.foreign_writes,
@@ -624,7 +635,8 @@ impl Fts {
         let limit = if p.limit == 0 { 20 } else { p.limit.min(200) };
         let filter = p.filter.as_deref().map(str::trim).filter(|f| !f.is_empty());
         let now = now_ms();
-        let allowed = filter.map(|f| self.allowed(f, now));
+        let snap = self.inner.engine.sessions_snapshot();
+        let allowed = filter.map(|f| self.allowed(f, now, &snap));
         let order = if plan.recent() { SearchOrder::Recent } else { SearchOrder::Relevance };
 
         // Read before scanning: the writer commits before it clears `indexing`, so a scan that
@@ -638,19 +650,23 @@ impl Fts {
         // WAL read-lock round trip. Each round trip takes SQLite's process-wide VFS mutex, which the
         // engine's SQLite adapters hold while opening their databases.
         let conn = pooled.unchecked_transaction()?;
-        let dir = self.block_dir(&conn)?;
+        let counters = store::counters(&conn)?;
+        let avgdl = counters.avgdl();
+        let dir = self.block_dir(&conn, counters.cold_gen)?;
         let kinds: Option<HashSet<i64>> =
             p.kinds.as_ref().map(|ks| ks.iter().filter_map(|k| store::kind_code(k.trim())).collect());
         let mut groups: HashMap<i64, Vec<Cand>> = HashMap::new();
         let end: ScanEnd = match &plan.fts {
             Some(_) if !plan.recent() => {
-                let idfs = self.hot_idfs(&conn, &plan)?;
-                self.rank_hot(&conn, &plan, &idfs, kinds.as_ref(), allowed.as_ref(), &mut groups)?;
+                let idfs = self.hot_idfs(&conn, &plan, counters.hot_rows)?;
+                self.rank_hot(&conn, &plan, &idfs, avgdl, kinds.as_ref(), allowed.as_ref(), &mut groups)?;
                 self.rank_cold(
                     &conn,
                     &dir,
+                    &snap,
                     &plan,
                     &idfs,
+                    avgdl,
                     kinds.as_ref(),
                     allowed.as_ref(),
                     now,
@@ -660,28 +676,55 @@ impl Fts {
             }
             _ => {
                 let need = p.offset + limit;
-                self.scan_recent(&conn, &dir, &plan, kinds.as_ref(), allowed.as_ref(), need, &mut groups)?
+                self.scan_recent(&conn, &dir, &snap, &plan, kinds.as_ref(), allowed.as_ref(), need, &mut groups)?
             }
         };
-        let mut ranked: Vec<(Session, f64, Vec<Cand>)> = Vec::with_capacity(groups.len());
-        for (sid, mut hits) in groups {
-            // Rows of a session the engine just dropped linger until the writer catches up.
-            let Some(meta) = self.session_meta(sid) else { continue };
-            hits.sort_by(Cand::best_first);
-            hits.truncate(HITS_PER_SESSION);
-            let score = match order {
-                SearchOrder::Relevance => hits[0].key * recency(now, meta.updated_at),
-                SearchOrder::Recent => hits[0].key,
-            };
-            ranked.push((meta, score, hits));
+        // Resolve (key, updated_at) in ONE `shared.lock()` pass + zero-clone snapshot lookup;
+        // materialize full metadata only for the `limit` sessions on the requested page.
+        let mut ranked: Vec<(String, i64, f64, Vec<Cand>)> = Vec::with_capacity(groups.len());
+        {
+            let sh = self.inner.shared.lock().unwrap();
+            for (sid, mut hits) in groups {
+                let Some(key) = sh.keys.get(&sid) else { continue };
+                let updated_at = if let Some(s) = snap.by_key.get(key.as_str()) {
+                    s.updated_at
+                } else if let Some(m) = sh.sessions.get(key).filter(|r| r.pinned).and_then(|r| r.meta.as_ref()) {
+                    m.updated_at
+                } else {
+                    // Rows of a session the engine just dropped linger until the writer catches up.
+                    continue;
+                };
+                hits.sort_by(Cand::best_first);
+                hits.truncate(HITS_PER_SESSION);
+                let score = match order {
+                    SearchOrder::Relevance => hits[0].key * recency(now, updated_at),
+                    SearchOrder::Recent => hits[0].key,
+                };
+                ranked.push((key.clone(), updated_at, score, hits));
+            }
         }
         // A total order: equal scores must not page differently from one call to the next.
-        ranked
-            .sort_by(|a, b| b.1.total_cmp(&a.1).then(b.0.updated_at.cmp(&a.0.updated_at)).then(a.0.key.cmp(&b.0.key)));
+        ranked.sort_by(|a, b| b.2.total_cmp(&a.2).then(b.1.cmp(&a.1)).then(a.0.cmp(&b.0)));
         let total = end.total.unwrap_or(ranked.len());
 
         let mut results = Vec::new();
-        for (meta, score, hits) in ranked.into_iter().skip(p.offset).take(limit) {
+        for (key, _, score, hits) in ranked.into_iter().skip(p.offset).take(limit) {
+            let meta = match snap.by_key.get(key.as_str()) {
+                Some(s) => s.clone(),
+                None => {
+                    let pinned = self
+                        .inner
+                        .shared
+                        .lock()
+                        .unwrap()
+                        .sessions
+                        .get(&key)
+                        .filter(|r| r.pinned)
+                        .and_then(|r| r.meta.clone());
+                    let Some(m) = pinned else { continue };
+                    Arc::new(m)
+                }
+            };
             let mut out = Vec::new();
             let mut shown: HashSet<String> = HashSet::new();
             for c in &hits {
@@ -697,10 +740,10 @@ impl Fts {
                 continue;
             }
             results.push(SearchSession {
-                session: meta.key,
-                harness: meta.harness,
-                title: meta.title.or(meta.preview),
-                cwd: meta.cwd,
+                session: meta.key.clone(),
+                harness: meta.harness.clone(),
+                title: meta.title.clone().or_else(|| meta.preview.clone()),
+                cwd: meta.cwd.clone(),
                 updated_at: Some(meta.updated_at),
                 score: if order == SearchOrder::Relevance { score } else { 0.0 },
                 hits: out,
@@ -725,16 +768,17 @@ impl Fts {
     /// estimated from the hot tier, so hot and cold scores are directly comparable. One phrase or
     /// several are the same code path (the old single-phrase fast path's only advantage — skipping
     /// the built-in's `xQueryPhrase` IDF pass — comes for free here too, since IDF is supplied).
+    #[allow(clippy::too_many_arguments)]
     fn rank_hot(
         &self,
         conn: &Connection,
         plan: &query::Plan,
         idfs: &[f64],
+        avgdl: f64,
         kinds: Option<&HashSet<i64>>,
         allowed: Option<&HashSet<i64>>,
         groups: &mut HashMap<i64, Vec<Cand>>,
     ) -> Result<()> {
-        let avgdl = store::counters(conn)?.avgdl();
         let idf_json = rank::idf_json(idfs);
         let expr = plan.fts.as_deref().unwrap_or_default();
         let sql = "SELECT rowid, uniflo_bm25n(docs_fts, ?2, ?3) FROM docs_fts WHERE docs_fts MATCH ?1";
@@ -754,13 +798,16 @@ impl Fts {
 
     /// Per-phrase IDF, estimated from the hot tier alone (`1.0` if it is empty): shared by the hot
     /// scoring above, the cold tier's Rust-side scoring, and the cold upper-bound stop test.
-    fn hot_idfs(&self, conn: &Connection, plan: &query::Plan) -> Result<Vec<f64>> {
-        let hot_rows: i64 = conn.query_row("SELECT count(*) FROM docs", [], |r| r.get(0))?;
+    fn hot_idfs(&self, conn: &Connection, plan: &query::Plan, hot_rows: i64) -> Result<Vec<f64>> {
         let mut idfs = Vec::with_capacity(plan.pos_long.len());
+        if hot_rows <= 0 {
+            idfs.resize(plan.pos_long.len(), rank::idf(0, 0));
+            return Ok(idfs);
+        }
+        let mut st = conn.prepare_cached("SELECT count(*) FROM docs_fts WHERE docs_fts MATCH ?1")?;
         for term in &plan.pos_long {
             let expr = fts_quote(term);
-            let hits: i64 =
-                conn.query_row("SELECT count(*) FROM docs_fts WHERE docs_fts MATCH ?1", [&expr], |r| r.get(0))?;
+            let hits: i64 = st.query_row([&expr], |r| r.get(0))?;
             idfs.push(rank::idf(hot_rows, hits));
         }
         Ok(idfs)
@@ -776,8 +823,10 @@ impl Fts {
         &self,
         conn: &Connection,
         dir: &cache::BlockDir,
+        snap: &SessionSnapshot,
         plan: &query::Plan,
         idfs: &[f64],
+        avgdl: f64,
         kinds: Option<&HashSet<i64>>,
         allowed: Option<&HashSet<i64>>,
         now: i64,
@@ -785,14 +834,13 @@ impl Fts {
         groups: &mut HashMap<i64, Vec<Cand>>,
     ) -> Result<ScanEnd> {
         let blocks = self.cold_blocks(conn, dir, plan)?;
-        let candidates = self.cold_candidates(dir, blocks.as_ref(), allowed);
+        let candidates = self.cold_candidates(dir, snap, blocks.as_ref(), allowed);
         if candidates.is_empty() {
             return Ok(ScanEnd { total: Some(groups.len()), ..Default::default() });
         }
-        let avgdl = store::counters(conn)?.avgdl();
         let crit = verify::Criteria::from_plan(plan);
         let cache_key = cold_cache_key(plan, kinds);
-        let cached = self.inner.cold_cache.get(&cache_key, dir.generation).unwrap_or_default();
+        let cached = self.inner.cold_cache.get(&cache_key, dir.generation);
         let mut fresh: HashMap<i64, cache::SessionVerify> = HashMap::new();
         let idf_sum: f64 = idfs.iter().sum();
         let mut sofar: BinaryHeap<Reverse<OrdF64>> = BinaryHeap::new();
@@ -837,7 +885,7 @@ impl Fts {
                     break;
                 }
                 idx += 1;
-                match cached.get(&sid) {
+                match cached.as_deref().and_then(|c| c.get(&sid)) {
                     // Paging or repeating this query: rescore what an earlier run verified, as long
                     // as nothing cold has changed since (`cold_gen`).
                     Some(v) if v.facts.is_some() || !v.matched => take(v, upd, groups, &mut sofar),
@@ -869,7 +917,7 @@ impl Fts {
             while idx < candidates.len() && batch.len() < batch_size * 4 {
                 let (sid, upd) = candidates[idx];
                 idx += 1;
-                match cached.get(&sid) {
+                match cached.as_deref().and_then(|c| c.get(&sid)) {
                     Some(v) => rest_matched += usize::from(v.matched),
                     None => batch.push((sid, upd)),
                 }
@@ -895,8 +943,7 @@ impl Fts {
     }
 
     /// The cold block directory as of `conn`'s snapshot, cached until `cold_gen` moves.
-    fn block_dir(&self, conn: &Connection) -> Result<Arc<cache::BlockDir>> {
-        let generation = store::counters(conn)?.cold_gen;
+    fn block_dir(&self, conn: &Connection, generation: i64) -> Result<Arc<cache::BlockDir>> {
         if let Some(d) = self.inner.dir.lock().unwrap().as_ref().filter(|d| d.generation == generation) {
             return Ok(d.clone());
         }
@@ -953,11 +1000,12 @@ impl Fts {
     fn cold_candidates(
         &self,
         dir: &cache::BlockDir,
+        snap: &SessionSnapshot,
         blocks: Option<&HashMap<i64, Vec<i64>>>,
         allowed: Option<&HashSet<i64>>,
     ) -> Vec<(i64, i64)> {
         let has = |sid: &i64| blocks.map_or_else(|| dir.by_sid.contains_key(sid), |b| b.contains_key(sid));
-        self.by_recency(allowed).into_iter().filter(|(sid, _)| has(sid)).collect()
+        self.by_recency(allowed, snap).into_iter().filter(|(sid, _)| has(sid)).collect()
     }
 
     /// The candidate blocks of `batch`'s sessions: decoded already (block cache), or left for the
@@ -987,7 +1035,11 @@ impl Fts {
     ) -> Result<Vec<cache::SessionVerify>> {
         self.inner.cold_verified.fetch_add(jobs.len(), Ordering::Relaxed);
         let blocks = &self.inner.blocks;
-        let threads = self.verify_threads().min(jobs.len());
+        let want = self.verify_threads().min(jobs.len());
+        // Bound total helper threads across concurrent searches to available cores so N simultaneous
+        // cold queries do not spawn N*8 OS threads and thrash SQLite's VFS lock.
+        let extra = self.acquire_verify_slots(want.saturating_sub(1));
+        let threads = 1 + extra.count;
         if threads <= 1 {
             let mut read = |bid| read_block(conn, bid);
             return jobs.into_iter().map(|j| verify_job(blocks, j, &mut read, crit, kinds, check)).collect();
@@ -1015,7 +1067,32 @@ impl Fts {
                 });
             }
         });
+        drop(extra);
         done.into_iter().map(|d| d.into_inner().unwrap().expect("every job ran")).collect()
+    }
+
+    fn acquire_verify_slots(&self, want: usize) -> VerifySlots<'_> {
+        if want == 0 {
+            return VerifySlots { active: &self.inner.active_verify_threads, count: 0 };
+        }
+        let cap = std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(2, 16);
+        let mut cur = self.inner.active_verify_threads.load(Ordering::Relaxed);
+        loop {
+            let avail = cap.saturating_sub(cur);
+            let take = want.min(avail);
+            if take == 0 {
+                return VerifySlots { active: &self.inner.active_verify_threads, count: 0 };
+            }
+            match self.inner.active_verify_threads.compare_exchange_weak(
+                cur,
+                cur + take,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return VerifySlots { active: &self.inner.active_verify_threads, count: take },
+                Err(v) => cur = v,
+            }
+        }
     }
 
     fn verify_threads(&self) -> usize {
@@ -1044,6 +1121,7 @@ impl Fts {
         &self,
         conn: &Connection,
         dir: &cache::BlockDir,
+        snap: &SessionSnapshot,
         plan: &query::Plan,
         kinds: Option<&HashSet<i64>>,
         allowed: Option<&HashSet<i64>>,
@@ -1078,7 +1156,7 @@ impl Fts {
         let mut best: BinaryHeap<Reverse<i64>> = BinaryHeap::new();
         // Cold candidate blocks, looked up when the scan first reaches a cold session.
         let mut narrowed: Option<Option<HashMap<i64, Vec<i64>>>> = None;
-        for (sid, upd) in self.by_recency(allowed) {
+        for (sid, upd) in self.by_recency(allowed, snap) {
             // Strictly newer: a session tied with the cut-off could still win on the key tie-break.
             if best.len() >= need && best.peek().is_some_and(|Reverse(ts)| *ts > upd) {
                 return Ok(ScanEnd { partial: false, scanned_until: Some(upd), total: None });
@@ -1185,16 +1263,19 @@ impl Fts {
     }
 
     /// Indexed sessions as `(sid, updated_at)`, most recently active first.
-    fn by_recency(&self, allowed: Option<&HashSet<i64>>) -> Vec<(i64, i64)> {
-        let live = self.inner.engine.updated_ats();
+    fn by_recency(&self, allowed: Option<&HashSet<i64>>, snap: &SessionSnapshot) -> Vec<(i64, i64)> {
         let sh = self.inner.shared.lock().unwrap();
         let mut out: Vec<(i64, i64)> = sh
             .sessions
             .iter()
             .filter(|(_, r)| allowed.is_none_or(|a| a.contains(&r.sid)))
             .filter_map(|(k, r)| {
-                let pinned = r.meta.as_ref().filter(|_| r.pinned).map(|m| m.updated_at);
-                Some((r.sid, live.get(k).copied().or(pinned)?))
+                let upd = snap
+                    .by_key
+                    .get(k.as_str())
+                    .map(|s| s.updated_at)
+                    .or_else(|| r.meta.as_ref().filter(|_| r.pinned).map(|m| m.updated_at))?;
+                Some((r.sid, upd))
             })
             .collect();
         out.sort_by(|a, b| b.1.cmp(&a.1).then(b.0.cmp(&a.0)));
@@ -1202,33 +1283,29 @@ impl Fts {
     }
 
     /// Session ids passing a `uniflo ls`-syntax filter, through the same matcher as `/v1/sessions`.
-    fn allowed(&self, filter: &str, now: i64) -> HashSet<i64> {
-        let mut list = self.inner.engine.sessions();
-        let sh = self.inner.shared.lock().unwrap();
-        let known: HashSet<String> = list.iter().map(|s| s.key.clone()).collect();
-        list.extend(
-            sh.sessions
-                .values()
-                .filter(|r| r.pinned)
-                .filter_map(|r| r.meta.clone())
-                .filter(|m| !known.contains(&m.key)),
-        );
+    fn allowed(&self, filter: &str, now: i64, snap: &SessionSnapshot) -> HashSet<i64> {
         let q = SessionQuery::parse(filter, now);
-        filter_sessions(&list, &q, usize::MAX)
+        let sh = self.inner.shared.lock().unwrap();
+        let mut out: HashSet<i64> = filter_sessions(&snap.sorted, &q, usize::MAX)
             .into_iter()
             .filter_map(|h| sh.sessions.get(&h.session.key).map(|r| r.sid))
-            .collect()
-    }
-
-    /// Current metadata: the engine's snapshot, else what a pinned session was indexed with.
-    fn session_meta(&self, sid: i64) -> Option<Session> {
-        let (key, pinned) = {
-            let sh = self.inner.shared.lock().unwrap();
-            let key = sh.keys.get(&sid)?.clone();
-            let pinned = sh.sessions.get(&key).filter(|r| r.pinned).and_then(|r| r.meta.clone());
-            (key, pinned)
-        };
-        self.inner.engine.session(&key).or(pinned)
+            .collect();
+        let pinned_extra: Vec<Session> = sh
+            .sessions
+            .values()
+            .filter(|r| r.pinned)
+            .filter_map(|r| r.meta.as_ref())
+            .filter(|m| !snap.by_key.contains_key(m.key.as_str()))
+            .cloned()
+            .collect();
+        if !pinned_extra.is_empty() {
+            for h in filter_sessions(&pinned_extra, &q, usize::MAX) {
+                if let Some(r) = sh.sessions.get(&h.session.key) {
+                    out.insert(r.sid);
+                }
+            }
+        }
+        out
     }
 
     /// `(event id, ts, snippet)` of one hit, `None` when its row is gone (the writer moved or
@@ -1320,6 +1397,28 @@ impl Fts {
     }
 }
 
+/// Cap pooled SQLite connections so concurrency spikes do not retain unbounded page caches.
+const READER_POOL_MAX: usize = 16;
+
+fn read_tier_counts(c: &Connection) -> Option<(u64, u64, u64)> {
+    let ct = store::counters(c).ok()?;
+    let blocks: i64 = c.query_row("SELECT count(*) FROM blk", [], |r| r.get(0)).ok()?;
+    Some((ct.hot_rows.max(0) as u64, ct.cold_rows.max(0) as u64, blocks.max(0) as u64))
+}
+
+struct VerifySlots<'a> {
+    active: &'a AtomicUsize,
+    count: usize,
+}
+
+impl Drop for VerifySlots<'_> {
+    fn drop(&mut self) {
+        if self.count > 0 {
+            self.active.fetch_sub(self.count, Ordering::AcqRel);
+        }
+    }
+}
+
 struct Pooled<'a> {
     conn: Option<Connection>,
     pool: &'a Mutex<Vec<Connection>>,
@@ -1335,7 +1434,10 @@ impl std::ops::Deref for Pooled<'_> {
 impl Drop for Pooled<'_> {
     fn drop(&mut self) {
         if let Some(c) = self.conn.take() {
-            self.pool.lock().unwrap().push(c);
+            let mut pool = self.pool.lock().unwrap();
+            if pool.len() < READER_POOL_MAX {
+                pool.push(c);
+            }
         }
     }
 }
@@ -1891,9 +1993,12 @@ impl Writer {
                 sh.sync_progress(&expected, Instant::now());
             }
         }
-        if let Ok(n) = store::count_docs(&self.conn) {
-            self.inner.shared.lock().unwrap().progress.events = n;
+        if let Some(counts) = read_tier_counts(&self.conn) {
+            let mut sh = self.inner.shared.lock().unwrap();
+            sh.progress.events = counts.0 + counts.1;
+            sh.counts = Some(counts);
         }
+        self.inner.generation.fetch_add(1, Ordering::Release);
     }
 
     fn nap(&self, d: Duration) {
@@ -2126,7 +2231,9 @@ impl Writer {
             };
             match self.unit_quiet(|w, tx| remove(w, tx, &gone)) {
                 Ok(delta) => self.add_events(delta),
-                Err(Fail::Begin(e)) => self.inner.note_error(format!("write: {e:#}")),
+                Err(Fail::Begin(e)) => {
+                    self.inner.note_error(format!("write: {e:#}"));
+                }
                 // One session cannot be removed: take the others out one by one.
                 Err(Fail::Unit(_)) => {
                     for item in &gone {
@@ -2790,6 +2897,10 @@ impl Writer {
         match self.conn.execute_batch("COMMIT") {
             Ok(()) => {
                 self.tx_since.set(None);
+                if let Some(counts) = read_tier_counts(&self.conn) {
+                    self.inner.shared.lock().unwrap().counts = Some(counts);
+                }
+                self.inner.generation.fetch_add(1, Ordering::Release);
                 true
             }
             Err(err) => {

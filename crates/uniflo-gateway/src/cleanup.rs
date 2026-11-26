@@ -12,7 +12,7 @@ use uniflo_core::Engine;
 use uniflo_core::cleanup::ExecError;
 use uniflo_core::util::now_ms;
 use uniflo_schema::cleanup::CleanupRequest;
-use uniflo_search::{Query as SearchQuery, search};
+use uniflo_search::{Query as SearchQuery, search_refs};
 
 pub const DISABLED: &str = "session cleanup is unavailable in this gateway (no archive directory)";
 
@@ -20,8 +20,12 @@ pub const DISABLED: &str = "session cleanup is unavailable in this gateway (no a
 pub fn select(engine: &Engine, req: &CleanupRequest) -> Vec<String> {
     let mut keys = req.sessions.clone();
     if let Some(q) = req.q.as_deref().filter(|q| !q.trim().is_empty()) {
-        let all = engine.sessions();
-        keys.extend(search(&all, &SearchQuery::parse(q, now_ms()), usize::MAX).iter().map(|h| h.session.key.clone()));
+        let snap = engine.sessions_snapshot();
+        keys.extend(
+            search_refs(&snap.sorted, &SearchQuery::parse(q, now_ms()), usize::MAX)
+                .iter()
+                .map(|h| h.session.key.clone()),
+        );
     }
     keys
 }

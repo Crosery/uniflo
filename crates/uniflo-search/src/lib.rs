@@ -23,6 +23,8 @@ pub mod fts;
 
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
+use std::borrow::Borrow;
+use std::cell::RefCell;
 use uniflo_schema::{Session, Status};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -45,10 +47,7 @@ impl Filter {
         match self {
             Filter::Harness(hs) => hs.iter().any(|h| h == &s.harness),
             Filter::Status(st) => s.status == *st,
-            Filter::Cwd(c) => s
-                .cwd
-                .as_deref()
-                .is_some_and(|cwd| cwd.to_lowercase().replace('\\', "/").contains(&c.replace('\\', "/"))),
+            Filter::Cwd(c) => s.cwd.as_deref().is_some_and(|cwd| cwd_contains(cwd, c)),
             Filter::Since(t) => s.updated_at >= *t,
             Filter::Before(t) => s.updated_at < *t,
             Filter::Sub(sub) => s.parent.is_some() == *sub,
@@ -118,7 +117,7 @@ fn parse_filter(tok: &str, now: i64) -> Option<Filter> {
     Some(match k {
         "h" | "harness" => Filter::Harness(lower.split(',').filter(|s| !s.is_empty()).map(str::to_owned).collect()),
         "s" | "status" => Filter::Status(parse_status(&lower)?),
-        "in" | "cwd" => Filter::Cwd(lower),
+        "in" | "cwd" => Filter::Cwd(lower.replace('\\', "/")),
         "since" | "after" => Filter::Since(parse_when(&lower, now)?),
         "before" | "until" => Filter::Before(parse_when(&lower, now)?),
         "id" => Filter::Id(v.to_owned()),
@@ -178,22 +177,58 @@ pub struct Hit<'a> {
     pub score: u32,
 }
 
+/// Case-insensitive substring match treating `\` as `/` without allocating on ASCII paths.
+fn cwd_contains(cwd: &str, needle_lower_slash: &str) -> bool {
+    if needle_lower_slash.is_empty() {
+        return true;
+    }
+    if cwd.is_ascii() && needle_lower_slash.is_ascii() {
+        let h = cwd.as_bytes();
+        let n = needle_lower_slash.as_bytes();
+        if n.len() > h.len() {
+            return false;
+        }
+        let norm = |b: u8| if b == b'\\' { b'/' } else { b.to_ascii_lowercase() };
+        let first = n[0];
+        for i in 0..=h.len() - n.len() {
+            if norm(h[i]) == first && h[i + 1..i + n.len()].iter().zip(&n[1..]).all(|(&a, &b)| norm(a) == b) {
+                return true;
+            }
+        }
+        return false;
+    }
+    cwd.to_lowercase().replace('\\', "/").contains(needle_lower_slash)
+}
+
+thread_local! {
+    /// Reuse `nucleo_matcher::Matcher` slab buffers across queries on the same thread instead of
+    /// allocating and zeroing internal DP matrices on every request.
+    static FUZZY_SCRATCH: RefCell<(Matcher, Vec<char>, String)> =
+        RefCell::new((Matcher::new(Config::DEFAULT), Vec::new(), String::new()));
+}
+
 /// Filter + rank. Without free text, results keep the input order (callers pass newest-first).
 pub fn search<'a>(sessions: &'a [Session], q: &Query, limit: usize) -> Vec<Hit<'a>> {
-    let filtered = sessions.iter().filter(|s| q.filters.iter().all(|f| f.matches(s)));
+    search_refs(sessions, q, limit)
+}
+
+/// Like [`search`], over any slice whose items borrow as [`Session`] (e.g. `&[Arc<Session>]`),
+/// avoiding cloning all sessions before filtering/ranking.
+pub fn search_refs<'a, S: Borrow<Session>>(sessions: &'a [S], q: &Query, limit: usize) -> Vec<Hit<'a>> {
+    let filtered = sessions.iter().map(Borrow::borrow).filter(|s| q.filters.iter().all(|f| f.matches(s)));
     if q.text.is_empty() {
         return filtered.take(limit).map(|s| Hit { session: s, score: 0 }).collect();
     }
     let pattern = Pattern::parse(&q.text, CaseMatching::Smart, Normalization::Smart);
-    let mut matcher = Matcher::new(Config::DEFAULT);
-    let mut buf = Vec::new();
-    let mut hay = String::new();
-    let mut hits: Vec<Hit<'a>> = filtered
-        .filter_map(|s| {
-            haystack(s, &mut hay);
-            pattern.score(Utf32Str::new(&hay, &mut buf), &mut matcher).map(|score| Hit { session: s, score })
-        })
-        .collect();
+    let mut hits: Vec<Hit<'a>> = FUZZY_SCRATCH.with(|cell| {
+        let (matcher, buf, hay) = &mut *cell.borrow_mut();
+        filtered
+            .filter_map(|s| {
+                haystack(s, hay);
+                pattern.score(Utf32Str::new(hay, buf), matcher).map(|score| Hit { session: s, score })
+            })
+            .collect()
+    });
     hits.sort_by(|a, b| b.score.cmp(&a.score).then(b.session.updated_at.cmp(&a.session.updated_at)));
     hits.truncate(limit);
     hits

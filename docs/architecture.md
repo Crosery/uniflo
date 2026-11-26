@@ -2,7 +2,7 @@
 
 > 守护进程如何从各 harness 的会话存储得到统一、实时的会话与事件流。
 
-状态：`current` · 更新：2026-10-30
+状态：`current` · 更新：2026-11-26
 
 ## 数据流
 
@@ -180,7 +180,9 @@ agent（Claude Code、Codex…）──stdio JSON-RPC──► uniflo mcp（unif
 
 ## 并发与一致性
 
-- 引擎状态 `RwLock<State>`，网关读快照不经过循环，读延迟与写入解耦。
+- **无克隆快照发布**：引擎状态用 `RwLock<State>` 保护，每条会话存为 `Arc<Session>` 并带单调 `state_gen`；读路径经 `Engine::sessions_snapshot()` 共享按最近活动预排好的不可变 `Arc<SessionSnapshot>`（含 `by_key` 索引与在线/按 harness 计数），`apply_live()` / `tick()` 先做只读快检、无变化不拿写锁。`hot_sources()` 与 `rescan()` 先在短读锁里拷贝游标再把磁盘 `stat` 放到 `spawn_blocking`，`save_cache()` 与 `save_usage_cache()` 只持极短读锁复制 `Arc` 指针后无锁序列化落盘。
+- **网关高并发路径**：热读路由（`/v1/sessions`、`/v1/usage`、`/v1/models`、`/v1/search`）采用按精确代数（`state_gen` / `usage_gen` / `pricing_gen` / `fts_gen`）隔离的有界 `ResponseCache`（相对时间参数跳过缓存）加取消安全的异步 `Singleflight` 合并同键突发；`/v1/health` 走无锁原子 `seq` + 已发布快照；重 CPU 阻塞任务（模糊检索、用量聚合、全文检索）受 `cpu_permits` 信号量限流并下沉 `spawn_blocking`，避免高并发未命中突发饿死 Tokio I/O 线程。
+- **用量与全文并发**：用量账本缓存每会话 `LedgerTotals` 与时间范围 `ts_range`，时区在查询前解析一次（`Tz::resolve`），消除跨核 `localtime_r` / `TZ` 环境变量锁争用；全文检索缓存行/块计数、`BlockCache` 改为共享读锁 + 原子 LRU 时钟、`ColdCache` 存 `Arc`、冷层并行验证受全局线程预算约束。
 - **堆**：分配器把释放的页留着复用，初始索引、用量构建、缓存保存这类突发之后进程会一直停在峰值。`util::trim_heap`（macOS `malloc_zone_pressure_relief`，glibc `malloc_trim`）在 `run()` 开始、之后有变化时最多每 5 分钟（随索引缓存保存）和每次写用量缓存后把空闲页还给系统；首次索引的读线程经容量等于线程数的通道把结果交给唯一的应用线程，无界队列会让整个数据集的解析结果同时留在堆里，峰值之后的碎片释放不掉。账本建完后 `Ledger::shrink` 把向量搬进恰好够长的新分配，去掉扩容留下的余量（`shrink_to_fit` 走 `realloc`，macOS 只在缩小超过一半时才真的还）。每个账本把各步的事件 id 首尾相接存进一个字符串，`Step` 只记区间（`Ledger::event_id` 取回）：几十万个小块分配会在构建的临时数据释放后把整页钉住。
 - 所有写入（文件读取结果、存活探测结果、超时）在单个循环里串行应用，保证同一会话的 `Session` 快照按 seq 单调。
 - 每个 `Envelope` 带全局递增 `seq`；客户端断线重连带 `since=<seq>`，重放环内的缺口补齐，超出则先收到 `lagged`，应改用 REST 重新同步。

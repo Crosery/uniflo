@@ -71,8 +71,10 @@ impl Engine {
             reason: "archived".into(),
             last: session.updated_at,
         };
+        let key_arc: Arc<str> = Arc::from(session.key.as_str());
         let mut e = Entry {
-            session,
+            key_arc,
+            session: Arc::new(session),
             tracker_since: tracker.since,
             turn_ended: false,
             tracker,
@@ -106,6 +108,7 @@ impl Engine {
             let mut u = self.usage.write().unwrap();
             if u.remove_source(p).is_some() {
                 u.dirty = true;
+                self.note_usage_change(&u);
             }
         }
     }
@@ -117,6 +120,16 @@ impl Engine {
         Ok(evs.split_off(skip))
     }
 
+    pub(super) fn archived_history_page(path: &Path, q: &HistoryQuery) -> Result<(Vec<Event>, Option<u64>)> {
+        let (_, mut evs) = compact::read(path)?;
+        evs.retain(|e| q.before.is_none_or(|b| e.pos.unwrap_or(0) < b));
+        let skip = evs.len().saturating_sub(q.limit.max(1));
+        let page = evs.split_off(skip);
+        let first = page.first().and_then(|e| e.pos);
+        let more = first.is_some_and(|pos| evs.iter().any(|e| e.pos.unwrap_or(0) < pos));
+        Ok((page, first.filter(|_| more)))
+    }
+
     pub(crate) fn cleanup_view(&self) -> CleanupView {
         let st = self.state.read().unwrap();
         CleanupView {
@@ -125,7 +138,7 @@ impl Engine {
                 .iter()
                 .map(|(k, e)| {
                     let it = Item {
-                        session: e.session.clone(),
+                        session: (*e.session).clone(),
                         adapter: e.adapter,
                         src: e.src.clone(),
                         archived: e.archive.is_some(),
@@ -144,7 +157,7 @@ impl Engine {
         let (adapter, src, id, session) = {
             let st = self.state.read().unwrap();
             let e = st.sessions.get(key).ok_or_else(|| anyhow!("unknown session {key}"))?;
-            (self.adapters[e.adapter].clone(), e.src.clone(), e.session.id.clone(), e.session.clone())
+            (self.adapters[e.adapter].clone(), e.src.clone(), e.session.id.clone(), (*e.session).clone())
         };
         let mut recs = Vec::new();
         adapter.read_all(&src, std::slice::from_ref(&id), &mut |sid, r| {
@@ -223,6 +236,8 @@ impl Engine {
                 r.archives.push((key, path));
             }
             u.dirty = true;
+            self.note_usage_change(&u);
+            self.bump_state();
         }
         self.dirty.store(true, Ordering::Relaxed);
         let keys: Vec<String> = r.archives.iter().map(|(k, _)| k.clone()).collect();
@@ -252,6 +267,8 @@ impl Engine {
                 st.sessions.insert(e.session.key.clone(), e);
             }
             u.dirty = true;
+            self.note_usage_change(&u);
+            self.bump_state();
         }
         self.dirty.store(true, Ordering::Relaxed);
         let keys: Vec<String> = r.archives.into_iter().map(|(k, _)| k).collect();
@@ -283,9 +300,13 @@ impl Engine {
                 }
             }
             for k in st.recompute_families(&above) {
-                out.extend(st.sessions.get(&k).map(|e| Pending::Session(e.session.clone())));
+                out.extend(st.sessions.get(&k).map(|e| Pending::Session((*e.session).clone())));
             }
-            u.dirty |= !out.is_empty();
+            if !out.is_empty() {
+                u.dirty = true;
+                self.note_usage_change(&u);
+                self.bump_state();
+            }
         }
         self.publish(out);
     }
@@ -329,9 +350,11 @@ impl Engine {
         // families above, from the sessions as they are now.
         let mut roots = keys.to_vec();
         roots.extend(st.ancestors_of(keys.iter().map(String::as_str)).into_iter().filter(|k| !keys.contains(k)));
-        st.recompute_families(&roots);
+        if !st.recompute_families(&roots).is_empty() {
+            self.bump_state();
+        }
         let out: Vec<Pending> =
-            roots.iter().filter_map(|k| st.sessions.get(k)).map(|e| Pending::Session(e.session.clone())).collect();
+            roots.iter().filter_map(|k| st.sessions.get(k)).map(|e| Pending::Session((*e.session).clone())).collect();
         drop(st);
         self.publish(out);
     }
