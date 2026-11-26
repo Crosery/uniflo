@@ -417,3 +417,79 @@ fn update_reports_the_install_method() {
     assert!(out.contains(&format!("install.sh | UNIFLO_VERSION={NEXT} sh")), "{out}");
     assert!(std::fs::read(&other).unwrap() == std::fs::read(BIN).unwrap());
 }
+
+#[test]
+fn cargo_update_works_from_deleted_cwd_and_retries_on_mirror_error() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let rel = Release::new();
+    rel.index(&[VERSION, NEXT]);
+    let m = Machine::new();
+
+    // Place a copy of uniflo inside $CARGO_HOME/bin so `uniflo update` picks Method::Cargo.
+    let exe = m.path("cargo/bin/uniflo");
+    std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+    std::fs::copy(BIN, &exe).unwrap();
+
+    // Stub `cargo` verifies its cwd exists (pwd -P succeeds), logs cwd + args, fails with a
+    // network error on the 1st mirror attempt, and succeeds on the 2nd (fallback) attempt.
+    let stub_dir = m.path("stub-bin");
+    std::fs::create_dir_all(&stub_dir).unwrap();
+    let log = m.path("cargo.log");
+    let count = m.path("cargo.count");
+    let stub = stub_dir.join("cargo");
+    let script = format!(
+        "#!/bin/sh\n\
+         set -eu\n\
+         cwd=$(pwd -P)\n\
+         printf 'CWD=%s ARGS=%s\\n' \"$cwd\" \"$*\" >> '{}'\n\
+         n=$(cat '{}' 2>/dev/null || echo 0)\n\
+         n=$((n + 1))\n\
+         echo \"$n\" > '{}'\n\
+         if [ \"$n\" -eq 1 ]; then\n\
+           echo 'error: failed to download `uniflo v{NEXT}`' >&2\n\
+           exit 1\n\
+         fi\n\
+         exit 0\n",
+        log.display(),
+        count.display(),
+        count.display()
+    );
+    std::fs::write(&stub, script).unwrap();
+    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    // Create a directory, cd into it, delete it, then exec `uniflo update` — exact reproduction
+    // of running `uniflo update` from a stale/disconnected mount such as `~/nas2`.
+    let vanished = m.path("vanished");
+    std::fs::create_dir_all(&vanished).unwrap();
+    let mut path_env = std::ffi::OsString::from(stub_dir.as_os_str());
+    path_env.push(":");
+    path_env.push(std::env::var_os("PATH").unwrap_or_default());
+
+    let o = m
+        .cmd("sh", &rel)
+        .env("PATH", path_env)
+        .env("CARGO_HOME", m.path("cargo"))
+        .env("TZ", "Asia/Shanghai")
+        .args(["-c", "cd \"$1\" && rmdir \"$1\" && exec \"$2\" update", "sh"])
+        .arg(&vanished)
+        .arg(&exe)
+        .output()
+        .unwrap();
+
+    let out = text(&o.stdout);
+    let err = text(&o.stderr);
+    assert!(o.status.success(), "stdout:\n{out}\nstderr:\n{err}");
+    assert!(out.contains("自动切换至"), "expected fallback retry notice:\n{out}");
+    assert!(out.contains(&format!("已安装 {NEXT}")), "expected install success:\n{out}");
+
+    let logged = std::fs::read_to_string(&log).unwrap();
+    let lines: Vec<&str> = logged.lines().collect();
+    assert_eq!(lines.len(), 2, "expected 2 cargo attempts (primary + fallback):\n{logged}");
+    let expected_tmp = std::fs::canonicalize(m.path("tmp")).unwrap();
+    for line in &lines {
+        assert!(line.contains(&format!("CWD={}", expected_tmp.display())), "wrong cwd: {line}");
+    }
+    assert!(lines[0].contains("rsproxy.cn"), "1st attempt should use rsproxy.cn: {}", lines[0]);
+    assert!(lines[1].contains("mirrors.ustc.edu.cn"), "2nd attempt should fall back to USTC: {}", lines[1]);
+}

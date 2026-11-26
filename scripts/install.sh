@@ -11,7 +11,8 @@
 #   UNIFLO_VERSION           version to install (default: the newest stable release)
 #   UNIFLO_INSTALL_DIR       where the executable goes (default: ~/.local/bin)
 #   UNIFLO_NO_SETUP=1        never run `uniflo setup` (same as --no-setup)
-#   UNIFLO_RELEASE_BASE_URL  release root (default: GitHub, then ghfast.top and gh-proxy.com in front of it)
+#   UNIFLO_MIRROR=cn|official  override automatic latency-probed mirror selection
+#   UNIFLO_RELEASE_BASE_URL  release root (default: probed across GitHub, ghfast.top, gh-proxy.com)
 #   UNIFLO_CONFIG_DIR, UNIFLO_HOME  where install.json goes, exactly as for uniflo itself
 set -eu
 
@@ -36,14 +37,96 @@ done
 # pick "中文" "English": the message in the detected language.
 pick() { if [ "$lang_zh" = 1 ]; then printf '%s' "$1"; else printf '%s' "$2"; fi; }
 
-# Release roots, tried in order: GitHub, then public accelerators in front of it, which answer from
-# mainland China when GitHub does not. UNIFLO_RELEASE_BASE_URL replaces them all.
+# Release roots: UNIFLO_RELEASE_BASE_URL pins a single source; UNIFLO_MIRROR=cn|official sets the
+# preferred side; otherwise we probe GitHub + accelerators in parallel and fall back to time zone.
 github=https://github.com/Crosery/uniflo/releases
 if [ -n "${UNIFLO_RELEASE_BASE_URL:-}" ]; then
   bases=${UNIFLO_RELEASE_BASE_URL%/}
+  auto_probe=0
 else
-  bases="$github https://ghfast.top/$github https://gh-proxy.com/$github"
+  mirror_override=$(printf '%s' "${UNIFLO_MIRROR:-}" | tr '[:upper:]' '[:lower:]')
+  case $mirror_override in
+    cn | china)
+      bases="https://ghfast.top/$github https://gh-proxy.com/$github $github"
+      auto_probe=0
+      ;;
+    official | global)
+      bases="$github https://ghfast.top/$github https://gh-proxy.com/$github"
+      auto_probe=0
+      ;;
+    *)
+      bases="$github https://ghfast.top/$github https://gh-proxy.com/$github"
+      auto_probe=1
+      ;;
+  esac
 fi
+
+tz_is_cn() {
+  tz_raw=${TZ:-}
+  if [ -z "$tz_raw" ]; then
+    tz_raw=$(readlink /etc/localtime 2>/dev/null || cat /etc/timezone 2>/dev/null || true)
+  fi
+  case $tz_raw in
+    *Asia/Shanghai* | *Asia/Chongqing* | *Asia/Chungking* | *Asia/Harbin* | *Asia/Urumqi* | *Asia/Kashgar* | *PRC*)
+      return 0
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+# Race lightweight SHA256SUMS probes in parallel to order $bases by real network latency
+# (preferring GitHub when it is fast enough), falling back to time zone if all probes fail.
+probe_bases() {
+  probe_path=$1
+  i=0
+  for b in $bases; do
+    i=$((i + 1))
+    (
+      t=$(curl -fsSL --connect-timeout 3 --max-time 4 -w '%{time_total}' -o "$tmp/probe-$i.out" "$b/$probe_path" 2>/dev/null) || exit 0
+      grep -q '^[0-9a-fA-F]\{64\}[[:space:]]' "$tmp/probe-$i.out" 2>/dev/null || { rm -f "$tmp/probe-$i.out"; exit 0; }
+      ms=$(awk -v s="$t" 'BEGIN { printf "%d", s * 1000 }')
+      printf '%s %s %s\n' "$ms" "$i" "$b" >"$tmp/probe-$i.ms"
+    ) &
+  done
+  wait
+  gh_ms=""
+  best_mirror_ms=""
+  ranked=""
+  if ls "$tmp"/probe-*.ms >/dev/null 2>&1; then
+    sort -n "$tmp"/probe-*.ms >"$tmp/probe.sorted"
+    while IFS=' ' read -r ms idx b; do
+      [ -n "$b" ] || continue
+      if [ "$idx" = 1 ]; then
+        gh_ms=$ms
+      elif [ -z "$best_mirror_ms" ]; then
+        best_mirror_ms=$ms
+      fi
+      ranked="$ranked $b"
+    done <"$tmp/probe.sorted"
+    # Prefer official GitHub when it responds fast (<= 600 ms) or within 200 ms of the fastest mirror.
+    prefer_gh=0
+    if [ -n "$gh_ms" ]; then
+      if [ "$gh_ms" -le 600 ]; then
+        prefer_gh=1
+      elif [ -n "$best_mirror_ms" ] && [ "$gh_ms" -le $((best_mirror_ms + 200)) ]; then
+        prefer_gh=1
+      fi
+    fi
+    new_bases=""
+    if [ "$prefer_gh" = 1 ]; then
+      new_bases=$github
+    fi
+    for b in $ranked $bases; do
+      case " $new_bases " in
+        *" $b "*) ;;
+        *) new_bases="${new_bases:+$new_bases }$b" ;;
+      esac
+    done
+    bases=$new_bases
+  elif tz_is_cn; then
+    bases="https://ghfast.top/$github https://gh-proxy.com/$github $github"
+  fi
+}
 
 say() { printf 'uniflo-install: %s\n' "$*"; }
 die() {
@@ -107,9 +190,24 @@ trap 'exit 130' INT TERM
 
 version=${UNIFLO_VERSION:-}
 version=${version#v}
+if [ "$auto_probe" = 1 ]; then
+  if [ -n "$version" ]; then
+    probe_bases "download/v$version/SHA256SUMS"
+  else
+    probe_bases "latest/download/SHA256SUMS"
+  fi
+fi
 if [ -z "$version" ]; then
   # The newest stable release's SHA256SUMS names its packages, and so its version.
-  fetch "latest/download/SHA256SUMS" "$tmp/latest-SHA256SUMS"
+  if [ -s "$tmp/probe-1.out" ]; then
+    cp "$tmp/probe-1.out" "$tmp/latest-SHA256SUMS"
+  elif [ -s "$tmp/probe-2.out" ] || [ -s "$tmp/probe-3.out" ]; then
+    for p in "$tmp/probe-2.out" "$tmp/probe-3.out"; do
+      if [ -s "$p" ]; then cp "$p" "$tmp/latest-SHA256SUMS"; break; fi
+    done
+  else
+    fetch "latest/download/SHA256SUMS" "$tmp/latest-SHA256SUMS"
+  fi
   version=$(sed -n "s/^[0-9a-fA-F]\{64\}[ *]*uniflo-\(.*\)-$target\.tar\.gz\$/\1/p" "$tmp/latest-SHA256SUMS" | head -n 1)
   [ -n "$version" ] || die "$(pick "最新发布里没有 $target 的包" "the latest release has no package for $target")"
 fi

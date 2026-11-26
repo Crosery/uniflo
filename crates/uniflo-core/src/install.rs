@@ -10,8 +10,9 @@
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::process::{Child, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 /// GitHub Releases of the repository; `UNIFLO_RELEASE_BASE_URL` replaces it (tests, mirrors).
 /// Assets live at `<base>/download/v<version>/<file>`, the newest stable at `<base>/latest/download/<file>`.
@@ -149,17 +150,35 @@ pub fn listed_sum(sums: &str, name: &str) -> Option<String> {
     })
 }
 
-/// Download `version` for `target` from the first of `bases` that serves it, check it against
-/// `SHA256SUMS` (fetched in the same order, so from GitHub itself whenever it answers), unpack it,
-/// make sure the new executable runs and reports `version`, then put it in place of `exe`.
-/// Returns the base the package came from.
+/// Download `version` for `target` from the fastest reachable source among `bases`, check it
+/// against `SHA256SUMS` (racing all bases in parallel when multiple roots are configured, while
+/// still preferring official `bases[0]`'s `SHA256SUMS` whenever it answers within the grace
+/// window), unpack it, make sure the new executable runs and reports `version`, then put it in
+/// place of `exe`. Returns the base the package came from.
 pub fn upgrade_binary<'a>(exe: &Path, target: &str, version: &str, bases: &'a [String]) -> Result<&'a str> {
     let work = Scratch::new()?;
     let name = asset_name(version, target);
     let pkg = work.0.join(&name);
     let sums = work.0.join(SUMS_FILE);
-    fetch_any(bases, version, SUMS_FILE, &sums)?;
-    let from = fetch_any(bases, version, &name, &pkg)?;
+    let ordered: Vec<String> = if bases.len() > 1 {
+        match fetch_sums_probed(bases, version, &name, &sums, &work.0) {
+            Ok(timings) => crate::mirror::rank_release_bases(
+                bases,
+                &timings,
+                crate::mirror::env_override(),
+                crate::mirror::timezone_region(),
+            ),
+            Err(_) => {
+                fetch_any(bases, version, SUMS_FILE, &sums, &work.0)?;
+                bases.to_vec()
+            }
+        }
+    } else {
+        fetch_any(bases, version, SUMS_FILE, &sums, &work.0)?;
+        bases.to_vec()
+    };
+    let picked = fetch_any(&ordered, version, &name, &pkg, &work.0)?;
+    let from = bases.iter().find(|b| b.as_str() == picked).map(String::as_str).unwrap_or(&bases[0]);
     let listed = std::fs::read_to_string(&sums).context("read SHA256SUMS")?;
     let want = listed_sum(&listed, &name).with_context(|| format!("{SUMS_FILE} has no entry for {name}"))?;
     let got = crate::archive::sha256_file(&pkg).with_context(|| format!("hash {}", pkg.display()))?;
@@ -175,6 +194,7 @@ pub fn upgrade_binary<'a>(exe: &Path, target: &str, version: &str, bases: &'a [S
     }
     let reported = crate::util::silent_cmd(&new)
         .arg("--version")
+        .current_dir(&work.0)
         .stdin(Stdio::null())
         .stderr(Stdio::null())
         .output()
@@ -192,7 +212,13 @@ struct Scratch(PathBuf);
 
 impl Scratch {
     fn new() -> Result<Scratch> {
-        let p = std::env::temp_dir().join(format!("uniflo-update-{}-{}", std::process::id(), crate::util::now_ms()));
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let p = std::env::temp_dir().join(format!(
+            "uniflo-update-{}-{}-{}",
+            std::process::id(),
+            crate::util::now_ms(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
         std::fs::create_dir_all(&p).with_context(|| format!("create {}", p.display()))?;
         Ok(Scratch(p))
     }
@@ -204,11 +230,98 @@ impl Drop for Scratch {
     }
 }
 
+/// Race `SHA256SUMS` across all candidate `bases` in parallel so unreachable/throttled hosts do
+/// not stall the upgrade, and return `(base, elapsed_ms)` for every responder whose body contains
+/// a valid checksum entry for `asset` (ignoring captive-portal / broken-mirror 200 HTML pages).
+/// Whenever official `bases[0]` answers within the short grace window, its `SHA256SUMS` is
+/// written to `dest`.
+fn fetch_sums_probed(
+    bases: &[String],
+    version: &str,
+    asset: &str,
+    dest: &Path,
+    work_dir: &Path,
+) -> Result<Vec<(String, u64)>> {
+    const GRACE: Duration = Duration::from_millis(500);
+    const DEADLINE: Duration = Duration::from_secs(8);
+    #[cfg(windows)]
+    let bin = "curl.exe";
+    #[cfg(not(windows))]
+    let bin = "curl";
+
+    struct SumsProbe {
+        idx: usize,
+        base: String,
+        out: PathBuf,
+        started_at: Instant,
+        child: Child,
+    }
+
+    let agent = format!("uniflo/{}", crate::update::current_version());
+    let mut running = Vec::with_capacity(bases.len());
+    for (idx, base) in bases.iter().enumerate() {
+        let out = work_dir.join(format!("sums-probe-{idx}"));
+        let url = download_url(base, version, SUMS_FILE);
+        let Ok(child) = crate::util::silent_cmd(bin)
+            .args(["-fsSL", "--connect-timeout", "4", "--max-time", "8", "--user-agent", &agent, "-o"])
+            .arg(&out)
+            .arg(&url)
+            .current_dir(work_dir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        else {
+            continue;
+        };
+        running.push(SumsProbe { idx, base: base.clone(), out, started_at: Instant::now(), child });
+    }
+    if running.is_empty() {
+        bail!("{bin} unavailable");
+    }
+
+    let t0 = Instant::now();
+    let mut hits: Vec<(usize, String, PathBuf, u64)> = Vec::new();
+    let mut settle: Option<Instant> = None;
+    loop {
+        running.retain_mut(|p| {
+            let Ok(Some(status)) = p.child.try_wait() else { return true };
+            if status.success() && std::fs::read_to_string(&p.out).ok().and_then(|s| listed_sum(&s, asset)).is_some() {
+                let ms = p.started_at.elapsed().as_millis().min(u64::MAX as u128) as u64;
+                hits.push((p.idx, p.base.clone(), p.out.clone(), ms));
+            }
+            false
+        });
+        let now = Instant::now();
+        if !hits.is_empty() {
+            let at = *settle.get_or_insert(now + GRACE);
+            if running.is_empty() || now >= at {
+                break;
+            }
+        } else if running.is_empty() || now >= t0 + DEADLINE {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    for mut p in running {
+        let _ = p.child.kill();
+        let _ = p.child.wait();
+    }
+    if hits.is_empty() {
+        bail!("no release source answered SHA256SUMS within {}s", DEADLINE.as_secs());
+    }
+    // Prefer official bases[0]'s SHA256SUMS whenever it answered; otherwise the fastest responder.
+    let chosen =
+        hits.iter().find(|(idx, ..)| *idx == 0).or_else(|| hits.iter().min_by_key(|(_, _, _, ms)| *ms)).unwrap();
+    std::fs::copy(&chosen.2, dest).with_context(|| format!("copy probed {SUMS_FILE}"))?;
+    Ok(hits.into_iter().map(|(_, base, _, ms)| (base, ms)).collect())
+}
+
 /// Download `file` of `version` from the first base that serves it; returns that base.
-fn fetch_any<'a>(bases: &'a [String], version: &str, file: &str, dest: &Path) -> Result<&'a str> {
+fn fetch_any<'a>(bases: &'a [String], version: &str, file: &str, dest: &Path, work_dir: &Path) -> Result<&'a str> {
     let mut errors = Vec::new();
     for base in bases {
-        match fetch(&download_url(base, version, file), dest) {
+        match fetch(&download_url(base, version, file), dest, work_dir) {
             Ok(()) => return Ok(base),
             Err(e) => errors.push(format!("{e:#}")),
         }
@@ -218,7 +331,7 @@ fn fetch_any<'a>(bases: &'a [String], version: &str, file: &str, dest: &Path) ->
 
 /// One download; a source that cannot connect within 8 s or stalls below 10 KB/s for 20 s fails,
 /// so the next one gets its turn.
-fn fetch(url: &str, dest: &Path) -> Result<()> {
+fn fetch(url: &str, dest: &Path, work_dir: &Path) -> Result<()> {
     #[cfg(windows)]
     let bin = "curl.exe";
     #[cfg(not(windows))]
@@ -229,6 +342,7 @@ fn fetch(url: &str, dest: &Path) -> Result<()> {
         .arg("-o")
         .arg(dest)
         .arg(url)
+        .current_dir(work_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -262,8 +376,13 @@ fn unpack(pkg: &Path, into: &Path) -> Result<()> {
         c.arg("-xzf").arg(pkg).arg("-C").arg(into);
         c
     };
-    let out =
-        cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped()).output().context("run the unpacker")?;
+    let out = cmd
+        .current_dir(into)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .context("run the unpacker")?;
     if !out.status.success() {
         let msg = String::from_utf8_lossy(&out.stderr).trim().chars().take(200).collect::<String>();
         bail!("unpack {} failed (exit {:?}): {msg}", pkg.display(), out.status.code());
@@ -625,10 +744,58 @@ mod tests {
         let bases = vec![format!("http://127.0.0.1:{port}/releases"), good.clone()];
         let work = Scratch::new().unwrap();
         let dest = work.0.join(SUMS_FILE);
-        assert_eq!(fetch_any(&bases, "1.2.3", SUMS_FILE, &dest).unwrap(), good);
+        assert_eq!(fetch_any(&bases, "1.2.3", SUMS_FILE, &dest, &work.0).unwrap(), good);
         assert_eq!(std::fs::read_to_string(&dest).unwrap(), "sums");
-        let err = fetch_any(&bases[..1], "1.2.3", SUMS_FILE, &dest).unwrap_err();
+        let err = fetch_any(&bases[..1], "1.2.3", SUMS_FILE, &dest, &work.0).unwrap_err();
         assert!(format!("{err:#}").contains(&format!("127.0.0.1:{port}")), "{err:#}");
+    }
+
+    #[test]
+    fn sums_probe_races_parallel_and_picks_fast_or_official() {
+        use std::io::{Read, Write};
+        let serve = |body: &'static str, delay: Duration| {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let base = format!("http://{}/releases", l.local_addr().unwrap());
+            std::thread::spawn(move || {
+                for mut s in l.incoming().map_while(Result::ok) {
+                    let mut req = [0u8; 4096];
+                    let _ = s.read(&mut req);
+                    std::thread::sleep(delay);
+                    let _ = write!(
+                        s,
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                }
+            });
+            base
+        };
+        let asset = "uniflo-1.2.3-aarch64-apple-darwin.tar.gz";
+        let official_body: &'static str = Box::leak(format!("{}  {asset}\n", "a".repeat(64)).into_boxed_str());
+        let mirror_body: &'static str = Box::leak(format!("{}  {asset}\n", "b".repeat(64)).into_boxed_str());
+        // Broken mirror returning fast HTTP 200 HTML must be rejected by SHA256SUMS validation.
+        let html_mirror = serve("<html>rate limited</html>", Duration::ZERO);
+        // Slow official (2s > 500ms grace) + fast valid mirror (0ms): valid mirror wins quickly.
+        let slow_official = serve(official_body, Duration::from_secs(2));
+        let fast_mirror = serve(mirror_body, Duration::ZERO);
+        let work = Scratch::new().unwrap();
+        let dest = work.0.join("fast-sums");
+        let t0 = Instant::now();
+        let timings =
+            fetch_sums_probed(&[slow_official, html_mirror, fast_mirror.clone()], "1.2.3", asset, &dest, &work.0)
+                .unwrap();
+        assert!(t0.elapsed() < Duration::from_millis(1500), "took {:?}", t0.elapsed());
+        assert_eq!(std::fs::read_to_string(&dest).unwrap(), mirror_body);
+        assert_eq!(timings.len(), 1);
+        assert_eq!(timings[0].0, fast_mirror);
+
+        // Fast official (100ms < 500ms grace) + instant mirror (0ms): official SHA256SUMS is preferred.
+        let fast_official = serve(official_body, Duration::from_millis(100));
+        let mirror2 = serve(mirror_body, Duration::ZERO);
+        let dest2 = work.0.join("official-sums");
+        let timings2 = fetch_sums_probed(&[fast_official.clone(), mirror2], "1.2.3", asset, &dest2, &work.0).unwrap();
+        assert_eq!(std::fs::read_to_string(&dest2).unwrap(), official_body);
+        assert!(timings2.iter().any(|(b, _)| b == &fast_official));
     }
 
     #[test]

@@ -154,8 +154,8 @@ uniflo daemon --no-update-check           # 关闭后台检查
 
 | 安装方式 | 判定 | `uniflo update` 的做法 |
 |---|---|---|
-| `cargo` | 可执行文件在 `$CARGO_HOME/bin` 或 `~/.cargo/bin` | `cargo install uniflo --force --version <新版本>`；中国大陆时区且 cargo 配置没有自己替换源时，经 rsproxy.cn 镜像下载 |
-| `binary` | `install.json` 记录的路径就是当前可执行文件（安装脚本写入） | 下载新版本的包和 `SHA256SUMS`，校验后原子替换，并更新 `install.json`；GitHub 连不上或太慢时依次改经 ghfast.top、gh-proxy.com；任何一步失败，原可执行文件都不变 |
+| `cargo` | 可执行文件在 `$CARGO_HOME/bin` 或 `~/.cargo/bin` | `cargo install uniflo --force --version <新版本>`（在临时目录执行，不受当前目录影响）；cargo 配置没有自己替换源时，先并行测速 `crates.io`、`rsproxy.cn`、`mirrors.ustc.edu.cn` 并确认目标版本已同步，自动选最快源（官方够快时优先官方，测速不可用再按时区回退），下载失败时自动切下一个候选源重试 |
+| `binary` | `install.json` 记录的路径就是当前可执行文件（安装脚本写入） | 并行探测 GitHub、`ghfast.top`、`gh-proxy.com` 的延迟与可达性，优先从 GitHub 核对 `SHA256SUMS` 并从最快可用源下载校验后原子替换，更新 `install.json`；任何一步失败原可执行文件都不变 |
 | `unknown` | 其他（源码构建、拷贝的文件等） | 只打印上面两种升级方式，不做改动 |
 
 装好之后由新版本收尾，每步一行：

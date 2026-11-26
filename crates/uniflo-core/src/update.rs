@@ -68,9 +68,11 @@ pub struct Releases {
     pub prerelease: Option<String>,
 }
 
-/// Pick the highest non-yanked stable and prerelease `vers` from sparse-index NDJSON.
-pub fn parse_releases(body: &str) -> Releases {
+/// Pick the highest non-yanked stable and prerelease `vers` from sparse-index NDJSON, plus every
+/// non-yanked version string listed by that source.
+fn parse_index(body: &str) -> (Releases, Vec<String>) {
     let mut out = Releases::default();
+    let mut versions = Vec::new();
     for line in body.lines() {
         let Ok(obj) = serde_json::from_str::<serde_json::Value>(line) else { continue };
         if obj.get("yanked").and_then(|y| y.as_bool()).unwrap_or(false) {
@@ -80,12 +82,18 @@ pub fn parse_releases(body: &str) -> Releases {
         if version_key(vers).is_none() {
             continue;
         }
+        versions.push(vers.to_owned());
         let slot = if vers.contains('-') { &mut out.prerelease } else { &mut out.stable };
         if slot.as_deref().is_none_or(|b| is_newer(vers, b)) {
             *slot = Some(vers.to_owned());
         }
     }
-    out
+    (out, versions)
+}
+
+/// Pick the highest non-yanked stable and prerelease `vers` from sparse-index NDJSON.
+pub fn parse_releases(body: &str) -> Releases {
+    parse_index(body).0
 }
 /// Outcome of one update check, surfaced in [`crate::engine::Stats`] and `/v1/stats`.
 #[derive(Debug, Clone, Serialize)]
@@ -103,27 +111,141 @@ pub struct UpdateInfo {
     pub error: Option<String>,
 }
 
+/// Measured answer from one sparse-index root during a smart probe check.
+#[derive(Debug, Clone)]
+pub struct SourceHit {
+    pub root: String,
+    pub official: bool,
+    pub elapsed_ms: u64,
+    pub versions: Vec<String>,
+}
+
+/// Result of [`check_smart`]: the merged [`UpdateInfo`] plus per-source latency & version hits
+/// so `uniflo update` can pick the fastest up-to-date registry over the real network.
+#[derive(Debug, Clone)]
+pub struct SmartCheck {
+    pub info: UpdateInfo,
+    pub hits: Vec<SourceHit>,
+}
+
+impl SmartCheck {
+    pub fn index_probes_for(&self, version: &str) -> Vec<crate::mirror::IndexProbe> {
+        self.hits
+            .iter()
+            .map(|h| crate::mirror::IndexProbe {
+                root: h.root.clone(),
+                official: h.official,
+                elapsed_ms: h.elapsed_ms,
+                has_version: h.versions.iter().any(|v| v == version),
+            })
+            .collect()
+    }
+}
+
+/// One candidate sparse-index target for [`race_detailed`].
+struct Target {
+    root: String,
+    url: String,
+    official: bool,
+}
+
 /// Ask the index sources for the published versions. Err carries a human-readable reason
 /// (missing curl, every source failed) — never a panic path for the daemon.
 pub fn fetch_releases() -> Result<Releases, String> {
     let groups = match std::env::var("UNIFLO_UPDATE_INDEX_URL").ok().filter(|s| !s.is_empty()) {
-        Some(url) => [vec![url], Vec::new()],
-        None => crate::mirror::index_groups(crate::mirror::region())
-            .map(|g| g.into_iter().map(|root| format!("{root}{INDEX_PATH}")).collect()),
+        Some(url) => [vec![Target { root: String::new(), url, official: false }], Vec::new()],
+        None => crate::mirror::index_groups(crate::mirror::region()).map(|g| {
+            g.into_iter()
+                .map(|root| {
+                    let official = root == crate::mirror::OFFICIAL_INDEX;
+                    let url = format!("{root}{INDEX_PATH}");
+                    Target { root, url, official }
+                })
+                .collect()
+        }),
     };
-    race(&groups, HEDGE, GRACE, DEADLINE)
+    race_detailed(&groups, HEDGE, GRACE, DEADLINE).map(|(rel, _)| rel)
+}
+
+/// Like [`check`], but in auto mode (when neither `UNIFLO_UPDATE_INDEX_URL` nor `UNIFLO_MIRROR`
+/// is pinned) races official crates.io and every mirror in parallel so the caller gets both the
+/// newest release and real per-source latency + version freshness measurements.
+pub fn check_smart() -> SmartCheck {
+    let current = current_version().to_owned();
+    let custom_url = std::env::var("UNIFLO_UPDATE_INDEX_URL").ok().filter(|s| !s.is_empty());
+    let (groups, grace) = match custom_url {
+        Some(url) => ([vec![Target { root: String::new(), url, official: false }], Vec::new()], GRACE),
+        None => match crate::mirror::env_override() {
+            Some(r) => (
+                crate::mirror::index_groups(r).map(|g| {
+                    g.into_iter()
+                        .map(|root| {
+                            let official = root == crate::mirror::OFFICIAL_INDEX;
+                            let url = format!("{root}{INDEX_PATH}");
+                            Target { root, url, official }
+                        })
+                        .collect()
+                }),
+                GRACE,
+            ),
+            None => {
+                // Auto mode: race official + all mirrors simultaneously so we measure real
+                // network latency across every candidate in one short round-trip.
+                let all = crate::mirror::ALL_INDEXES
+                    .iter()
+                    .map(|&root| Target {
+                        root: root.to_owned(),
+                        url: format!("{root}{INDEX_PATH}"),
+                        official: root == crate::mirror::OFFICIAL_INDEX,
+                    })
+                    .collect();
+                ([all, Vec::new()], Duration::from_millis(900))
+            }
+        },
+    };
+    match race_detailed(&groups, HEDGE, grace, DEADLINE) {
+        Ok((rel, hits)) => SmartCheck { info: evaluate(&current, &rel), hits },
+        Err(error) => SmartCheck {
+            info: UpdateInfo {
+                current,
+                latest: None,
+                available: false,
+                latest_prerelease: None,
+                checked_at: crate::util::now_ms(),
+                error: Some(error),
+            },
+            hits: Vec::new(),
+        },
+    }
 }
 
 /// One running `curl` writing an index body to `out`.
 struct Probe {
+    root: String,
     url: String,
+    official: bool,
+    started_at: Instant,
     child: Child,
     out: PathBuf,
 }
 
+#[cfg(test)]
+fn race(groups: &[Vec<String>; 2], hedge: Duration, grace: Duration, deadline: Duration) -> Result<Releases, String> {
+    let targets = [
+        groups[0].iter().map(|u| Target { root: String::new(), url: u.clone(), official: false }).collect(),
+        groups[1].iter().map(|u| Target { root: String::new(), url: u.clone(), official: false }).collect(),
+    ];
+    race_detailed(&targets, hedge, grace, deadline).map(|(rel, _)| rel)
+}
+
 /// Fetch `groups[0]` at once and `groups[1]` once `hedge` passes without an answer or the first
 /// group has failed; merge every answer that arrives within `grace` of the first one.
-fn race(groups: &[Vec<String>; 2], hedge: Duration, grace: Duration, deadline: Duration) -> Result<Releases, String> {
+fn race_detailed(
+    groups: &[Vec<Target>; 2],
+    hedge: Duration,
+    grace: Duration,
+    deadline: Duration,
+) -> Result<(Releases, Vec<SourceHit>), String> {
     #[cfg(windows)]
     let bin = "curl.exe";
     #[cfg(not(windows))]
@@ -139,26 +261,35 @@ fn race(groups: &[Vec<String>; 2], hedge: Duration, grace: Duration, deadline: D
     let agent = format!("uniflo/{}", current_version());
     let limit = deadline.as_secs().max(1).to_string();
     let mut n = 0;
-    let mut start = |url: &String, running: &mut Vec<Probe>, errors: &mut Vec<String>| {
+    let mut start = |target: &Target, running: &mut Vec<Probe>, errors: &mut Vec<String>| {
         n += 1;
         let out = dir.join(format!("{n}.ndjson"));
+        let started_at = Instant::now();
         let spawned = crate::util::silent_cmd(bin)
             .args(["-fsSL", "--connect-timeout", "5", "--max-time", &limit, "--user-agent", &agent, "-o"])
             .arg(&out)
-            .arg(url)
+            .arg(&target.url)
+            .current_dir(&dir)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn();
         match spawned {
-            Ok(child) => running.push(Probe { url: url.clone(), child, out }),
+            Ok(child) => running.push(Probe {
+                root: target.root.clone(),
+                url: target.url.clone(),
+                official: target.official,
+                started_at,
+                child,
+                out,
+            }),
             Err(e) => errors.push(format!("{bin} unavailable: {e}")),
         }
     };
     let t0 = Instant::now();
-    let (mut running, mut errors, mut found) = (Vec::new(), Vec::new(), Vec::new());
-    for url in &groups[0] {
-        start(url, &mut running, &mut errors);
+    let (mut running, mut errors, mut found, mut hits) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for target in &groups[0] {
+        start(target, &mut running, &mut errors);
     }
     let mut second = groups[1].is_empty();
     let mut settle = None;
@@ -177,11 +308,15 @@ fn race(groups: &[Vec<String>; 2], hedge: Duration, grace: Duration, deadline: D
                 errors.push(format!("{host} (curl exit {})", status.code().map_or("signal".into(), |c| c.to_string())));
                 return false;
             }
-            let rel = parse_releases(&std::fs::read_to_string(&p.out).unwrap_or_default());
+            let elapsed_ms = p.started_at.elapsed().as_millis().min(u64::MAX as u128) as u64;
+            let (rel, versions) = parse_index(&std::fs::read_to_string(&p.out).unwrap_or_default());
             if rel == Releases::default() {
                 errors.push(format!("{host} (no published versions)"));
             } else {
                 found.push(rel);
+                if !p.root.is_empty() {
+                    hits.push(SourceHit { root: p.root.clone(), official: p.official, elapsed_ms, versions });
+                }
             }
             false
         });
@@ -193,8 +328,8 @@ fn race(groups: &[Vec<String>; 2], hedge: Duration, grace: Duration, deadline: D
             }
         } else if !second && (running.is_empty() || now >= t0 + hedge) {
             second = true;
-            for url in &groups[1] {
-                start(url, &mut running, &mut errors);
+            for target in &groups[1] {
+                start(target, &mut running, &mut errors);
             }
         } else if running.is_empty() {
             break;
@@ -213,7 +348,7 @@ fn race(groups: &[Vec<String>; 2], hedge: Duration, grace: Duration, deadline: D
     if found.is_empty() {
         return Err(format!("no update source answered: {}", errors.join(", ")));
     }
-    Ok(merge(found))
+    Ok((merge(found), hits))
 }
 
 /// The newest stable and the newest prerelease across several answers.

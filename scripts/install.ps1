@@ -10,7 +10,8 @@
 #   UNIFLO_VERSION           version to install (default: the newest stable release)
 #   UNIFLO_INSTALL_DIR       where uniflo.exe goes (default: %LOCALAPPDATA%\Programs\uniflo)
 #   UNIFLO_NO_SETUP=1        never run `uniflo setup` (same as --no-setup)
-#   UNIFLO_RELEASE_BASE_URL  release root (default: GitHub, then ghfast.top and gh-proxy.com in front of it)
+#   UNIFLO_MIRROR=cn|official  override automatic latency-probed mirror selection
+#   UNIFLO_RELEASE_BASE_URL  release root (default: probed across GitHub, ghfast.top, gh-proxy.com)
 #   UNIFLO_CONFIG_DIR, UNIFLO_HOME  where install.json goes, exactly as for uniflo itself
 
 & {
@@ -49,11 +50,69 @@
         $prefix = if ($isZh) { T 'uniflo-install: \u9519\u8bef\uff1a' } else { 'uniflo-install: error: ' }
         throw ($prefix + $m)
     }
-    # Release roots, tried in order: GitHub, then public accelerators in front of it, which answer
-    # from mainland China when GitHub does not. UNIFLO_RELEASE_BASE_URL replaces them all.
+    # Release roots: UNIFLO_RELEASE_BASE_URL pins one root; UNIFLO_MIRROR=cn|official pins the
+    # preferred side; otherwise probe GitHub + accelerators in parallel and fall back to time zone.
     $github = 'https://github.com/Crosery/uniflo/releases'
     $bases = @($github, "https://ghfast.top/$github", "https://gh-proxy.com/$github")
-    if ($env:UNIFLO_RELEASE_BASE_URL) { $bases = @($env:UNIFLO_RELEASE_BASE_URL.TrimEnd('/')) }
+    $autoProbe = $true
+    if ($env:UNIFLO_RELEASE_BASE_URL) {
+        $bases = @($env:UNIFLO_RELEASE_BASE_URL.TrimEnd('/'))
+        $autoProbe = $false
+    } elseif ($env:UNIFLO_MIRROR) {
+        $m = $env:UNIFLO_MIRROR.Trim().ToLowerInvariant()
+        if ($m -in @('cn', 'china')) {
+            $bases = @("https://ghfast.top/$github", "https://gh-proxy.com/$github", $github)
+            $autoProbe = $false
+        } elseif ($m -in @('official', 'global')) {
+            $autoProbe = $false
+        }
+    }
+    function Select-FastestBases([string]$probePath) {
+        try {
+            $tasks = @()
+            foreach ($b in $bases) {
+                $req = [System.Net.HttpWebRequest]::Create("$b/$probePath")
+                $req.Method = 'HEAD'
+                $req.Timeout = 3500
+                $req.AllowAutoRedirect = $true
+                $sw = [System.Diagnostics.Stopwatch]::StartNew()
+                $tasks += [pscustomobject]@{ Base = $b; Req = $req; Ar = $req.BeginGetResponse($null, $null); Sw = $sw; Done = $false; Ms = $null }
+            }
+            $deadline = [DateTime]::UtcNow.AddMilliseconds(3500)
+            while ([DateTime]::UtcNow -lt $deadline) {
+                $pending = 0
+                foreach ($t in $tasks) {
+                    if ($t.Done) { continue }
+                    if ($t.Ar.IsCompleted) {
+                        $t.Done = $true
+                        $t.Sw.Stop()
+                        try { $resp = $t.Req.EndGetResponse($t.Ar); $resp.Close(); $t.Ms = $t.Sw.ElapsedMilliseconds } catch {}
+                    } else {
+                        $pending++
+                    }
+                }
+                if ($pending -eq 0) { break }
+                Start-Sleep -Milliseconds 30
+            }
+            foreach ($t in $tasks) { if (-not $t.Done) { try { $t.Req.Abort() } catch {} } }
+            $ok = @($tasks | Where-Object { $null -ne $_.Ms } | Sort-Object Ms)
+            if ($ok.Count -gt 0) {
+                $gh = $ok | Where-Object { $_.Base -eq $github } | Select-Object -First 1
+                $bestMirror = $ok | Where-Object { $_.Base -ne $github } | Select-Object -First 1
+                $ordered = @()
+                if ($gh -and ($gh.Ms -le 600 -or ($bestMirror -and $gh.Ms -le ($bestMirror.Ms + 200)))) {
+                    $ordered += $github
+                }
+                foreach ($item in $ok) { if ($ordered -notcontains $item.Base) { $ordered += $item.Base } }
+                foreach ($b in $bases) { if ($ordered -notcontains $b) { $ordered += $b } }
+                return $ordered
+            }
+        } catch {}
+        if ([TimeZoneInfo]::Local.Id -eq 'China Standard Time') {
+            return @("https://ghfast.top/$github", "https://gh-proxy.com/$github", $github)
+        }
+        return $bases
+    }
     # Fetch <path under the release root> <dest>: the first root that serves it wins.
     function Fetch([string]$path, [string]$out) {
         $errs = @()
@@ -76,6 +135,10 @@
     New-Item -ItemType Directory -Path $tmp | Out-Null
     try {
         $version = "$env:UNIFLO_VERSION".TrimStart('v')
+        if ($autoProbe) {
+            $probePath = if ($version) { "download/v$version/SHA256SUMS" } else { 'latest/download/SHA256SUMS' }
+            $bases = Select-FastestBases $probePath
+        }
         if (-not $version) {
             # The newest stable release's SHA256SUMS names its packages, and so its version.
             $latest = Join-Path $tmp 'latest-SHA256SUMS'

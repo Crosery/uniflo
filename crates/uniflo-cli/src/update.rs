@@ -62,7 +62,13 @@ pub fn run(check: bool, prerelease: bool, json: bool) -> Result<()> {
     if !json && !check && std::io::stdout().is_terminal() {
         println!("{}", ui::banner(uniflo_core::update::current_version()));
     }
-    let info = uniflo_core::update::check();
+    let (info, hits) = if !check && !json {
+        let smart = uniflo_core::update::check_smart();
+        (smart.info, smart.hits)
+    } else {
+        (uniflo_core::update::check(), Vec::new())
+    };
+    let smart = uniflo_core::update::SmartCheck { info: info.clone(), hits };
     if json {
         println!("{}", serde_json::to_string_pretty(&Report { info: &info, method })?);
         if method == Method::Unknown {
@@ -150,8 +156,8 @@ pub fn run(check: bool, prerelease: bool, json: bool) -> Result<()> {
             None => tr!("发布包", "release package"),
         },
         None => {
-            cargo_install(&exe, version)?;
-            "cargo install".to_owned()
+            let probes = smart.index_probes_for(version);
+            cargo_install(&exe, version, &probes)?
         }
     };
     let secs = t0.elapsed().as_secs();
@@ -160,7 +166,12 @@ pub fn run(check: bool, prerelease: bool, json: bool) -> Result<()> {
         step(Mark::Ok, &tr!("已安装 {version}（{how}，{secs} 秒）", "installed {version} ({how}, {secs}s)"))
     );
     // `current_exe()` of a replaced executable is no longer valid on Linux: run the new one by path.
-    let _ = std::process::Command::new(&exe).args(["setup", "--after-update"]).status();
+    let mut after = std::process::Command::new(&exe);
+    after.args(["setup", "--after-update"]);
+    if std::env::current_dir().is_err() {
+        after.current_dir(safe_workdir());
+    }
+    let _ = after.status();
     Ok(())
 }
 
@@ -208,7 +219,22 @@ pub fn width(s: &str) -> usize {
         .sum()
 }
 
-fn cargo_install(#[cfg_attr(not(windows), allow(unused_variables))] exe: &Path, version: &str) -> Result<()> {
+/// Guaranteed-existing working directory for `cargo install` (and post-update recovery when the
+/// caller's cwd was deleted or unmounted, e.g. a disconnected NAS mount). Running `cargo install`
+/// here also avoids picking up an unrelated local project's `.cargo/config.toml`.
+fn safe_workdir() -> std::path::PathBuf {
+    let tmp = std::env::temp_dir();
+    if tmp.is_dir() {
+        return tmp;
+    }
+    uniflo_core::util::home()
+}
+
+fn cargo_install(
+    #[cfg_attr(not(windows), allow(unused_variables))] exe: &Path,
+    version: &str,
+    probes: &[uniflo_core::mirror::IndexProbe],
+) -> Result<String> {
     #[cfg(windows)]
     let backup = if exe.is_file() {
         install::remove_aside(exe);
@@ -217,7 +243,7 @@ fn cargo_install(#[cfg_attr(not(windows), allow(unused_variables))] exe: &Path, 
         None
     };
 
-    let res = run_cargo(version);
+    let res = run_cargo(version, probes);
 
     #[cfg(windows)]
     if let Some(backup) = backup {
@@ -233,25 +259,155 @@ fn cargo_install(#[cfg_attr(not(windows), allow(unused_variables))] exe: &Path, 
     res
 }
 
-/// `cargo install` with its build log folded into one live line; the log's tail is printed only
-/// when the build fails.
-fn run_cargo(version: &str) -> Result<()> {
-    let mirror = uniflo_core::mirror::cargo_args(uniflo_core::mirror::region(), &uniflo_core::mirror::cargo_home());
-    if !mirror.is_empty() {
-        println!(
-            "{}",
-            step(
-                Mark::Info,
-                &tr!(
-                    "按时区使用国内镜像 rsproxy.cn 下载依赖（UNIFLO_MIRROR=official 改回官方源）",
-                    "fetching crates through the rsproxy.cn mirror for your time zone (UNIFLO_MIRROR=official to use crates.io)"
-                )
-            )
-        );
+fn source_label(s: &uniflo_core::mirror::CargoSource) -> String {
+    if s.official { "crates.io".to_owned() } else { uniflo_core::mirror::host(&s.index_root).to_owned() }
+}
+
+fn source_hint(s: &uniflo_core::mirror::CargoSource, reason: uniflo_core::mirror::PickReason) -> Option<String> {
+    use uniflo_core::mirror::PickReason;
+    let host = source_label(s);
+    match (reason, s.official, s.latency_ms) {
+        (PickReason::Probed, true, Some(ms)) => Some(tr!(
+            "测速选择官方源 crates.io（{ms} ms，UNIFLO_MIRROR=cn 强制国内镜像）",
+            "selected official crates.io by probe ({ms} ms; UNIFLO_MIRROR=cn for China mirrors)"
+        )),
+        (PickReason::Probed, false, Some(ms)) => Some(tr!(
+            "测速选择镜像 {host}（{ms} ms，UNIFLO_MIRROR=official 改回官方源）",
+            "selected mirror {host} by probe ({ms} ms; UNIFLO_MIRROR=official for crates.io)"
+        )),
+        (PickReason::Override, false, Some(ms)) => Some(tr!(
+            "按 UNIFLO_MIRROR=cn 使用镜像 {host}（{ms} ms）",
+            "using mirror {host} via UNIFLO_MIRROR=cn ({ms} ms)"
+        )),
+        (PickReason::Override, false, None) => {
+            Some(tr!("按 UNIFLO_MIRROR=cn 使用镜像 {host}", "using mirror {host} via UNIFLO_MIRROR=cn"))
+        }
+        (PickReason::Override, true, Some(ms)) => Some(tr!(
+            "按 UNIFLO_MIRROR=official 使用官方源 crates.io（{ms} ms）",
+            "using official crates.io via UNIFLO_MIRROR=official ({ms} ms)"
+        )),
+        (PickReason::Override, true, None) => Some(tr!(
+            "按 UNIFLO_MIRROR=official 使用官方源 crates.io",
+            "using official crates.io via UNIFLO_MIRROR=official"
+        )),
+        (PickReason::Timezone, false, _) => Some(tr!(
+            "按时区使用国内镜像 {host}（UNIFLO_MIRROR=official 改回官方源）",
+            "fetching crates through {host} for your time zone (UNIFLO_MIRROR=official to use crates.io)"
+        )),
+        _ => None,
     }
+}
+
+/// True when cargo's failure tail indicates a registry/network/sync failure (safe to retry via
+/// another candidate registry) rather than a local Rust compilation failure.
+fn is_network_cargo_error(tail: &std::collections::VecDeque<String>) -> bool {
+    let joined = tail.iter().map(String::as_str).collect::<Vec<_>>().join("\n").to_ascii_lowercase();
+    [
+        "failed to download",
+        "failed to get ",
+        "failed to query replaced source",
+        "failed to select a version",
+        "spurious network error",
+        "could not connect",
+        "couldn't connect",
+        "could not resolve host",
+        "timed out",
+        "timeout",
+        "connection reset",
+        "connection refused",
+        "status code",
+        "http2",
+        "ssl",
+        "tls",
+        "failed to fetch",
+    ]
+    .iter()
+    .any(|needle| joined.contains(needle))
+}
+
+struct CargoFail {
+    code: String,
+    tail: std::collections::VecDeque<String>,
+}
+
+/// `cargo install` with smart network-probed registry selection, safe working directory, and
+/// automatic fallback to the next candidate registry when a mirror/network download fails.
+fn run_cargo(version: &str, probes: &[uniflo_core::mirror::IndexProbe]) -> Result<String> {
+    let cargo_home = uniflo_core::mirror::cargo_home();
+    if uniflo_core::mirror::has_user_cargo_replacement(&cargo_home) {
+        return match run_cargo_once(version, &[])? {
+            Ok(()) => Ok("cargo install".to_owned()),
+            Err(fail) => {
+                for l in &fail.tail {
+                    eprintln!("    {l}");
+                }
+                let code = fail.code;
+                bail!(tr!("cargo install 失败（退出码 {code}）", "cargo install failed (exit code {code})"));
+            }
+        };
+    }
+
+    let override_r = uniflo_core::mirror::env_override();
+    let (sources, reason) =
+        uniflo_core::mirror::rank_cargo_sources(probes, override_r, uniflo_core::mirror::timezone_region());
+    // When user explicitly pinned UNIFLO_MIRROR, do not silently jump to the opposite group.
+    let attempts: Vec<&uniflo_core::mirror::CargoSource> = match override_r {
+        Some(uniflo_core::mirror::Region::Global) => sources.iter().take(1).collect(),
+        Some(uniflo_core::mirror::Region::China) => sources.iter().filter(|s| !s.official).collect(),
+        None => sources.iter().collect(),
+    };
+
+    for (i, source) in attempts.iter().enumerate() {
+        if i == 0
+            && let Some(hint) = source_hint(source, reason)
+        {
+            println!("{}", step(Mark::Info, &hint));
+        }
+        let args = uniflo_core::mirror::cargo_args_for(source);
+        match run_cargo_once(version, &args)? {
+            Ok(()) => {
+                return Ok(if source.official {
+                    "cargo install".to_owned()
+                } else {
+                    format!("cargo install · {}", source_label(source))
+                });
+            }
+            Err(fail) => {
+                if let Some(next) = attempts.get(i + 1)
+                    && is_network_cargo_error(&fail.tail)
+                {
+                    let cur_host = source_label(source);
+                    let next_host = source_label(next);
+                    println!(
+                        "{}",
+                        step(
+                            Mark::Warn,
+                            &tr!(
+                                "{cur_host} 下载失败，自动切换至 {next_host} 重试…",
+                                "{cur_host} download failed, retrying via {next_host}…"
+                            )
+                        )
+                    );
+                    continue;
+                }
+                for l in &fail.tail {
+                    eprintln!("    {l}");
+                }
+                let code = fail.code;
+                bail!(tr!("cargo install 失败（退出码 {code}）", "cargo install failed (exit code {code})"));
+            }
+        }
+    }
+    bail!(tr!("cargo install 失败：没有可用的下载源", "cargo install failed: no registry available"))
+}
+
+/// One `cargo install` invocation with its build log folded into one live line; the log's tail is
+/// returned only when the command exits non-zero.
+fn run_cargo_once(version: &str, extra_args: &[String]) -> Result<std::result::Result<(), CargoFail>> {
     let mut child = std::process::Command::new("cargo")
         .args(["install", "uniflo", "--force", "--color", "never", "--version", version])
-        .args(&mirror)
+        .args(extra_args)
+        .current_dir(safe_workdir())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
@@ -288,13 +444,10 @@ fn run_cargo(version: &str) -> Result<()> {
     let status = child.wait()?;
     live.clear();
     if !status.success() {
-        for l in &tail {
-            eprintln!("    {l}");
-        }
         let code = status.code().map_or_else(|| "signal".to_owned(), |c| c.to_string());
-        bail!(tr!("cargo install 失败（退出码 {code}）", "cargo install failed (exit code {code})"));
+        return Ok(Err(CargoFail { code, tail }));
     }
-    Ok(())
+    Ok(Ok(()))
 }
 
 /// Returns the host the package came from when it was not GitHub itself.
@@ -614,5 +767,27 @@ mod tests {
         assert_eq!(step(Mark::Ok, "done"), format!("  {} done", MARKS[0]));
         assert_eq!(width("ab"), 2);
         assert_eq!(width("编译 a"), 6);
+    }
+
+    #[test]
+    fn safe_workdir_exists_and_network_error_detection() {
+        assert!(safe_workdir().is_dir());
+
+        let tail = |lines: &[&str]| lines.iter().map(|s| (*s).to_owned()).collect::<std::collections::VecDeque<_>>();
+        assert!(is_network_cargo_error(&tail(&["error: failed to download `uniflo v0.2.9`"])));
+        assert!(is_network_cargo_error(&tail(&["error: failed to select a version for `uniflo`."])));
+        assert!(is_network_cargo_error(&tail(&["Caused by: [28] Timeout was reached"])));
+        assert!(!is_network_cargo_error(&tail(&[
+            "error[E0425]: cannot find value `x` in this scope",
+            "error: could not compile `uniflo`"
+        ])));
+
+        let ustc = uniflo_core::mirror::CargoSource {
+            index_root: uniflo_core::mirror::CN_INDEXES[1].to_owned(),
+            official: false,
+            latency_ms: Some(95),
+        };
+        let hint = source_hint(&ustc, uniflo_core::mirror::PickReason::Probed).unwrap();
+        assert!(hint.contains("mirrors.ustc.edu.cn") && hint.contains("95 ms"), "{hint}");
     }
 }
