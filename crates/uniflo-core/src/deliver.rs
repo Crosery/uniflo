@@ -457,9 +457,9 @@ fn probe_tmux(force: bool) -> Vec<TmuxPane> {
 
 /// Snapshot of `pid -> ppid` on Unix (empty on Windows).
 pub fn parent_pid_map() -> HashMap<u32, u32> {
-    let mut map = HashMap::new();
     #[cfg(unix)]
     {
+        let mut map = HashMap::new();
         if let Some(res) = run_cmd_timeout("ps", &["-axo", "pid=,ppid="], None, &[], Duration::from_secs(2))
             && res.ok
         {
@@ -472,8 +472,12 @@ pub fn parent_pid_map() -> HashMap<u32, u32> {
                 }
             }
         }
+        map
     }
-    map
+    #[cfg(not(unix))]
+    {
+        HashMap::new()
+    }
 }
 
 /// Walk `pid` and its ancestors (up to `max_depth` hops).
