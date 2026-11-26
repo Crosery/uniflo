@@ -72,12 +72,19 @@ async fn req(
         raw_req += &format!("Content-Type: application/json\r\nContent-Length: {}\r\n", payload.len());
     }
     raw_req += "\r\n";
-    s.write_all(raw_req.as_bytes()).await.unwrap();
-    if !payload.is_empty() {
-        s.write_all(&payload).await.unwrap();
-    }
+    let mut wire = raw_req.into_bytes();
+    wire.extend_from_slice(&payload);
+    s.write_all(&wire).await.unwrap();
     let mut raw = Vec::new();
-    s.read_to_end(&mut raw).await.unwrap();
+    match s.read_to_end(&mut raw).await {
+        Ok(_) => {}
+        // On Windows, closing a socket after an early 403 rejection (before draining the request
+        // body) can send TCP RST right after the complete HTTP response is delivered.
+        Err(e)
+            if matches!(e.kind(), std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted)
+                && raw.windows(4).any(|w| w == b"\r\n\r\n") => {}
+        Err(e) => panic!("read response failed: {e}"),
+    }
     let split = raw.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
     let head = String::from_utf8_lossy(&raw[..split]);
     let status: u16 = head.lines().next().unwrap().split_whitespace().nth(1).unwrap().parse().unwrap();
