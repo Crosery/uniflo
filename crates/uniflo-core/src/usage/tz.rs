@@ -2,7 +2,7 @@
 //! (`+08:00`, `-0530`) and IANA names read from the system zoneinfo (TZif + POSIX footer).
 
 use chrono::{Datelike, Offset, TimeZone, Timelike};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Default)]
 pub enum Tz {
@@ -19,7 +19,7 @@ fn local_zone() -> Option<&'static Zone> {
     if std::env::var_os("TZ").is_some() {
         return None;
     }
-    static LOCAL: OnceLock<Option<Zone>> = OnceLock::new();
+    static LOCAL: std::sync::OnceLock<Option<Zone>> = std::sync::OnceLock::new();
     LOCAL.get_or_init(|| std::fs::read("/etc/localtime").ok().and_then(|b| Zone::parse(&b))).as_ref()
 }
 
