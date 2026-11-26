@@ -8,7 +8,7 @@
 
 [开发者站](https://crosery.github.io/uniflo/) · [快速开始](#快速开始) · [网页控制台](docs/console.md) · [网关 API](docs/api.md) · [Rust SDK](docs/sdk.md) · [Agent 接入](docs/agents.md) · [llms.txt](https://crosery.github.io/uniflo/llms.txt)
 
-[0.2.10 发布说明](docs/releases/v0.2.10.md)：`uniflo setup` 全量覆盖 33 个 harness，全 MCP 进程级 SSE 看门狗与 10 套原生 Hook，升级智能测速选源与静默续配，CLI 首页与计划输出改版。
+[0.2.11 发布说明](docs/releases/v0.2.11.md)：跨 Agent 消息升级为零 Hook 三层实时唤醒（Herdr/tmux 活终端直推 + 12 家官方无头原上下文续跑），修复同目录看门狗截胡，`uniflo_peers` 同目录置顶，`/demo` 新增底部悬浮 Chat UI 对话框。
 
 ![会话视图](docs/assets/demo.png)
 
