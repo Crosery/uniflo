@@ -94,8 +94,14 @@ fn base_cmd(root: &Path, url: &str) -> Command {
         .env("UNIFLO_URL", url)
         .env("UNIFLO_LANG", "en")
         .env("UNIFLO_NO_SETUP", "1")
+        .env("UNIFLO_NO_TERM_PROBE", "1")
         .env("NO_COLOR", "1")
         .env_remove("UNIFLO_TOKEN")
+        .env_remove("UNIFLO_SESSION_KEY")
+        .env_remove("UNIFLO_WAKE_HOP")
+        .env_remove("ANTIGRAVITY_CONVERSATION_ID")
+        .env_remove("CLAUDE_SESSION_ID")
+        .env_remove("CODEX_THREAD_ID")
         .env_remove("CLAUDE_CONFIG_DIR")
         .env_remove("CODEX_HOME");
     c
@@ -139,24 +145,36 @@ fn opt_in_mcp_cli_and_silent_hook_end_to_end() {
         &[
             json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}),
             json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
-                "name":"uniflo_send_message",
-                "arguments":{"to":"claude:alpha","from":"codex:peer","text":"sync check","structured":true}
+                "name":"uniflo_peers",
+                "arguments":{"structured":true}
             }}),
             json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{
+                "name":"uniflo_send_message",
+                "arguments":{"to":"claude:alpha","from":"codex:peer","text":"sync check","wake":false,"structured":true}
+            }}),
+            json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{
                 "name":"uniflo_inbox",
                 "arguments":{"to":"claude:alpha","structured":true}
             }}),
-            json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{
+            json!({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{
                 "name":"uniflo_ack_messages",
                 "arguments":{"to":"claude:alpha","structured":true}
             }}),
         ],
     );
-    assert_eq!(replies[0]["result"]["tools"].as_array().unwrap().len(), 14);
+    assert_eq!(replies[0]["result"]["tools"].as_array().unwrap().len(), 15);
     assert_eq!(replies[1]["result"]["isError"], false);
-    assert_eq!(replies[1]["result"]["structuredContent"]["target"]["key"], "claude:alpha");
-    assert_eq!(replies[2]["result"]["structuredContent"]["messages"].as_array().unwrap().len(), 1);
-    assert_eq!(replies[3]["result"]["structuredContent"]["updated"], 1);
+    assert!(
+        replies[1]["result"]["structuredContent"]["peers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["key"] == "claude:alpha")
+    );
+    assert_eq!(replies[2]["result"]["isError"], false);
+    assert_eq!(replies[2]["result"]["structuredContent"]["target"]["key"], "claude:alpha");
+    assert_eq!(replies[3]["result"]["structuredContent"]["messages"].as_array().unwrap().len(), 1);
+    assert_eq!(replies[4]["result"]["structuredContent"]["updated"], 1);
     assert!(env.data_dir().join("messages/log.jsonl").is_file());
 
     // 3b. Per-process SSE watchdog bound to `uniflo mcp --message`: wakes `uniflo_wait_message`
@@ -190,7 +208,7 @@ fn opt_in_mcp_cli_and_silent_hook_end_to_end() {
     let t_send = Instant::now();
     let push = env
         .cmd()
-        .args(["message", "send", "claude:alpha", "ping-watchdog", "--from", "codex:peer", "--json"])
+        .args(["message", "send", "claude:alpha", "ping-watchdog", "--from", "codex:peer", "--no-wake", "--json"])
         .output()
         .unwrap();
     assert!(push.status.success());
@@ -218,7 +236,7 @@ fn opt_in_mcp_cli_and_silent_hook_end_to_end() {
     // 4. CLI `message send` -> `message hook` injects once, then stays silent.
     let send = env
         .cmd()
-        .args(["message", "send", "claude:alpha", "build", "green", "--from", "agent-b", "--json"])
+        .args(["message", "send", "claude:alpha", "build", "green", "--from", "agent-b", "--no-wake", "--json"])
         .output()
         .unwrap();
     assert!(send.status.success(), "{}", String::from_utf8_lossy(&send.stderr));
@@ -252,4 +270,132 @@ fn opt_in_mcp_cli_and_silent_hook_end_to_end() {
     let offline = run_hook(&closed);
     assert!(offline.status.success());
     assert!(offline.stdout.is_empty());
+}
+
+#[test]
+fn same_cwd_sessions_do_not_steal_messages() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let proj = root.join("shared-home");
+    std::fs::create_dir_all(&proj).unwrap();
+    let claude = root.join(".claude/projects/-shared-home");
+    std::fs::create_dir_all(&claude).unwrap();
+    let now = now_ms();
+    // Both alpha and beta live in the exact same cwd (just like two sessions in `~`).
+    std::fs::write(
+        claude.join("alpha.jsonl"),
+        format!(
+            "{}\n",
+            json!({"type":"user","uuid":"u1","timestamp":now - 100,"cwd":proj,"message":{"role":"user","content":"session alpha"}})
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        claude.join("beta.jsonl"),
+        format!(
+            "{}\n",
+            json!({"type":"user","uuid":"u2","timestamp":now - 500,"cwd":proj,"message":{"role":"user","content":"session beta"}})
+        ),
+    )
+    .unwrap();
+
+    let port = free_port();
+    let bind = format!("127.0.0.1:{port}");
+    let url = format!("http://{bind}");
+    let mut daemon = base_cmd(root, &url)
+        .args(["daemon", "-f", "--bind", &bind, "--no-fts", "--no-cache", "--no-update-check", "--no-price-sync"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        if std::net::TcpStream::connect(&bind).is_ok() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+
+    // Start Session A's MCP watchdog in the shared cwd with CLAUDE_SESSION_ID=alpha.
+    let mut a_cmd = base_cmd(root, &url);
+    a_cmd
+        .current_dir(&proj)
+        .env("CLAUDE_SESSION_ID", "alpha")
+        .args(["mcp", "--message"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut a_child = a_cmd.spawn().unwrap();
+    let mut a_in = a_child.stdin.take().unwrap();
+    let mut a_out = BufReader::new(a_child.stdout.take().unwrap());
+
+    writeln!(a_in, "{}", json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}})).unwrap();
+    a_in.flush().unwrap();
+    let mut line = String::new();
+    a_out.read_line(&mut line).unwrap();
+    std::thread::sleep(Duration::from_millis(120));
+
+    // Session A sends to `cwd:<proj>` (without naming beta); server must exclude self (`claude:alpha`)
+    // and route to `claude:beta`!
+    writeln!(
+        a_in,
+        "{}",
+        json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
+            "name":"uniflo_send_message",
+            "arguments":{"to":format!("cwd:{}", proj.display()),"text":"hello beta from shared dir","wake":false,"structured":true}
+        }})
+    )
+    .unwrap();
+    a_in.flush().unwrap();
+    let send_resp: Value = loop {
+        line.clear();
+        a_out.read_line(&mut line).unwrap();
+        let v: Value = serde_json::from_str(&line).unwrap();
+        if v["id"] == 2 {
+            break v;
+        }
+    };
+    assert_eq!(send_resp["result"]["isError"], false, "{send_resp}");
+    assert_eq!(send_resp["result"]["structuredContent"]["target"]["key"], "claude:beta");
+    assert_eq!(send_resp["result"]["structuredContent"]["message"]["from"], "claude:alpha");
+
+    // Give the SSE stream a moment, then make another tool call on Session A.
+    // Session A MUST NOT piggyback beta's message or mark it delivered.
+    std::thread::sleep(Duration::from_millis(150));
+    writeln!(
+        a_in,
+        "{}",
+        json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"uniflo_status","arguments":{}}})
+    )
+    .unwrap();
+    a_in.flush().unwrap();
+    let status_resp: Value = loop {
+        line.clear();
+        a_out.read_line(&mut line).unwrap();
+        let v: Value = serde_json::from_str(&line).unwrap();
+        if v["id"] == 3 {
+            break v;
+        }
+    };
+    let status_text = status_resp["result"]["content"][0]["text"].as_str().unwrap_or("");
+    assert!(!status_text.contains("hello beta from shared dir"), "sender watchdog stole peer's message: {status_text}");
+    drop(a_in);
+    assert!(a_child.wait().unwrap().success());
+
+    // Verify beta's message is STILL undelivered and unread in the inbox!
+    let inbox = base_cmd(root, &url).args(["message", "inbox", "--to", "claude:beta", "--json"]).output().unwrap();
+    assert!(inbox.status.success());
+    let inbox_json: Value = serde_json::from_slice(&inbox.stdout).unwrap();
+    let msgs = inbox_json["messages"].as_array().unwrap();
+    assert_eq!(msgs.len(), 1);
+    assert_eq!(msgs[0]["text"], "hello beta from shared dir");
+    assert!(
+        msgs[0].get("delivered_at").is_none() || msgs[0]["delivered_at"].is_null(),
+        "expected beta's message to remain undelivered, got: {}",
+        msgs[0]
+    );
+
+    let _ = daemon.kill();
+    let _ = daemon.wait();
 }

@@ -235,15 +235,17 @@
 
 ## 跨 Agent 消息（可选）
 
-`/v1/messages`、`/v1/messages/ack`、`/v1/messages/stream` 与 `uniflo message --json` 的类型，真源 `crates/uniflo-schema/src/message.rs`，决策见 `docs/decisions/ADR-0012-可选跨Agent消息总线.md`。
+`/v1/messages`、`/v1/messages/ack`、`/v1/messages/stream`、`/v1/messages/peers` 与 `uniflo message --json` 的类型，真源 `crates/uniflo-schema/src/message.rs`，决策见 `docs/decisions/ADR-0012-可选跨Agent消息总线.md`。
 
 | 类型 | 用途 | 字段 |
 |---|---|---|
 | `AgentMessage` | 一条跨会话消息 | `id`、`from`、`to`、`text`、`kind?`、`reply_to?`、`created_at`、`delivered_at?`、`acked_at?` |
 | `MessageTarget` | 发送时目标会话快照 | `key`、`harness`、`title?`、`cwd?`、`status`、`pid?`、`delivery`（`"hook"` \| `"pty_or_hook"` \| `"resume"`）、`resume_command?` |
-| `SendMessageRequest` | `POST /v1/messages` 请求体 | `to`（精确 key / 唯一前缀 / `cwd:<目录>`）、`from?`、`text`（≤ 64 KiB）、`kind?`、`reply_to?` |
-| `SendMessageResponse` | `POST /v1/messages` 响应 | `message`（`AgentMessage`）、`target`（`MessageTarget`） |
+| `SendMessageRequest` | `POST /v1/messages` 请求体 | `to`（精确 key / 唯一前缀 / `cwd:<目录>`，自动排除 `from` 自身）、`from?`、`text`（≤ 64 KiB）、`kind?`、`reply_to?`、`deliver?`（`"auto"` \| `"wake"` \| `"inbox"`）、`wait_secs?`（1–90）、`hop?`（防循环跳数） |
+| `SendMessageResponse` | `POST /v1/messages` 响应 | `message`（`AgentMessage`）、`target`（`MessageTarget`）、`delivery_channel?`（`"herdr"` \| `"tmux"` \| `"resume_wake"` \| `"resume_failed"` \| `"inbox"` \| `"inbox_busy"` \| `"loop_guard"`）、`delivery_detail?`、`reply?`（`AgentMessage`） |
 | `InboxResponse` | `GET /v1/messages` 响应 | `to?`、`messages[]`（`AgentMessage`）、`unread` |
+| `PeerInfo` | 一个可对话同事会话 | `key`、`harness`、`title?`、`cwd?`、`status`、`pid?`、`updated_at`、`channel`（`"herdr"` \| `"tmux"` \| `"resume_wake"` \| `"inbox"`）、`terminal?`、`unread` |
+| `PeersResponse` | `GET /v1/messages/peers` 响应 | `self_key?`（按调用方 `pid` 或 `self` 识别的自身 key）、`peers[]`（`PeerInfo`） |
 | `AckMessagesRequest` | `POST /v1/messages/ack` 请求体 | `ids[]`、`to?`、`state?`（`"delivered"` \| `"acked"`，默认 `"acked"`） |
 | `AckMessagesResponse` | `POST /v1/messages/ack` 响应 | `updated` |
 

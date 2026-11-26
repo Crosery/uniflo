@@ -43,7 +43,7 @@ cat > "${TARGET_PLIST}" <<EOF
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
-        <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${HOME}/.cargo/bin</string>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${HOME}/.local/bin:${HOME}/.bun/bin:${HOME}/.cargo/bin</string>
     </dict>
 </dict>
 </plist>

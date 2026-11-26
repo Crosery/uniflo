@@ -1314,8 +1314,8 @@ async function runReadOnly() {
   await waitFor(`!!document.querySelector('#resume-btn')`, 8_000, "ro detail");
   await click("#resume-btn");
   await waitFor(`!document.querySelector('#menu').hidden`, 3_000, "ro menu").catch(() => {});
-  const head = await cdp.eval(`({ clean: !!document.querySelector('#clean-btn'), term: document.querySelectorAll('#menu [data-act="open-term"]').length })`);
-  report("[read-only] write controls are hidden with an explanation", health.read_only === true && !!ro && ro.checkboxes === 0 && !ro.plan && !ro.selall && ro.note && del === 0 && !head.clean && head.term === 0,
+  const head = await cdp.eval(`({ clean: !!document.querySelector('#clean-btn'), term: document.querySelectorAll('#menu [data-act="open-term"]').length, composerHidden: !!document.querySelector('#chat-composer')?.hidden })`);
+  report("[read-only] write controls are hidden with an explanation", health.read_only === true && !!ro && ro.checkboxes === 0 && !ro.plan && !ro.selall && ro.note && del === 0 && !head.clean && head.term === 0 && head.composerHidden,
     JSON.stringify({ ...ro, del, ...head }));
   report("[read-only] no page errors", cdp.errors.length === 0, cdp.errors.slice(0, 3).join(" | "));
 }
@@ -1685,6 +1685,28 @@ async function connectCdp(url) {
   return { send, eval: evaluate, errors, close: () => ws.close() };
 }
 
+async function runChatComposer() {
+  await viewport(1480, 920);
+  await scheme("light");
+  await load(`${api}/demo?token=${TOKEN}&select=${enc("claude:proj-0")}`);
+  await waitFor(`!document.querySelector('#chat-composer').hidden && !!document.querySelector('#composer-peer-chip').textContent.trim()`, 8_000, "composer visible");
+  // Toggle to inbox-only mode in synthetic test so sending never spawns a real external harness CLI.
+  await click("#composer-wake-toggle");
+  await waitFor(`document.querySelector('#composer-wake-toggle').getAttribute('aria-pressed') === 'false'`, 3_000, "wake toggled off");
+  await cdp.eval(`(() => { const el = document.querySelector('#chat-input'); el.value = '来自控制台的一条测试消息'; el.dispatchEvent(new Event('input', { bubbles: true })); return true; })()`);
+  await waitFor(`!document.querySelector('#composer-send').disabled`, 2_000, "send enabled");
+  await click("#composer-send");
+  const bubble = await waitFor(`document.querySelector('#thread .k-bus_msg.out .bus-bubble')?.textContent?.trim()`, 6_000, "sent bubble").catch(() => "");
+  await shot(join("visual", "chat-composer-1480-light.png"));
+  // Toggle back to default auto-wake so localStorage stays clean for subsequent runs.
+  await click("#composer-wake-toggle");
+  const inbox = await apiJson(api, `/v1/messages?to=${enc("claude:proj-0")}`);
+  report("[chat] docked Herdr-style composer sends message via POST /v1/messages and renders inline bubble",
+    bubble === "来自控制台的一条测试消息" && inbox.messages.some((m) => m.text === "来自控制台的一条测试消息" && m.from === "web-demo"),
+    `bubble=${bubble} · inbox=${inbox.messages.length}`);
+  report("[chat] no page errors", cdp.errors.length === 0, cdp.errors.slice(0, 3).join(" | "));
+}
+
 // ---------------------------------------------------------------- run
 let daemon;
 let cdp;
@@ -1693,9 +1715,9 @@ const roApi = `http://127.0.0.1:${RO_PORT}`;
 const noFtsApi = `http://127.0.0.1:${NOFTS_PORT}`;
 
 async function main() {
-daemon = start(BIN, ["daemon", "--bind", `127.0.0.1:${PORT}`, "--no-cache", "--no-price-sync", "--token", TOKEN], { UNIFLO_HOME: home, UNIFLO_TRASH_DIR: trash });
-start(BIN, ["daemon", "--bind", `127.0.0.1:${RO_PORT}`, "--no-cache", "--no-price-sync", "--read-only", "--token", TOKEN], { UNIFLO_HOME: roHome });
-start(BIN, ["daemon", "--bind", `127.0.0.1:${NOFTS_PORT}`, "--no-cache", "--no-price-sync", "--read-only", "--no-fts", "--token", TOKEN], { UNIFLO_HOME: roHome });
+daemon = start(BIN, ["daemon", "--bind", `127.0.0.1:${PORT}`, "--no-cache", "--no-price-sync", "--token", TOKEN], { UNIFLO_HOME: home, UNIFLO_TRASH_DIR: trash, UNIFLO_NO_TERM_PROBE: "1" });
+start(BIN, ["daemon", "--bind", `127.0.0.1:${RO_PORT}`, "--no-cache", "--no-price-sync", "--read-only", "--token", TOKEN], { UNIFLO_HOME: roHome, UNIFLO_NO_TERM_PROBE: "1" });
+start(BIN, ["daemon", "--bind", `127.0.0.1:${NOFTS_PORT}`, "--no-cache", "--no-price-sync", "--read-only", "--no-fts", "--token", TOKEN], { UNIFLO_HOME: roHome, UNIFLO_NO_TERM_PROBE: "1" });
 const profile = mkdtempSync(join(tmpdir(), "uniflo-e2e-chrome-"));
 try {
   await until(async () => (await fetch(`${api}/v1/health?token=${TOKEN}`)).ok, 15_000, "daemon health");
@@ -1729,7 +1751,7 @@ try {
     for (const transport of ["sse", "ws", "ndjson"]) await runTransport(transport);
     await runCrossOrigin();
   }
-  for (const step of [runHistoryBoundary, runHistoryTop, runIdentity, runIcons, runUsage, runUsageControls, runTree, runUpgrade, runDetail, runTraj, runFts, runSearchHelp, runInsights, runNotify, runVisual, runDesign, runApi, runManage, runReadOnly, runRedact]) {
+  for (const step of [runHistoryBoundary, runHistoryTop, runIdentity, runIcons, runUsage, runUsageControls, runTree, runUpgrade, runDetail, runTraj, runFts, runSearchHelp, runInsights, runNotify, runVisual, runDesign, runApi, runChatComposer, runManage, runReadOnly, runRedact]) {
     if (only.length && !only.includes(step.name)) continue;
     try { await step(); } catch (e) { report(`${step.name}`, false, String(e.message || e)); }
   }

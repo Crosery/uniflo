@@ -52,6 +52,8 @@ impl std::error::Error for MessageError {}
 pub struct InboxQuery {
     /// Exact session key, unique prefix, or `cwd:<dir>`.
     pub to: Option<String>,
+    /// Match messages addressed to OR sent from this session key (two-way conversation view).
+    pub peer: Option<String>,
     /// Match messages addressed to any session whose `cwd` matches this directory.
     pub cwd: Option<String>,
     pub from: Option<String>,
@@ -186,12 +188,77 @@ impl MessageBus {
         if req.text.len() > MAX_MESSAGE_BYTES {
             return Err(MessageError::BadRequest(format!("message text exceeds {} bytes limit", MAX_MESSAGE_BYTES)));
         }
-        let target_sess = resolve_target(engine, &req.to)?;
-        let from = req.from.as_deref().map(str::trim).filter(|s| !s.is_empty()).unwrap_or("anonymous").to_owned();
+        let exclude = req.from.as_deref().map(str::trim).filter(|s| !s.is_empty());
+        let target_sess = resolve_target_excluding(engine, &req.to, exclude)?;
+        let from = exclude.unwrap_or("anonymous").to_owned();
         let kind = req.kind.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned);
         let reply_to = req.reply_to.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned);
         let now = now_ms();
 
+        let msg = self.store_message(from, target_sess.key.clone(), req.text, kind, reply_to, now)?;
+        Ok(SendMessageResponse {
+            message: msg,
+            target: build_target(&target_sess),
+            delivery_channel: None,
+            delivery_detail: None,
+            reply: None,
+        })
+    }
+
+    /// Record a direct reply (e.g. captured from headless wake or live turn completion) onto the bus
+    /// even when the recipient label is non-session (such as `"web-demo"` or `"cli"`).
+    pub fn record_reply(
+        &self,
+        from: &str,
+        to: &str,
+        reply_to: &str,
+        text: String,
+    ) -> Result<AgentMessage, MessageError> {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return Err(MessageError::BadRequest("reply text must not be empty".into()));
+        }
+        let clipped = if text.len() > MAX_MESSAGE_BYTES {
+            let mut s = text;
+            uniflo_schema::clip(&mut s, MAX_MESSAGE_BYTES);
+            s
+        } else {
+            text
+        };
+        let to_clean = to.trim();
+        let to_final = if to_clean.is_empty() { "anonymous" } else { to_clean };
+        self.store_message(
+            from.trim().to_owned(),
+            to_final.to_owned(),
+            clipped,
+            Some("reply".into()),
+            Some(reply_to.to_owned()),
+            now_ms(),
+        )
+    }
+
+    /// Snapshot of unread (`acked_at.is_none()`) message counts keyed by target session key.
+    pub fn unread_counts(&self) -> HashMap<String, usize> {
+        let st = self.store.read().unwrap();
+        let mut counts = HashMap::new();
+        for (target, seqs) in &st.by_target {
+            let n = seqs.iter().filter_map(|seq| st.messages.get(seq)).filter(|m| m.acked_at.is_none()).count();
+            if n > 0 {
+                counts.insert(target.clone(), n);
+            }
+        }
+        counts
+    }
+
+    fn store_message(
+        &self,
+        from: String,
+        to: String,
+        text: String,
+        kind: Option<String>,
+        reply_to: Option<String>,
+        now: i64,
+    ) -> Result<AgentMessage, MessageError> {
         let msg = {
             let _io = self.io_lock.lock().unwrap();
             let mut st = self.store.write().unwrap();
@@ -199,8 +266,8 @@ impl MessageBus {
             let msg = AgentMessage {
                 id: format!("m-{seq}"),
                 from,
-                to: target_sess.key.clone(),
-                text: req.text,
+                to,
+                text,
                 kind,
                 reply_to,
                 created_at: now,
@@ -215,15 +282,18 @@ impl MessageBus {
             st.insert(seq, msg.clone());
             msg
         };
-
         let _ = self.tx.send(Arc::new(msg.clone()));
-        Ok(SendMessageResponse { message: msg, target: build_target(&target_sess) })
+        Ok(msg)
     }
 
     /// Read messages matching `q` from the in-memory index (lock-free w.r.t. disk I/O).
     pub fn inbox(&self, engine: &Engine, q: &InboxQuery) -> Result<InboxResponse, MessageError> {
         let limit = if q.limit == 0 { 50 } else { q.limit.min(500) };
         let resolved_to = match q.to.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            Some(raw) => Some(resolve_inbox_target(engine, raw)?),
+            None => None,
+        };
+        let resolved_peer = match q.peer.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
             Some(raw) => Some(resolve_inbox_target(engine, raw)?),
             None => None,
         };
@@ -260,7 +330,13 @@ impl MessageBus {
             matched.push(m.clone());
         };
 
-        if let Some(key) = &resolved_to {
+        if let Some(peer_key) = &resolved_peer {
+            for m in st.messages.values() {
+                if m.to == *peer_key || m.from == *peer_key {
+                    visit(m);
+                }
+            }
+        } else if let Some(key) = &resolved_to {
             if let Some(seqs) = st.by_target.get(key) {
                 for &seq in seqs {
                     if let Some(m) = st.messages.get(&seq) {
@@ -288,7 +364,7 @@ impl MessageBus {
         if matched.len() > limit {
             matched.drain(..matched.len() - limit);
         }
-        Ok(InboxResponse { to: resolved_to, messages: matched, unread })
+        Ok(InboxResponse { to: resolved_to.or(resolved_peer), messages: matched, unread })
     }
 
     /// Mark specific message IDs or all pending messages for a target as delivered / acknowledged.
@@ -345,6 +421,17 @@ impl MessageBus {
 
 /// Resolve a recipient specifier (`<harness>:<id>`, unique prefix, or `cwd:<dir>` / absolute path).
 pub fn resolve_target(engine: &Engine, raw: &str) -> Result<Arc<Session>, MessageError> {
+    resolve_target_excluding(engine, raw, None)
+}
+
+/// Like [`resolve_target`], but excludes `exclude` (typically the sender's own session key) when
+/// resolving directory-based targets so two sessions sharing a `cwd` never loop messages back to
+/// themselves.
+pub fn resolve_target_excluding(
+    engine: &Engine,
+    raw: &str,
+    exclude: Option<&str>,
+) -> Result<Arc<Session>, MessageError> {
     let raw = raw.trim();
     if raw.is_empty() {
         return Err(MessageError::BadRequest("missing target `to`".into()));
@@ -364,6 +451,12 @@ pub fn resolve_target(engine: &Engine, raw: &str) -> Result<Arc<Session>, Messag
             snap.sorted.iter().filter(|s| s.cwd.as_deref().is_some_and(|c| dir_matches(c, &norm))).collect();
         if matches.is_empty() {
             return Err(MessageError::NotFound(format!("no session found in directory {dir}")));
+        }
+        if let Some(ex) = exclude {
+            let others: Vec<&Arc<Session>> = matches.iter().copied().filter(|s| s.key != ex).collect();
+            if !others.is_empty() {
+                matches = others;
+            }
         }
         // Prefer active Work -> idle with live pid -> newest updated_at (already sorted by updated_at desc).
         matches.sort_by_key(|s| match (s.status, s.pid.is_some()) {
@@ -594,6 +687,7 @@ mod tests {
                     text: "please rebase".into(),
                     kind: Some("task".into()),
                     reply_to: None,
+                    ..Default::default()
                 },
             )
             .unwrap();
@@ -670,5 +764,25 @@ mod tests {
             bus.send(&eng, SendMessageRequest { to: "claude:zzz".into(), text: "hi".into(), ..Default::default() }),
             Err(MessageError::NotFound(_))
         ));
+
+        // Same-cwd routing excludes the sender (`claude:bbb222`, working) and routes to peer `claude:aaa111`.
+        let routed = bus
+            .send(
+                &eng,
+                SendMessageRequest {
+                    to: "cwd:/work/repo".into(),
+                    from: Some("claude:bbb222".into()),
+                    text: "hey neighbor".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(routed.target.key, "claude:aaa111");
+
+        // Two-way `peer` query sees both incoming and outgoing messages for `claude:aaa111`.
+        let reply = bus.record_reply("claude:aaa111", "claude:bbb222", &routed.message.id, "pong".into()).unwrap();
+        let conv = bus.inbox(&eng, &InboxQuery { peer: Some("claude:aaa111".into()), ..Default::default() }).unwrap();
+        assert_eq!(conv.messages.len(), 2);
+        assert_eq!(conv.messages[1].id, reply.id);
     }
 }

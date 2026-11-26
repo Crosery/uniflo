@@ -37,17 +37,23 @@ impl Client {
     }
 
     pub fn get(&self, path: &str) -> Result<Resp<TcpStream>> {
-        self.request("GET", path, None)
+        self.request("GET", path, None, Duration::from_secs(10))
     }
 
-    fn request(&self, method: &str, path: &str, body: Option<&[u8]>) -> Result<Resp<TcpStream>> {
+    fn request(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&[u8]>,
+        read_timeout: Duration,
+    ) -> Result<Resp<TcpStream>> {
         let addr = format!("{}:{}", self.host, self.port);
         let sock = std::net::ToSocketAddrs::to_socket_addrs(&addr)?
             .next()
             .ok_or_else(|| anyhow!(tr!("无法解析 {addr}", "resolve {addr}")))?;
         let mut s = TcpStream::connect_timeout(&sock, Duration::from_millis(300))?;
         s.set_nodelay(true)?;
-        s.set_read_timeout(Some(Duration::from_secs(10)))?;
+        s.set_read_timeout(Some(read_timeout))?;
         s.set_write_timeout(Some(Duration::from_secs(5)))?;
         let auth = self.token.as_ref().map(|t| format!("Authorization: Bearer {t}\r\n")).unwrap_or_default();
         let extra = match (method, body) {
@@ -95,8 +101,19 @@ impl Client {
         path: &str,
         body: Option<&serde_json::Value>,
     ) -> Result<T> {
+        self.write_json_timeout(method, path, body, Duration::from_secs(10))
+    }
+
+    /// Like [`write_json`](Self::write_json), with a custom read timeout (used for `--wait` replies).
+    pub fn write_json_timeout<T: serde::de::DeserializeOwned>(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&serde_json::Value>,
+        read_timeout: Duration,
+    ) -> Result<T> {
         let body = body.map(serde_json::to_vec).transpose()?;
-        let mut r = self.request(method, path, body.as_deref())?;
+        let mut r = self.request(method, path, body.as_deref(), read_timeout)?;
         let raw = r.body()?;
         if r.status != 200 {
             let msg = serde_json::from_slice::<serde_json::Value>(&raw)

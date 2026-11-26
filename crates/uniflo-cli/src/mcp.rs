@@ -13,12 +13,12 @@ use crate::client::Client;
 use crate::{Cli, enc};
 use anyhow::{Result, anyhow};
 use serde_json::{Map, Value, json};
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::{Duration, Instant};
 use uniflo_core::util::{now_ms, preview};
 use uniflo_core::{Engine, EngineOptions};
@@ -36,10 +36,37 @@ const INVALID_REQUEST: i64 = -32600;
 const METHOD_NOT_FOUND: i64 = -32601;
 const INVALID_PARAMS: i64 = -32602;
 
+/// Detect the owning session key from harness-provided environment variables when available.
+fn env_self_key() -> Option<String> {
+    if let Ok(v) = std::env::var("UNIFLO_SESSION_KEY") {
+        let s = v.trim();
+        if !s.is_empty() {
+            return Some(s.to_owned());
+        }
+    }
+    for (var, prefix) in
+        [("ANTIGRAVITY_CONVERSATION_ID", "antigravity"), ("CLAUDE_SESSION_ID", "claude"), ("CODEX_THREAD_ID", "codex")]
+    {
+        if let Ok(v) = std::env::var(var) {
+            let s = v.trim();
+            if !s.is_empty() {
+                return Some(if s.contains(':') { s.to_owned() } else { format!("{prefix}:{s}") });
+            }
+        }
+    }
+    None
+}
+
+fn env_wake_hop() -> Option<u8> {
+    std::env::var("UNIFLO_WAKE_HOP").ok().and_then(|v| v.trim().parse::<u8>().ok())
+}
+
 /// Shared state of the per-process SSE message watchdog bound to `uniflo mcp --message`.
 /// Starts automatically with the MCP server process and shuts down when stdin closes.
 struct Watchdog {
     cwd: Option<String>,
+    self_key: RwLock<Option<String>>,
+    sent_ids: Mutex<HashSet<String>>,
     shutdown: Arc<AtomicBool>,
     initialized: Arc<AtomicBool>,
     subscribed: Arc<AtomicBool>,
@@ -49,8 +76,11 @@ struct Watchdog {
 impl Watchdog {
     fn start(url: String, token: Option<String>, stdout: Arc<Mutex<std::io::Stdout>>) -> Arc<Watchdog> {
         let cwd = std::env::current_dir().ok().map(|p| p.display().to_string());
+        let initial_self = env_self_key();
         let wd = Arc::new(Watchdog {
             cwd: cwd.clone(),
+            self_key: RwLock::new(initial_self),
+            sent_ids: Mutex::new(HashSet::new()),
             shutdown: Arc::new(AtomicBool::new(false)),
             initialized: Arc::new(AtomicBool::new(false)),
             subscribed: Arc::new(AtomicBool::new(false)),
@@ -61,6 +91,48 @@ impl Watchdog {
         wd
     }
 
+    fn self_key(&self) -> Option<String> {
+        self.self_key.read().unwrap().clone()
+    }
+
+    fn set_self_key(&self, key: String) {
+        if key.trim().is_empty() {
+            return;
+        }
+        let mut g = self.self_key.write().unwrap();
+        if g.as_deref() != Some(key.as_str()) {
+            *g = Some(key);
+        }
+    }
+
+    fn remember_sent(&self, id: &str) {
+        if id.is_empty() {
+            return;
+        }
+        let mut g = self.sent_ids.lock().unwrap();
+        if g.len() > 512 {
+            g.clear();
+        }
+        g.insert(id.to_owned());
+        // Purge from queue in case SSE broadcast raced ahead of remember_sent.
+        let mut q = self.queue.0.lock().unwrap();
+        q.retain(|m| m.id != id);
+    }
+
+    /// True iff `msg` is genuinely addressed to this MCP process (never self-sent, never another peer's).
+    fn accepts(&self, msg: &AgentMessage) -> bool {
+        if self.sent_ids.lock().unwrap().contains(&msg.id) {
+            return false;
+        }
+        if let Some(sk) = self.self_key() {
+            if msg.from == sk {
+                return false;
+            }
+            return msg.to == sk;
+        }
+        true
+    }
+
     fn stop(&self) {
         self.shutdown.store(true, Ordering::Relaxed);
         self.queue.1.notify_all();
@@ -68,7 +140,8 @@ impl Watchdog {
 
     fn drain(&self) -> Vec<AgentMessage> {
         let mut q = self.queue.0.lock().unwrap();
-        q.drain(..).collect()
+        let all: Vec<AgentMessage> = q.drain(..).collect();
+        all.into_iter().filter(|m| self.accepts(m)).collect()
     }
 
     fn wait_for(&self, timeout: Duration, filter_to: Option<&str>) -> Vec<AgentMessage> {
@@ -78,6 +151,9 @@ impl Watchdog {
             let mut matched = Vec::new();
             let mut keep = VecDeque::new();
             while let Some(m) = q.pop_front() {
+                if !self.accepts(&m) {
+                    continue;
+                }
                 let hit = match filter_to {
                     Some(t) => m.to == t || m.to.starts_with(t),
                     None => true,
@@ -143,9 +219,12 @@ fn watchdog_stream_once(
         Some((h, p)) => (h.to_owned(), p.parse::<u16>()?),
         None => (hostport.to_owned(), 80),
     };
-    let path = match cwd {
-        Some(c) if !c.is_empty() => format!("/v1/messages/stream?cwd={}", enc(c)),
-        _ => "/v1/messages/stream".to_owned(),
+    let path = match wd.self_key() {
+        Some(sk) => format!("/v1/messages/stream?to={}", enc(&sk)),
+        None => match cwd {
+            Some(c) if !c.is_empty() && c != "/" => format!("/v1/messages/stream?cwd={}", enc(c)),
+            _ => "/v1/messages/stream".to_owned(),
+        },
     };
     let sock = std::net::ToSocketAddrs::to_socket_addrs(&format!("{host}:{port}"))?
         .next()
@@ -179,6 +258,9 @@ fn watchdog_stream_once(
                 if let Some(data) = line.trim_end().strip_prefix("data:")
                     && let Ok(msg) = serde_json::from_str::<AgentMessage>(data.trim_start())
                 {
+                    if !wd.accepts(&msg) {
+                        continue;
+                    }
                     {
                         let mut q = wd.queue.0.lock().unwrap();
                         if q.len() >= 100 {
@@ -417,6 +499,7 @@ impl Server {
             "uniflo_memory" => self.memory(&a)?,
             "uniflo_context" => self.context(&a)?,
             "uniflo_status" => self.status()?,
+            "uniflo_peers" if self.message => self.peers(&a)?,
             "uniflo_send_message" if self.message => self.send_message(&a)?,
             "uniflo_inbox" if self.message => self.inbox(&a)?,
             "uniflo_ack_messages" if self.message => self.ack_messages(&a)?,
@@ -427,12 +510,18 @@ impl Server {
             self.noted = true;
             out.text = format!("{LOCAL_NOTE}\n\n{}", out.text);
         }
-        // Piggyback any pending SSE watchdog messages onto non-inbox tool replies (works for ALL MCP harnesses!).
+        // Piggyback pending SSE watchdog messages onto read-only tool replies ONLY when we know
+        // our exact session key (preventing same-cwd peers in `~` from stealing each other's
+        // `delivered_at` flag!).
         if self.message
-            && !matches!(name, "uniflo_inbox" | "uniflo_wait_message")
+            && !matches!(
+                name,
+                "uniflo_peers" | "uniflo_send_message" | "uniflo_inbox" | "uniflo_ack_messages" | "uniflo_wait_message"
+            )
             && let Some(wd) = &self.watchdog
+            && let Some(sk) = wd.self_key()
         {
-            let pending = wd.drain();
+            let pending: Vec<AgentMessage> = wd.drain().into_iter().filter(|m| m.to == sk).collect();
             if !pending.is_empty() {
                 let ids: Vec<String> = pending.iter().map(|m| m.id.clone()).collect();
                 let _ = self.daemon_write("/v1/messages/ack", json!({ "ids": ids, "state": "delivered" }));
@@ -1007,11 +1096,15 @@ impl Server {
     }
 
     fn daemon_write(&self, path: &str, body: Value) -> Result<Value, String> {
+        self.daemon_write_timeout(path, body, Duration::from_secs(10))
+    }
+
+    fn daemon_write_timeout(&self, path: &str, body: Value, timeout: Duration) -> Result<Value, String> {
         if self.local_only {
             return Err("cross-agent messaging requires a running uniflo daemon (not --local)".into());
         }
         let c = Client::new(&self.url, self.token.clone()).map_err(|e| format!("{e:#}"))?;
-        c.write_json::<Value>("POST", path, Some(&body))
+        c.write_json_timeout::<Value>("POST", path, Some(&body), timeout)
             .map_err(|e| format!("{e:#} (is `uniflo daemon` running at {}?)", self.url))
     }
 
@@ -1023,21 +1116,112 @@ impl Server {
         c.get_json::<Value>(path).map_err(|e| format!("{e:#} (is `uniflo daemon` running at {}?)", self.url))
     }
 
+    /// Resolve this MCP server's own owning session key (env first, then daemon PID ancestry lookup).
+    fn resolve_self_key(&self) -> Option<String> {
+        if let Some(sk) = self.watchdog.as_ref().and_then(|w| w.self_key()).or_else(env_self_key) {
+            return Some(sk);
+        }
+        let pid = std::process::id();
+        if let Ok(v) = self.daemon_get(&format!("/v1/messages/peers?pid={pid}&limit=1"))
+            && let Some(sk) = v["self_key"].as_str().filter(|s| !s.is_empty())
+        {
+            if let Some(wd) = &self.watchdog {
+                wd.set_self_key(sk.to_owned());
+            }
+            return Some(sk.to_owned());
+        }
+        None
+    }
+
+    fn peers(&mut self, a: &Args) -> Result<Out, RpcError> {
+        let limit = a.int("limit", 1, 100, 20)?;
+        let pid = std::process::id();
+        let mut qs = vec![format!("pid={pid}"), format!("limit={limit}")];
+        if let Some(sk) = self.watchdog.as_ref().and_then(|w| w.self_key()).or_else(env_self_key) {
+            qs.push(format!("self={}", enc(&sk)));
+        }
+        Ok(match self.daemon_get(&format!("/v1/messages/peers?{}", qs.join("&"))) {
+            Ok(v) => {
+                if let Some(sk) = v["self_key"].as_str().filter(|s| !s.is_empty())
+                    && let Some(wd) = &self.watchdog
+                {
+                    wd.set_self_key(sk.to_owned());
+                }
+                let list = v["peers"].as_array().cloned().unwrap_or_default();
+                let mut text = String::new();
+                if let Some(sk) = v["self_key"].as_str().filter(|s| !s.is_empty()) {
+                    let _ = writeln!(text, "self: {sk}");
+                }
+                let _ = write!(text, "{} reachable peers · key|harness|title|status|channel|cwd|unread", list.len());
+                for p in &list {
+                    let key = p["key"].as_str().unwrap_or("");
+                    let harness = p["harness"].as_str().unwrap_or("");
+                    let title = p["title"].as_str().unwrap_or("(untitled)");
+                    let status = p["status"].as_str().unwrap_or("?");
+                    let ch = match (p["channel"].as_str(), p["terminal"].as_str()) {
+                        (Some(c), Some(t)) => format!("{c}:{t}"),
+                        (Some(c), None) => c.to_owned(),
+                        _ => "inbox".to_owned(),
+                    };
+                    let cwd = p["cwd"].as_str().map(crate::render::short_path).unwrap_or_else(|| "-".into());
+                    let unread = p["unread"].as_u64().unwrap_or(0);
+                    let _ =
+                        write!(text, "\n- {key}|{harness}|{}|{status}|{ch}|{cwd}|{unread}", cell(&preview(title, 56)));
+                }
+                if !list.is_empty() {
+                    text.push_str("\nTip: call uniflo_send_message(to=<key>, text=..., wait_secs=45) to send, wake without hooks, and get the peer's reply in one call.");
+                }
+                Out::ok(text, v)
+            }
+            Err(e) => Out::error(e),
+        })
+    }
+
     fn send_message(&mut self, a: &Args) -> Result<Out, RpcError> {
         let to = a.req_str("to")?;
         let text = a.req_str("text")?;
-        let from = a.str("from")?;
+        let auto_from = a.str("from")?.map(str::to_owned).or_else(|| self.resolve_self_key());
         let kind = a.str("kind")?;
         let reply_to = a.str("reply_to")?;
-        let body = json!({ "to": to, "from": from, "text": text, "kind": kind, "reply_to": reply_to });
-        Ok(match self.daemon_write("/v1/messages", body) {
+        let wake = a.bool("wake", true)?;
+        let deliver =
+            a.str("deliver")?.map(str::to_owned).unwrap_or_else(|| if wake { "auto".into() } else { "inbox".into() });
+        let wait_secs = a.opt_int("wait_secs", 1, 90)?.map(|n| n as u64);
+        let hop = a.opt_int("hop", 0, 10)?.map(|n| n as u8).or_else(env_wake_hop);
+
+        let mut body = json!({
+            "to": to,
+            "from": auto_from,
+            "text": text,
+            "kind": kind,
+            "reply_to": reply_to,
+            "deliver": deliver,
+        });
+        if let Some(w) = wait_secs {
+            body["wait_secs"] = json!(w);
+        }
+        if let Some(h) = hop {
+            body["hop"] = json!(h);
+        }
+        let timeout = Duration::from_secs(wait_secs.map_or(15, |w| w.saturating_add(20)));
+        Ok(match self.daemon_write_timeout("/v1/messages", body, timeout) {
             Ok(v) => {
                 let id = v["message"]["id"].as_str().unwrap_or("");
+                if let Some(wd) = &self.watchdog {
+                    wd.remember_sent(id);
+                }
                 let target = v["target"]["key"].as_str().unwrap_or(to);
                 let status = v["target"]["status"].as_str().unwrap_or("?");
-                let delivery = v["target"]["delivery"].as_str().unwrap_or("?");
-                let mut summary = format!("sent {id} -> {target} ({status}, delivery={delivery})");
-                if delivery == "resume"
+                let channel =
+                    v["delivery_channel"].as_str().or_else(|| v["target"]["delivery"].as_str()).unwrap_or("inbox");
+                let mut summary = format!("sent {id} -> {target} ({status}, channel={channel})");
+                if let Some(detail) = v["delivery_detail"].as_str().filter(|s| !s.is_empty()) {
+                    let _ = write!(summary, "\n{detail}");
+                }
+                if let Some(reply_text) = v["reply"]["text"].as_str().filter(|s| !s.is_empty()) {
+                    let rid = v["reply"]["id"].as_str().unwrap_or("");
+                    let _ = write!(summary, "\nreply [{rid}] from {target}:\n{reply_text}");
+                } else if channel == "inbox"
                     && let Some(cmd) = v["target"]["resume_command"].as_str()
                 {
                     let _ = write!(summary, "\nresume command (not executed): {cmd}");
@@ -1049,14 +1233,15 @@ impl Server {
     }
 
     fn inbox(&mut self, a: &Args) -> Result<Out, RpcError> {
-        let to = a.str("to")?;
+        let to_arg = a.str("to")?.map(str::to_owned);
         let cwd = a.str("cwd")?;
         let from = a.str("from")?;
+        let to = if to_arg.is_none() && cwd.is_none() && from.is_none() { self.resolve_self_key() } else { to_arg };
         let unread = a.bool("unread", true)?;
         let undelivered = a.bool("undelivered", false)?;
         let limit = a.int("limit", 1, 200, 50)?;
         let mut qs = vec![format!("limit={limit}")];
-        if let Some(t) = to {
+        if let Some(ref t) = to {
             qs.push(format!("to={}", enc(t)));
         }
         if let Some(c) = cwd {
@@ -1118,7 +1303,7 @@ impl Server {
     }
 
     fn wait_message(&mut self, a: &Args) -> Result<Out, RpcError> {
-        let to = a.str("to")?.map(str::to_owned);
+        let to = a.str("to")?.map(str::to_owned).or_else(|| self.resolve_self_key());
         let cwd = a
             .str("cwd")?
             .map(str::to_owned)
@@ -1231,10 +1416,11 @@ fn initialize(params: &Value, message: bool) -> Value {
         .to_owned();
     if message {
         instructions.push_str(
-            " Optional cross-agent messaging + per-process SSE watchdog is enabled: send messages with uniflo_send_message \
-             (to=<key|prefix|cwd:<dir>>), read pending messages with uniflo_inbox (or resource uniflo://inbox), block for \
-             real-time replies with uniflo_wait_message, and mark read with uniflo_ack_messages. Incoming messages for this \
-             working directory are also pushed as MCP notifications and appended to tool results automatically.",
+            " Cross-agent messaging (zero-hook active delivery + SSE watchdog) is enabled: \
+             call uniflo_peers first to see your own session key (`self`) and reachable peers with their delivery channels \
+             (herdr/tmux live terminal injection or official headless resume), then call uniflo_send_message(to=<key>, text=..., wait_secs=45) \
+             to deliver, wake an idle peer automatically without hooks, and receive their reply inline in one call. \
+             Use uniflo_inbox, uniflo_wait_message, or uniflo_ack_messages to manage messages addressed to you.",
         );
     }
     let capabilities = if message {
@@ -1854,14 +2040,26 @@ fn tools(message: bool) -> Vec<Value> {
         ),
     ];
     if message {
+        list.push(tool(
+            "uniflo_peers",
+            "List reachable peers",
+            "Discover your own session key (`self`) and other reachable local agent sessions with their zero-hook delivery channel (herdr, tmux, resume_wake, inbox). Call this first before messaging another agent.",
+            json!({
+                "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 },
+            }),
+            &[],
+        ));
         list.push(tool_with(
             "uniflo_send_message",
             "Send message to another session",
-            "Send a message through Uniflo's local message bus to another local agent session (by key, unique prefix, or cwd:<dir>). Returns delivery hint and resume command if offline.",
+            "Send a message to another local agent session (by key, unique prefix, or cwd:<dir>). By default (`wake: true`), Uniflo actively delivers without hooks via Herdr/tmux live injection or official headless resume; pass `wait_secs` (e.g. 45) to receive the peer's reply inline in one call.",
             json!({
-                "to": { "type": "string", "description": "Recipient session key (claude:<id>), unique prefix, or cwd:<dir> / absolute path" },
+                "to": { "type": "string", "description": "Recipient session key (from uniflo_peers), unique prefix, or cwd:<dir>" },
                 "text": { "type": "string", "description": "Message body (max 64 KiB)" },
-                "from": { "type": "string", "description": "Sender session key or label" },
+                "from": { "type": "string", "description": "Optional sender session key (auto-detected from process/env when omitted)" },
+                "wake": { "type": "boolean", "default": true, "description": "Actively wake idle peers without hooks (Herdr/tmux live injection -> official headless resume). Set false for inbox-only." },
+                "deliver": { "type": "string", "enum": ["auto", "wake", "inbox"], "description": "Explicit delivery mode override (default: auto when wake=true, else inbox)" },
+                "wait_secs": { "type": "integer", "minimum": 1, "maximum": 90, "description": "Wait inline up to this many seconds for the peer's reply and return it directly" },
                 "kind": { "type": "string", "description": "Optional tag (e.g. task, reply, status)" },
                 "reply_to": { "type": "string", "description": "Optional message id being replied to" },
             }),
@@ -2015,7 +2213,7 @@ mod tests {
         );
         assert_eq!(denied["error"]["code"], -32602);
 
-        // Opt-in `--message` server exposes the 4 messaging tools + inbox resource with accurate readOnlyHint.
+        // Opt-in `--message` server exposes the 5 messaging tools + inbox resource with accurate readOnlyHint.
         let mut on = Server::new("http://127.0.0.1:9".into(), None, true, true);
         let init = call(&mut on, r#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{}}"#);
         assert_eq!(init["result"]["capabilities"]["resources"]["subscribe"], true);
@@ -2023,7 +2221,9 @@ mod tests {
         assert_eq!(res["result"]["resources"][0]["uri"], "uniflo://inbox");
         let list = call(&mut on, r#"{"jsonrpc":"2.0","id":3,"method":"tools/list"}"#);
         let tools = list["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 14);
+        assert_eq!(tools.len(), 15);
+        let peers = tools.iter().find(|t| t["name"] == "uniflo_peers").unwrap();
+        assert_eq!(peers["annotations"]["readOnlyHint"], true);
         let send = tools.iter().find(|t| t["name"] == "uniflo_send_message").unwrap();
         assert_eq!(send["annotations"]["readOnlyHint"], false);
         let inbox = tools.iter().find(|t| t["name"] == "uniflo_inbox").unwrap();

@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, IsTerminal, Read, Write};
 use std::net::TcpStream;
 use std::time::Duration;
-use uniflo_schema::{AckMessagesResponse, AgentMessage, InboxResponse, SendMessageResponse};
+use uniflo_schema::{AckMessagesResponse, AgentMessage, InboxResponse, PeersResponse, SendMessageResponse};
 
 #[derive(Args)]
 pub struct MessageArgs {
@@ -19,6 +19,13 @@ pub struct MessageArgs {
 
 #[derive(Subcommand)]
 pub enum MessageAction {
+    /// List reachable local agent peers and their zero-hook delivery channels (herdr, tmux, resume_wake).
+    Peers {
+        #[arg(short = 'n', long, default_value_t = 20)]
+        limit: usize,
+        #[arg(long)]
+        json: bool,
+    },
     /// Send a message to another local agent session (by key, unique prefix, or `cwd:<dir>`).
     Send {
         /// Recipient session key (`claude:<id>`), unique prefix, or `cwd:<dir>` / path.
@@ -26,9 +33,18 @@ pub enum MessageAction {
         /// Message text.
         #[arg(required = true)]
         text: Vec<String>,
-        /// Sender session key or label.
+        /// Sender session key or label (auto-detected from harness env when omitted).
         #[arg(long)]
         from: Option<String>,
+        /// Force active wake (Herdr/tmux live injection or official headless resume).
+        #[arg(long)]
+        wake: bool,
+        /// Store in inbox & SSE only; do not wake or inject into target terminal.
+        #[arg(long, conflicts_with = "wake")]
+        no_wake: bool,
+        /// Wait inline up to N seconds (1-90) for the target session's reply.
+        #[arg(long)]
+        wait: Option<u64>,
         /// Optional message kind tag.
         #[arg(long)]
         kind: Option<String>,
@@ -99,29 +115,101 @@ pub enum MessageAction {
     },
 }
 
+fn env_self_key() -> Option<String> {
+    if let Ok(v) = std::env::var("UNIFLO_SESSION_KEY") {
+        let s = v.trim();
+        if !s.is_empty() {
+            return Some(s.to_owned());
+        }
+    }
+    for (var, prefix) in
+        [("ANTIGRAVITY_CONVERSATION_ID", "antigravity"), ("CLAUDE_SESSION_ID", "claude"), ("CODEX_THREAD_ID", "codex")]
+    {
+        if let Ok(v) = std::env::var(var) {
+            let s = v.trim();
+            if !s.is_empty() {
+                return Some(if s.contains(':') { s.to_owned() } else { format!("{prefix}:{s}") });
+            }
+        }
+    }
+    None
+}
+
 pub fn run(cli: &Cli, a: &MessageArgs) -> Result<()> {
     match &a.action {
-        MessageAction::Send { to, text, from, kind, reply_to, json } => {
+        MessageAction::Peers { limit, json } => {
             let c = Client::new(&cli.url, cli.token.clone())?;
-            let body = json!({
-                "to": to,
-                "from": from,
-                "text": text.join(" "),
-                "kind": kind,
-                "reply_to": reply_to,
-            });
-            let resp: SendMessageResponse = c.write_json("POST", "/v1/messages", Some(&body))?;
+            let pid = std::process::id();
+            let mut qs = vec![format!("pid={pid}"), format!("limit={limit}")];
+            if let Some(sk) = env_self_key() {
+                qs.push(format!("self={}", enc(&sk)));
+            }
+            let resp: PeersResponse = c.get_json(&format!("/v1/messages/peers?{}", qs.join("&")))?;
             if *json {
                 println!("{}", serde_json::to_string(&resp)?);
             } else {
+                if let Some(sk) = &resp.self_key {
+                    println!("self: {sk}");
+                }
+                if resp.peers.is_empty() {
+                    println!("{}", tr!("没有其他可对话的会话", "no reachable peers"));
+                } else {
+                    for p in &resp.peers {
+                        let ch = match &p.terminal {
+                            Some(t) => format!("{}:{t}", p.channel),
+                            None => p.channel.clone(),
+                        };
+                        let title = p.title.as_deref().unwrap_or("(untitled)");
+                        let cwd = p.cwd.as_deref().map(crate::render::short_path).unwrap_or_else(|| "-".into());
+                        println!("{}  [{}]  {}  {ch}  {cwd}  {title}", p.key, p.status.as_str(), p.harness);
+                    }
+                }
+            }
+            Ok(())
+        }
+        MessageAction::Send { to, text, from, wake, no_wake, wait, kind, reply_to, json } => {
+            let c = Client::new(&cli.url, cli.token.clone())?;
+            let deliver = if *no_wake {
+                "inbox"
+            } else if *wake {
+                "wake"
+            } else {
+                "auto"
+            };
+            let resolved_from = from.clone().or_else(env_self_key);
+            let hop = std::env::var("UNIFLO_WAKE_HOP").ok().and_then(|v| v.trim().parse::<u8>().ok());
+            let mut body = json!({
+                "to": to,
+                "from": resolved_from,
+                "text": text.join(" "),
+                "kind": kind,
+                "reply_to": reply_to,
+                "deliver": deliver,
+            });
+            if let Some(w) = wait {
+                body["wait_secs"] = json!((*w).clamp(1, 90));
+            }
+            if let Some(h) = hop {
+                body["hop"] = json!(h);
+            }
+            let timeout = Duration::from_secs(wait.map_or(15, |w| w.clamp(1, 90).saturating_add(20)));
+            let resp: SendMessageResponse = c.write_json_timeout("POST", "/v1/messages", Some(&body), timeout)?;
+            if *json {
+                println!("{}", serde_json::to_string(&resp)?);
+            } else {
+                let channel = resp.delivery_channel.as_deref().unwrap_or(&resp.target.delivery);
                 println!(
-                    "{} -> {} ({}, delivery={})",
+                    "{} -> {} ({}, channel={channel})",
                     resp.message.id,
                     resp.target.key,
                     resp.target.status.as_str(),
-                    resp.target.delivery
                 );
-                if resp.target.delivery == "resume"
+                if let Some(detail) = &resp.delivery_detail {
+                    println!("  {detail}");
+                }
+                if let Some(reply) = &resp.reply {
+                    println!("\n[{} {}]\n{}", reply.id, reply.from, reply.text);
+                } else if channel == "inbox"
                     && let Some(cmd) = &resp.target.resume_command
                 {
                     println!("{}{cmd}", tr!("恢复唤醒命令：", "resume command: "));

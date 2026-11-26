@@ -21,6 +21,7 @@ pub mod archive;
 pub mod cache;
 pub mod cleanup;
 pub mod context;
+pub mod deliver;
 pub mod engine;
 pub mod family;
 pub mod install;

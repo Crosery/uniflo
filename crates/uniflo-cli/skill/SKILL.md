@@ -85,7 +85,9 @@ If `uniflo setup --message` is enabled, any harness (MCP or Skill-only) can exch
 through the local daemon without touching other harnesses' session files:
 
 ```sh
-uniflo message send <key|prefix|cwd:/path> "message text" --from <my-key>
+uniflo message peers                                # list reachable peers + self key + zero-hook channel
+uniflo message send <key|prefix|cwd:/path> "message text" --wait 45   # send, wake without hooks, and print reply
+uniflo message send <key|prefix> "note" --no-wake   # inbox + SSE only (do not wake idle session)
 uniflo message inbox --to <my-key>                  # unread messages (or --cwd "$PWD")
 uniflo message ack <m-1>                            # mark acknowledged (or --to <my-key>)
 uniflo message watch --cwd "$PWD"                   # zero-polling SSE stream

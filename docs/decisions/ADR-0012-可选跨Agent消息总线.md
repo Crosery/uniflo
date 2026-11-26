@@ -16,19 +16,25 @@ Uniflo 已经以单守护进程维护全机所有会话的实时索引（`key`�
    - 守护进程持有内存 `RwLock` 索引 + `tokio::sync::broadcast` 实时推送通道，持久化使用追加写 NDJSON 日志 `<数据目录>/messages/log.jsonl`（最多保留最近 10,000 条，启动重放并在冗余翻倍时自动压缩），不新增外部依赖。
    - **零开销懒创建**：只要从未发送过消息，不创建 `messages/` 目录和日志文件。
    - 收件目标支持精确会话 key、唯一 key/id 前缀、或 `cwd:<目录>` / 目录路径（优先命中该目录下 `work` 会话，其次存活 `idle` 会话，再其次最近会话），并返回按目标当前状态判定的投递提示（`hook` / `pty_or_hook` / `resume`）及恢复命令。
-2. **严格保持 harness 会话数据只读**：
-   - 消息绝不写入任何 harness 的 transcript 文件或数据库。
-   - 工作中会话由各 harness 原生 Hook（`uniflo message hook`）在工具/回合边界毫秒拉取未投递消息并输出 `<uniflo-messages>` 注入上下文，无未读时完全静默零输出；存活空闲或离线会话可由外部编排器（如 Herdr）订阅 `GET /v1/messages/stream` SSE 实时流，或按响应自带的 `resume_command` 显式唤醒。
+2. **零 Hook 主动投递引擎（`uniflo-core::deliver`）+ 严格保持 harness 会话数据只读**：
+   - 消息绝不直接改写任何 harness 的 transcript 文件或数据库。
+   - 当发信请求携带 `deliver: "auto" | "wake"` 且未达到服务端防循环跳数上限（`MAX_AUTO_WAKE_HOPS = 2`）时，无需安装任何 Hook 即可打通空闲与在线会话的真实对话：
+     1. **Herdr 活终端直推**：通过 `session.pid` 进程树反查（或唯一 `cwd + harness` 匹配）定位目标活终端，先检屏避开权限确认弹窗，再经 `herdr-core send` 毫秒级注入活终端输入区；
+     2. **tmux 活窗格直推**：按 `session.pid` 匹配 `tmux list-panes` 窗格，检屏安全后通过 `tmux send-keys` 注入；
+     3. **官方无头原上下文续跑**：目标不在活终端（或窗口已关）时，用各家官方校验过的无头命令（`agy -r=<id> -p=…`、`claude -p --resume <id>`、`codex exec resume <id>`、`opencode run -s <id>`、`omp -p -r <id>`、`pi -p --session <id>`、`gemini -r <id> -p …` 等，严格经 `resume::valid_id` 防参数注入）在原会话上下文唤醒续跑；回复自动写回同一会话文件并记录到消息总线。
+   - 若调用方传入 `wait_secs`，网关在投递前即同时订阅消息总线与 `Engine` 实时事件流，对方无论回复在消息总线还是直接输出到会话正文（`AssistantMessage` + `TurnEnd`），都会自动捕获并内联返回给发信方（实现完全零 Hook 的单次调用问答）。
+   - `uniflo mcp --message` 进程启动时按环境变量与祖先 PID（`/v1/messages/peers?pid=…`）自动识别自身 `self_key`，发信自动补 `from`、按目录寻址自动排除发信方自身、看门狗精确过滤自身消息与已发 ID，彻底杜绝同目录（如 `~`）多会话互相截胡 `delivered_at`。
+   - 原生 Hook（`uniflo message hook`）降级为可选增强：仅用于在工作中的会话工具边界顺带注入消息，不再是跨 Agent 对话的必要前提。
 3. **网关路由与写守卫（`uniflo-gateway::message`）**：
-   - 读接口：`GET /v1/messages`（查收件箱）、`GET /v1/messages/stream`（SSE 实时推送）。
-   - 写接口：`POST /v1/messages`（发信）、`POST /v1/messages/ack`（标记已投递/已读）；全部自动经 `uniflo-gateway::write::check` 校验回环 Host/Origin、`X-Uniflo-Write: 1` 与可选 token，`--read-only` 时一律 403。
+   - 读接口：`GET /v1/messages`（支持 `peer` 双向查询）、`GET /v1/messages/peers`（按 `pid` 反查 `self_key` 并返回同事可达通道）、`GET /v1/messages/stream`（SSE 实时推送）。
+   - 写接口：`POST /v1/messages`（发信 + 可选零 Hook 唤醒）、`POST /v1/messages/ack`（标记已投递/已读）；全部自动经 `uniflo-gateway::write::check` 校验回环 Host/Origin、`X-Uniflo-Write: 1` 与可选 token，`--read-only` 时一律 403。
 4. **`uniflo setup` 默认关闭，显式按需启用（扩展 ADR-0007）**：
    - 默认运行 `uniflo setup`（含 `--mcp` / `--skill` / `--both`）**不启用**消息功能：MCP 条目仍注册纯只读的 `<uniflo> mcp`（仅 10 个 `readOnlyHint: true` 工具），不写任何消息 Hook。
    - 仅当用户显式传 `--message` 或在交互提问（默认「否」）/ 升级新功能提示中确认开启时：
-     - **全 MCP 进程级 SSE 看门狗（21 个 MCP harness 通用）**：MCP 条目注册 `<uniflo> mcp --message`，每个 agent 启动时都会绑定一个随进程同生共死的轻量 SSE 看门狗线程（直连 `/v1/messages/stream?cwd=…`，零轮询、不扫盘、不争抢索引锁），实时推送 JSON-RPC `notifications/message` 与 `uniflo://inbox` 资源更新，并在工具返回尾部自动顺带投递未读消息；额外暴露 4 个工具：`uniflo_send_message`、`uniflo_inbox`、`uniflo_ack_messages`、`uniflo_wait_message`（阻塞等待回复，毫秒级唤醒）。
-     - **全量原生静默拉取 Hook（10 个支持声明式 Hook 的 harness）**：按各家真实格式自动写入 `uniflo message hook --harness <id> 2>/dev/null || true`，覆盖 `claude`、`codex`（`~/.codex/hooks.json`）、`gemini`（`~/.gemini/settings.json`）、`antigravity`（`~/.gemini/config/hooks.json` 的独立 `uniflo` 命名空间）、`codebuddy`、`qoder`、`workbuddy`、`commandcode`、`reasonix`、`devin`（改前备份、原子写、不碰用户自有条目）。
-     - **Skill 兜底（剩余 12 个无 MCP / 无 Hook harness）**：内置 `SKILL.md` 附带 `uniflo message send|inbox|ack|watch` 规范。
-   - 写入状态记录在 `<配置目录>/setup.json`（`message`、`message_hooks`、`seen_features`），`uniflo setup --uninstall` 对称清理，`--reload` 与升级后的 `--after-update` 自动刷新已有条目并补接新检测到的 harness，仅在出现尚未见过的重大新功能时才询问一次。
+     - **全 MCP 进程级 SSE 看门狗 + 一键同事发现与对话（21 个 MCP harness 通用）**：MCP 条目注册 `<uniflo> mcp --message`，额外暴露 5 个工具：`uniflo_peers`、`uniflo_send_message`（默认 `wake: true`，支持 `wait_secs` 一键发信唤醒并收回执）、`uniflo_inbox`、`uniflo_ack_messages`、`uniflo_wait_message`（共 15 工具）。
+     - **可选原生静默拉取 Hook（10 个支持声明式 Hook 的 harness）**：按各家真实格式自动写入 `uniflo message hook --harness <id> 2>/dev/null || true`（改前备份、原子写、对称撤销）。
+     - **Skill 兜底（剩余 12 个无 MCP / 无 Hook harness）**：内置 `SKILL.md` 附带 `uniflo message peers|send|inbox|ack|watch` 规范。
+   - 网页控制台 `/demo` 在非只读、未归档会话的「对话」页底部提供参照 Herdr Pocket 风格的悬浮输入卡，支持直接发消息、实时切换「自动唤醒 / 仅收件箱」并即时展示投递通道与回复流。
 
 ## 否决项
 

@@ -546,7 +546,44 @@ tr.r-note td { height: 30px; color: var(--text-3); text-align: left; }
 #newer { margin: 18px auto 0; }
 #newer.fresh { color: var(--accent); border-color: var(--accent-border); }
 #newer:hover { background: var(--hover); color: var(--text); }
-.working-line { max-width: 800px; margin: 0 auto; padding: 0 32px 72px; display: flex; align-items: center; gap: 8px; font-size: var(--fs-sm); }
+.working-line { max-width: 800px; margin: 0 auto; padding: 0 32px 24px; display: flex; align-items: center; gap: 8px; font-size: var(--fs-sm); }
+
+/* Herdr-Pocket-inspired docked chat composer & inline message-bus cards */
+.chat-composer-shell { flex: none; width: 100%; max-width: 800px; margin: 0 auto; padding: 6px 32px 16px; container-type: inline-size; container-name: composer; }
+.composer-card { display: flex; flex-direction: column; gap: 6px; padding: 10px 12px 8px; border-radius: 18px; background: color-mix(in srgb, var(--bg-raised) 94%, var(--bg-side)); backdrop-filter: blur(12px); border: 1px solid var(--border-2); box-shadow: 0 4px 20px light-dark(rgba(16, 24, 40, .06), rgba(0, 0, 0, .28)); transition: border-color var(--dur), box-shadow var(--dur), background var(--dur); }
+.composer-card:focus-within { border-color: var(--accent-border); box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 24%, transparent), 0 8px 24px light-dark(rgba(16, 24, 40, .08), rgba(0, 0, 0, .4)); }
+.composer-card.is-busy { border-color: color-mix(in srgb, var(--work) 42%, var(--border-2)); }
+.composer-input-wrap { display: flex; align-items: stretch; width: 100%; min-width: 0; }
+.composer-input-wrap textarea { width: 100%; flex: 1; min-width: 0; border: 0; background: transparent; outline: none; resize: none; height: 34px; min-height: 34px; max-height: 180px; padding: 5px 4px; margin: 0; font: var(--fs-base)/1.55 var(--font-sans); color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; overflow-x: hidden; overflow-y: hidden; }
+.composer-input-wrap textarea::placeholder { color: var(--text-3); }
+.composer-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 32px; min-width: 0; padding-top: 2px; }
+.composer-tools { display: flex; align-items: center; gap: 6px; flex: 1 1 0; min-width: 0; overflow: hidden; }
+.composer-actions { display: flex; align-items: center; gap: 6px; flex: none; }
+.composer-chip { display: inline-flex; align-items: center; gap: 5px; height: 26px; padding: 0 9px; border-radius: 999px; border: 1px solid var(--border-2); background: var(--bg-side); color: var(--text-2); font-size: var(--fs-2xs); font-weight: 500; white-space: nowrap; max-width: 210px; overflow: hidden; text-overflow: ellipsis; flex: 0 1 auto; }
+.composer-chip.live { border-color: color-mix(in srgb, var(--work) 36%, transparent); background: var(--work-bg); color: var(--work); }
+.composer-chip svg.i { width: 12px; height: 12px; flex: none; }
+.composer-mode-btn { display: inline-flex; align-items: center; gap: 5px; height: 26px; padding: 0 9px; border-radius: 999px; border: 1px solid var(--border-2); background: var(--bg-side); color: var(--text-2); font-size: var(--fs-2xs); font-weight: 500; white-space: nowrap; flex: none; transition: background var(--dur), color var(--dur), border-color var(--dur); }
+.composer-mode-btn:hover { background: var(--hover); color: var(--text); border-color: var(--border-strong); }
+.composer-mode-btn.on { background: var(--accent-bg); border-color: var(--accent-border); color: var(--accent); }
+.composer-mode-btn svg.i { width: 12px; height: 12px; flex: none; }
+.composer-hint { font-size: var(--fs-2xs); color: var(--text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.composer-send { width: 32px; height: 32px; min-width: 32px; padding: 0; border-radius: 50%; border: 0; background: var(--accent-solid); color: var(--on-solid); display: inline-grid; place-items: center; flex: none; box-shadow: 0 1px 3px rgba(0, 0, 0, .18); transition: background var(--dur), transform var(--dur), opacity var(--dur); }
+.composer-send:hover:not(:disabled) { background: var(--accent-solid-hover); transform: translateY(-0.5px); }
+.composer-send:disabled { opacity: .4; cursor: default; transform: none; box-shadow: none; }
+.composer-send svg.i { width: 15px; height: 15px; }
+@container composer (max-width: 480px) { .composer-hint { display: none; } }
+
+/* Inline bus messages shown seamlessly inside #thread */
+.k-bus_msg { display: flex; flex-direction: column; gap: 4px; margin: 16px 0 6px; }
+.k-bus_msg.out { align-items: flex-end; }
+.k-bus_msg.in { align-items: flex-start; }
+.bus-bubble { max-width: 84%; padding: 10px 14px; border-radius: 16px 16px 5px 16px; background: var(--accent-bg); color: var(--text); font-size: var(--fs-base); line-height: 1.6; white-space: pre-wrap; word-break: break-word; box-shadow: inset 0 0 0 1px var(--accent-border); }
+.k-bus_msg.in .bus-bubble { border-radius: 16px 16px 16px 5px; background: var(--bg-side); box-shadow: inset 0 0 0 1px var(--border-2); }
+.bus-meta { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: var(--fs-2xs); color: var(--text-3); padding: 0 4px; }
+.bus-meta .btag { display: inline-flex; align-items: center; gap: 4px; padding: 1px 7px; border-radius: 999px; background: var(--hover); color: var(--text-2); font-weight: 500; }
+.bus-meta .btag.ok { background: var(--work-bg); color: var(--work); }
+.bus-meta .btag.acc { background: var(--accent-bg); color: var(--accent); }
+.bus-meta .btag.warn { background: var(--warn-bg); color: var(--warn); }
 .ev { position: relative; }
 .ev.enter { animation: enter 240ms var(--ease); }
 .ev + .ev { margin-top: 14px; }
@@ -1154,8 +1191,10 @@ body.redact .txt, body.redact pre, body.redact .md, body.redact .snip, body.reda
   .ch-meta { gap: 4px 10px; }
   .ch-actions { gap: 2px; }
   #resume-btn span { display: none; }
-  #thread { padding: 16px 14px 24px; }
-  .working-line { padding: 0 14px 48px; }
+  #thread { padding: 16px 14px 20px; }
+  .working-line { padding: 0 14px 16px; }
+  .chat-composer-shell { padding: 4px 10px 10px; }
+  .composer-hint { display: none; }
   .page { --pad: 16px; padding: 20px var(--pad) 96px; gap: 14px; }
   .page-h h1 { font-size: var(--fs-lg); }
   .toolbar .combo.u-f.ts-wrapper, .toolbar .combo.u-f.wide.ts-wrapper { flex: 1 1 calc(50% - 4px); min-width: 0; }
@@ -1291,6 +1330,28 @@ SOFTWARE.
         <h3>选择一个会话</h3>
         <p>所有 harness 的会话都已归一成同一种事件流，实时更新。</p>
         <div class="keys"><span><kbd>/</kbd>搜索</span><span><kbd>j</kbd><kbd>k</kbd>切换会话</span><span><kbd id="k-pal">⌘K</kbd>命令面板</span></div>
+      </div>
+    </div>
+    <div class="chat-composer-shell" id="chat-composer" hidden>
+      <div class="composer-card" id="composer-card">
+        <div class="composer-input-wrap">
+          <textarea id="chat-input" rows="1" placeholder="给这个会话发消息…" aria-label="发送消息给当前会话"></textarea>
+        </div>
+        <div class="composer-foot">
+          <div class="composer-tools">
+            <span class="composer-chip" id="composer-peer-chip"></span>
+            <button type="button" class="composer-mode-btn on" id="composer-wake-toggle" aria-pressed="true" title="开启后自动零 Hook 唤醒空闲会话（优先 Herdr/tmux 活终端直推，否则官方原上下文续跑）；关闭则仅写入收件箱">
+              <svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M13 2 4 14h7l-1 8 10-12h-7z"/></svg>
+              <span>自动唤醒</span>
+            </button>
+            <span class="composer-hint" id="composer-hint">Enter 发送 · ⇧Enter 换行</span>
+          </div>
+          <div class="composer-actions">
+            <button type="button" class="composer-send" id="composer-send" disabled aria-label="发送消息" title="发送消息 (Enter)">
+              <svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M22 2 11 13M22 2l-7 20-4-9-9-4z"/></svg>
+            </button>
+          </div>
+        </div>
       </div>
     </div>
     <section class="vpanel traj nosel" id="p-traj" data-panel="traj" role="tabpanel" aria-labelledby="vt-traj" hidden></section>
@@ -2199,6 +2260,8 @@ const I = {
   user: '<circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/>',
   spark: '<path d="M12 3v4M12 17v4M3 12h4M17 12h4M6 6l2.5 2.5M15.5 15.5 18 18M6 18l2.5-2.5M15.5 8.5 18 6"/>',
   msg: '<path d="M4 5h16v11H8l-4 4z"/>',
+  send: '<path d="M22 2 11 13M22 2l-7 20-4-9-9-4z"/>',
+  zap: '<path d="M13 2 4 14h7l-1 8 10-12h-7z"/>',
   brain: '<path d="M9 4a3 3 0 0 0-3 3v.5A3 3 0 0 0 4 10.3 3 3 0 0 0 5 15a3 3 0 0 0 3 4h1V4zM15 4a3 3 0 0 1 3 3v.5a3 3 0 0 1 2 2.8 3 3 0 0 1-1 4.7 3 3 0 0 1-3 4h-1V4z"/>',
 };
 const icon = (n, cls = "i") => `<svg class="${cls}" viewBox="0 0 24 24" aria-hidden="true">${I[n]}</svg>`;
@@ -2868,6 +2931,7 @@ function applyReadOnly() {
   document.body.classList.toggle("read-only", READ_ONLY);
   $("#m-ro").hidden = !READ_ONLY;
   if (current) renderHead(current, true);
+  syncComposer();
   if (view === "manage") viewEnter.manage();
 }
 
@@ -2949,6 +3013,7 @@ function syncTabs() {
   for (const p of $$("#app .vpanel")) p.hidden = p.dataset.panel !== t;
   if (back && chatPin) tl.scrollTop = chatPin.bottom ? tl.scrollHeight : chatPin.top;
   if (t === "chat") chatPin = null;
+  syncComposer();
 }
 function showTab(t, focus = false) {
   if (!TABS.some(([k]) => k === t)) return;
@@ -3819,15 +3884,16 @@ async function select(key, reveal = true, at = null) {
   if ($("#timeline").hidden) chatPin = { bottom: true, top: 0 };
   if (TR.key !== key && needsTraj(shownTab())) { resetTraj(key); paintTab(); }
   setp({ select: key, at });
-  T = { key, at, evs: new Map(), nodes: new Map(), calls: new Map(), results: new Map(), open: T?.key === key ? T.open : new Set(), loading: true, loadingEarlier: false, pending: [], nextBefore: null, window: false };
+  T = { key, at, evs: new Map(), nodes: new Map(), calls: new Map(), results: new Map(), busMsgs: new Map(), busNodes: new Map(), open: T?.key === key ? T.open : new Set(), loading: true, loadingEarlier: false, pending: [], nextBefore: null, window: false };
   const mine = T;
   $("#timeline").innerHTML = `<div class="wrap" id="thread">${Array.from({ length: 4 }, (_, i) => `<div style="margin:18px 0;${i % 2 ? "" : "display:flex;justify-content:flex-end"}"><div class="sk" style="height:${i % 2 ? 64 : 34}px;width:${i % 2 ? 100 : 45}%"></div></div>`).join("")}</div>`;
   const enc = encodeURIComponent(key);
   try {
-    const [s, ev, latest] = await Promise.all([
+    const [s, ev, latest, busInbox] = await Promise.all([
       api("session", `/v1/sessions/${enc}`),
       api("events", `/v1/sessions/${enc}/events`, at ? { around: at, limit: PAGE, max_text: MAX_TEXT } : { limit: PAGE, max_text: MAX_TEXT }),
       at ? getJson(`/v1/sessions/${enc}/events`, { limit: 1, max_text: 1 }) : null,
+      at ? null : getJson("/v1/messages", { peer: key, limit: 30 }).catch(() => null),
     ]);
     if (T !== mine) return;
     current = s.body;
@@ -3838,14 +3904,193 @@ async function select(key, reveal = true, at = null) {
     $("#timeline").innerHTML = `<div class="wrap" id="thread"><button id="more" type="button" aria-live="polite" aria-atomic="true" aria-busy="false" title="向上滚动也会自动加载更早事件">${icon("up")}<span>到最顶</span></button>${T.window ? `<button id="newer">${icon("down")}跳到最新</button>` : ""}</div>
       <div class="working-line" id="working"${current.status === "work" ? "" : " hidden"}><span class="spin"></span><span class="shimmer">正在工作…</span></div>`;
     for (const e of ev.body.events) upsertEvent(e, false);
+    if (!T.window && busInbox?.messages?.length) {
+      for (const m of busInbox.messages) upsertBusMessage(m, false);
+    }
     T.loading = false;
     if (!T.window) for (const e of T.pending) upsertEvent(e, true);   // live events that raced the history fetch
     T.pending = [];
     setMore(ev.body.next_before);
+    syncComposer();
+    refreshPeerChannel(current);
     if (at) revealEvent(at); else scrollBottom(true);
   } catch (e) {
     if (T === mine) $("#timeline").innerHTML = `<div class="empty"><h3>加载失败</h3><p>${esc(e.message)}</p></div>`;
   }
+}
+
+// ---------------------------------------------------------------- chat composer & live message bus
+let chatAutoWake = (() => { try { return localStorage.getItem("uniflo.chatWake") !== "0"; } catch { return true; } })();
+let chatSending = false;
+let msgStream = null;
+let peerCache = { at: 0, map: new Map() };
+const BUS_CH_LABEL = {
+  herdr: "Herdr 直推",
+  tmux: "tmux 直推",
+  resume_wake: "原上下文唤醒",
+  resume_failed: "唤醒失败 · 已入收件箱",
+  inbox_busy: "排队 · 工作中",
+  loop_guard: "防循环保护",
+  inbox: "收件箱",
+};
+const HEADLESS_HARNESSES = new Set(["antigravity", "claude", "codex", "opencode", "omp", "pi", "gemini", "cursor", "codebuddy", "qoder", "workbuddy", "factory"]);
+
+function syncComposer() {
+  const box = $("#chat-composer");
+  if (!box) return;
+  const show = Boolean(current && shownTab() === "chat" && !READ_ONLY && !current.archived);
+  box.hidden = !show;
+  if (!show) return;
+  const card = $("#composer-card");
+  card.classList.toggle("is-busy", current.status === "work");
+  const inp = $("#chat-input");
+  inp.placeholder = current.status === "work"
+    ? "会话工作中，发消息将进入排队…"
+    : "给这个会话发消息…";
+  const wakeBtn = $("#composer-wake-toggle");
+  wakeBtn.classList.toggle("on", chatAutoWake);
+  wakeBtn.setAttribute("aria-pressed", String(chatAutoWake));
+  wakeBtn.querySelector("span").textContent = chatAutoWake ? "自动唤醒" : "仅收件箱";
+  renderPeerChip(current);
+  syncSendBtn();
+}
+function syncSendBtn() {
+  const btn = $("#composer-send"), inp = $("#chat-input");
+  if (!btn || !inp) return;
+  btn.disabled = chatSending || !current || !inp.value.trim();
+  btn.innerHTML = chatSending ? '<span class="spin"></span>' : icon("send");
+}
+function resizeChatInput() {
+  const inp = $("#chat-input");
+  if (!inp) return;
+  inp.style.height = "auto";
+  const h = Math.min(180, Math.max(34, inp.scrollHeight));
+  inp.style.height = h + "px";
+  inp.style.overflowY = inp.scrollHeight > 180 ? "auto" : "hidden";
+  syncSendBtn();
+}
+function renderPeerChip(s) {
+  const chip = $("#composer-peer-chip");
+  if (!chip || !s) return;
+  const p = peerCache.map.get(s.key);
+  let text = HEADLESS_HARNESSES.has(s.harness) ? "原上下文唤醒" : "消息总线";
+  let live = false;
+  if (!chatAutoWake) {
+    text = "仅写入收件箱";
+  } else if (p) {
+    if (p.channel === "herdr") { text = `Herdr ${p.terminal || "终端"}`; live = true; }
+    else if (p.channel === "tmux") { text = `tmux ${p.terminal || "窗格"}`; live = true; }
+    else if (p.channel === "resume_wake") text = `${hname(s.harness)} 原上下文唤醒`;
+    else text = "消息收件箱";
+  } else if (HEADLESS_HARNESSES.has(s.harness)) {
+    text = `${hname(s.harness)} 原上下文唤醒`;
+  }
+  chip.className = `composer-chip${live ? " live" : ""}`;
+  chip.innerHTML = `${tile(s.harness, "xs")}<span>${esc(text)}</span>`;
+}
+async function refreshPeerChannel(s) {
+  if (!s || READ_ONLY) return;
+  if (Date.now() - peerCache.at < 8000 && peerCache.map.has(s.key)) {
+    renderPeerChip(s);
+    return;
+  }
+  try {
+    const r = await getJson("/v1/messages/peers", { limit: 100 });
+    const m = new Map();
+    for (const p of r.peers || []) m.set(p.key, p);
+    peerCache = { at: Date.now(), map: m };
+    if (current?.key === s.key) renderPeerChip(current);
+  } catch {}
+}
+function transcriptHasText(text, ts) {
+  if (!T || !text) return false;
+  const want = text.trim();
+  for (const e of T.evs.values()) {
+    if ((e.kind === "user_message" || e.kind === "assistant_message") && typeof e.text === "string" && e.text.trim() === want) {
+      if (!ts || !e.ts || Math.abs(e.ts - ts) < 90_000) return true;
+    }
+  }
+  return false;
+}
+function upsertBusMessage(m, live = false, delivery = null) {
+  if (!T || !current || T.window) return;
+  if (m.to !== current.key && m.from !== current.key) return;
+  // Avoid duplicating messages that have already landed in the native transcript stream.
+  if (!live && transcriptHasText(m.text, m.created_at)) return;
+  const thread = $("#thread");
+  if (!thread) return;
+  const prev = T.busMsgs.get(m.id);
+  const merged = { ...(prev || {}), ...m, _delivery: delivery || prev?._delivery || null };
+  T.busMsgs.set(m.id, merged);
+  const out = merged.to === current.key && merged.from === "web-demo";
+  const node = document.createElement("div");
+  node.className = `ev k-bus_msg ${out ? "out" : "in"}${live ? " enter" : ""}`;
+  node.dataset.busId = merged.id;
+  const ch = merged._delivery?.channel;
+  let tagCls = "", tagTxt = "";
+  if (ch) {
+    tagCls = ch === "herdr" || ch === "tmux" ? "ok" : ch === "resume_wake" ? "acc" : ch === "inbox_busy" || ch === "loop_guard" || ch === "resume_failed" ? "warn" : "";
+    tagTxt = BUS_CH_LABEL[ch] || ch;
+  } else if (merged.acked_at) {
+    tagCls = "ok"; tagTxt = "已读";
+  } else if (merged.delivered_at) {
+    tagCls = "acc"; tagTxt = "已投递";
+  } else {
+    tagTxt = "待读取";
+  }
+  const who = out ? "我 · 控制台" : merged.from === current.key ? `${hname(current.harness)} 回复` : `来自 ${short(merged.from)}`;
+  const bodyHtml = out ? `<div class="bus-bubble txt">${esc(merged.text)}</div>` : `<div class="bus-bubble md">${md(merged.text)}</div>`;
+  node.innerHTML = `${bodyHtml}<div class="bus-meta"><span>${esc(who)}</span>${tagTxt ? `<span class="btag ${tagCls}">${esc(tagTxt)}</span>` : ""}<span>${clock(merged.created_at)}</span></div>`;
+  const old = T.busNodes.get(merged.id);
+  if (old) old.replaceWith(node);
+  else thread.insertBefore(node, $("#newer"));
+  T.busNodes.set(merged.id, node);
+  if (live) scrollBottom(true);
+}
+async function sendChatMessage() {
+  if (chatSending || !current || READ_ONLY) return;
+  const inp = $("#chat-input");
+  const text = inp.value.trim();
+  if (!text) return;
+  const targetKey = current.key;
+  const deliver = chatAutoWake ? "wake" : "inbox";
+  chatSending = true;
+  syncSendBtn();
+  try {
+    const res = await write("POST", "/v1/messages", { to: targetKey, from: "web-demo", text, deliver });
+    inp.value = "";
+    resizeChatInput();
+    if (current?.key === targetKey && res?.message) {
+      upsertBusMessage(res.message, true, { channel: res.delivery_channel, detail: res.delivery_detail });
+    }
+    if (res?.delivery_detail) toast(res.delivery_detail);
+    else toast("消息已发送");
+  } catch (e) {
+    toast(`发送失败：${e.message || e}`, true);
+  } finally {
+    chatSending = false;
+    syncSendBtn();
+    inp.focus();
+  }
+}
+function connectMsgStream() {
+  msgStream?.close();
+  try {
+    const es = new EventSource(url("/v1/messages/stream"));
+    es.addEventListener("message", (ev) => {
+      try {
+        const m = JSON.parse(ev.data);
+        if (T && !T.loading && !T.window && current && (m.to === current.key || m.from === current.key)) {
+          if (!transcriptHasText(m.text, m.created_at)) upsertBusMessage(m, true);
+        }
+      } catch {}
+    });
+    es.onerror = () => {
+      es.close();
+      setTimeout(connectMsgStream, 3000);
+    };
+    msgStream = es;
+  } catch {}
 }
 function revealEvent(id) {
   const node = T.nodes.get(id) || $(`#timeline [data-id="${CSS.escape(id)}"]`);
@@ -5199,10 +5444,11 @@ const ENDPOINTS = [
   { id: "pricing", g: "usage", m: "GET", p: "/v1/pricing", t: "价格目录状态", d: "价格来源、最近一次同步、是否过期、模型数、覆盖项与待确认的价格变化。", ret: "PricingStatus" },
   { id: "memory", g: "agent", m: "GET", p: "/v1/memory", t: "记忆与指令文件", d: "agent 的记忆与指令文件（AGENTS.md、CLAUDE.md…）列表。", ret: "MemoryFile[]", params: [{ n: "cwd", ph: "~/work/project", h: "绝对路径，可用 ~；省略时只列全局文件" }], rs: (v) => `client.memory(${v.cwd ? `Some(${rstr(v.cwd)})` : "None"})?` },
   { id: "memory-file", g: "agent", m: "GET", p: "/v1/memory/file", t: "读取记忆文件", d: "上面能列出的文件之一及其内容，最多 256 KB；其他路径 403。", ret: "MemoryContent", params: [{ n: "path", req: true, ph: "~/.claude/CLAUDE.md", h: "取自记忆与指令文件列表的 path" }], rs: (v) => `client.memory_file(${rstr(v.path)})?` },
-  { id: "messages", g: "agent", m: "GET", p: "/v1/messages", t: "跨 Agent 收件箱", d: "读取可选跨 Agent 消息总线的收件箱（ADR-0012）；按目标会话或工作目录过滤。", ret: "InboxResponse", params: [{ n: "to", ph: "claude:4f1c", h: "目标会话 key、唯一前缀或 cwd:<目录>" }, { n: "cwd", ph: "~/work/project", h: "按目标会话工作目录过滤" }, { n: "from", ph: "codex:1234", h: "按发送方过滤" }, { n: "unread", t: "enum", o: ["", "true"], h: "仅未读（acked_at 为空）" }, { n: "undelivered", t: "enum", o: ["", "true"], h: "仅未投递给 hook 的消息" }, { n: "limit", t: "num", ph: "50", h: "最大 500" }] },
-  { id: "messages-send", g: "agent", m: "POST", p: "/v1/messages", t: "发送跨 Agent 消息", d: "按精确 key、唯一前缀或 cwd:<目录> 向本地另一会话发信，并推送给 SSE 订阅者。", ret: "SendMessageResponse", body: true, write: "写接口会向本地消息总线写入消息，这里只给写法、不发送；请通过 `uniflo message send` 或启用了 `--message` 的 MCP 调用。" },
+  { id: "messages", g: "agent", m: "GET", p: "/v1/messages", t: "跨 Agent 收件箱", d: "读取可选跨 Agent 消息总线的收件箱（ADR-0012）；按目标会话、双向会话 peer 或工作目录过滤。", ret: "InboxResponse", params: [{ n: "to", ph: "claude:4f1c", h: "目标会话 key、唯一前缀或 cwd:<目录>" }, { n: "peer", ph: "claude:4f1c", h: "双向过滤：发往或来自该会话的全部消息" }, { n: "cwd", ph: "~/work/project", h: "按目标会话工作目录过滤" }, { n: "from", ph: "codex:1234", h: "按发送方过滤" }, { n: "unread", t: "enum", o: ["", "true"], h: "仅未读（acked_at 为空）" }, { n: "undelivered", t: "enum", o: ["", "true"], h: "仅未投递给 hook 的消息" }, { n: "limit", t: "num", ph: "50", h: "最大 500" }] },
+  { id: "messages-peers", g: "agent", m: "GET", p: "/v1/messages/peers", t: "可对话同事列表", d: "发现当前可对话的本机活跃与近期会话及其零 Hook 投递通道（herdr / tmux / resume_wake / inbox），按 pid 自动反查调用方自身会话 key。", ret: "PeersResponse", params: [{ n: "pid", t: "num", ph: "12345", h: "调用方进程 PID，自动识别 self_key" }, { n: "self", ph: "claude:4f1c", h: "显式排除的自身会话 key" }, { n: "limit", t: "num", ph: "25", h: "最大 100" }] },
+  { id: "messages-send", g: "agent", m: "POST", p: "/v1/messages", t: "发送跨 Agent 消息", d: "向本地另一会话发信并推送至 SSE；支持 deliver=auto|wake 零 Hook 实时唤醒（Herdr/tmux 直推或官方原上下文续跑）与 wait_secs 等回执。", ret: "SendMessageResponse", body: true, write: "写接口会向本地消息总线写入消息（可选唤醒目标会话），这里只给写法、不发送；可在会话「对话」页底部输入框或 `uniflo message send` / MCP 中发送。" },
   { id: "messages-ack", g: "agent", m: "POST", p: "/v1/messages/ack", t: "确认消息已读", d: "将消息标记为 delivered（Hook 已拉取）或 acked（已读）。", ret: "AckMessagesResponse", body: true, write: "写接口会修改消息已读状态，这里只给写法、不发送；请通过 `uniflo message ack` 或 MCP 调用。" },
-  { id: "messages-stream", g: "stream", m: "SSE", p: "/v1/messages/stream", t: "跨 Agent 消息实时流", d: "SSE 实时推送新到达的跨 Agent 消息，支持按 to / cwd 过滤，零轮询。", ret: "AgentMessage", stream: "sse", params: [{ n: "to", ph: "claude:4f1c", h: "只订阅该目标会话的消息" }, { n: "cwd", ph: "~/work/project", h: "只订阅该目录下会话的消息" }] },
+  { id: "messages-stream", g: "stream", m: "SSE", p: "/v1/messages/stream", t: "跨 Agent 消息实时流", d: "SSE 实时推送新到达的跨 Agent 消息，支持按 to / peer / cwd 过滤，零轮询。", ret: "AgentMessage", stream: "sse", params: [{ n: "to", ph: "claude:4f1c", h: "只订阅该目标会话的消息" }, { n: "peer", ph: "claude:4f1c", h: "双向订阅发往或来自该会话的消息" }, { n: "cwd", ph: "~/work/project", h: "只订阅该目录下会话的消息" }] },
   { id: "archive", g: "cleanup", m: "GET", p: "/v1/archive", t: "归档列表", d: "已清理会话的归档及其大小，按归档时间倒序。", ret: "ArchiveList" },
   { id: "cleanup-plan", g: "cleanup", m: "POST", p: "/v1/cleanup/plan", t: "生成清理计划", d: "只算计划、不动文件：每个会话能否清理、要移走的目标、能释放的空间；计划 10 分钟内有效。", ret: "CleanupPlan", body: true },
   { id: "cleanup-execute", g: "cleanup", m: "POST", p: "/v1/cleanup/plans/{id}/execute", t: "执行清理计划", d: "按计划写归档，再把源文件移入系统回收站。", ret: "CleanupReport", write: "这个接口会把会话源文件移入回收站，这里只给写法、不发送；在「管理」视图里按确认流程清理。",
@@ -5850,6 +6096,19 @@ document.addEventListener("toggle", (e) => {
   e.target.open ? T.open.add(id) : T.open.delete(id);
 }, true);
 $("#q").addEventListener("input", () => { setp({ q: $("#q").value.trim() }); syncFilters(); queueSearch(); });
+$("#chat-input").addEventListener("input", resizeChatInput);
+$("#chat-input").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
+    e.preventDefault();
+    sendChatMessage();
+  }
+});
+$("#composer-send").addEventListener("click", sendChatMessage);
+$("#composer-wake-toggle").addEventListener("click", () => {
+  chatAutoWake = !chatAutoWake;
+  try { localStorage.setItem("uniflo.chatWake", chatAutoWake ? "1" : "0"); } catch {}
+  syncComposer();
+});
 $("#s-form").addEventListener("submit", (e) => { e.preventDefault(); clearTimeout(ftsTimer); runFts(); });
 $("#v-search").addEventListener("click", (e) => {
   const c = e.target.closest("[data-example]");
@@ -6006,6 +6265,7 @@ setInterval(() => refreshMeta().catch(() => {}), 5000);
     lastSeq = r.seq;                 // gap-free: the stream replays everything after the snapshot
     $("#m-seq").textContent = lastSeq;
     connect();
+    connectMsgStream();
     const first = P.get("select") || (r.body.find((s) => s.status === "work") || r.body[0])?.key;
     if (first) select(first, P.has("select"), P.get("at"));
     ready = true;

@@ -137,6 +137,7 @@ pub fn router_with(engine: Arc<Engine>, guard: GuardOptions, services: Services)
         .route("/v1/messages", get(message::list).post(message::send))
         .route("/v1/messages/ack", post(message::ack))
         .route("/v1/messages/stream", get(message::stream))
+        .route("/v1/messages/peers", get(message::peers))
         .layer(axum::middleware::from_fn_with_state(guard, guard::guard))
         .with_state(state)
 }
@@ -171,7 +172,7 @@ async fn index() -> impl IntoResponse {
         "name": "uniflo",
         "version": env!("CARGO_PKG_VERSION"),
         "schema": SCHEMA_VERSION,
-        "endpoints": ["/demo", "/v1/health", "/v1/harnesses", "/v1/harnesses/{id}/icon.svg", "/v1/sessions", "/v1/sessions/{key}", "/v1/sessions/{key}/events", "/v1/search", "/v1/stream", "/v1/stream.ndjson", "/v1/ws", "/v1/stats", "/v1/usage", "/v1/sessions/{key}/usage", "/v1/sessions/{key}/trajectory", "/v1/models", "/v1/pricing", "/v1/cleanup/plan", "/v1/cleanup/plans/{id}/execute", "/v1/archive", "/v1/archive/{key}", "/v1/sessions/{key}/resume", "/v1/sessions/{key}/open-terminal", "/v1/memory", "/v1/memory/file", "/v1/messages", "/v1/messages/ack", "/v1/messages/stream"],
+        "endpoints": ["/demo", "/v1/health", "/v1/harnesses", "/v1/harnesses/{id}/icon.svg", "/v1/sessions", "/v1/sessions/{key}", "/v1/sessions/{key}/events", "/v1/search", "/v1/stream", "/v1/stream.ndjson", "/v1/ws", "/v1/stats", "/v1/usage", "/v1/sessions/{key}/usage", "/v1/sessions/{key}/trajectory", "/v1/models", "/v1/pricing", "/v1/cleanup/plan", "/v1/cleanup/plans/{id}/execute", "/v1/archive", "/v1/archive/{key}", "/v1/sessions/{key}/resume", "/v1/sessions/{key}/open-terminal", "/v1/memory", "/v1/memory/file", "/v1/messages", "/v1/messages/ack", "/v1/messages/stream", "/v1/messages/peers"],
     }))
 }
 
