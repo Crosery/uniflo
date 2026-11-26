@@ -233,6 +233,20 @@
 
 归档文件 `<数据目录>/archive/<harness>/<id>.jsonl.zst`：zstd 压缩的 JSONL，第一行是 `Session`（`archived: true`），之后每行一个 `Event`（同一 id 只留最新版本）。精简规则：user / assistant / reasoning / system 正文每条最多 16 KiB，tool_result 输出最多 2 KiB，tool_call 参数序列化后超过 2 KiB 时换成截短的 JSON 文本（字符串），连续 ≥ 256 个 base64 字符（同时含大写、小写和数字）换成 `[binary omitted: N bytes]`，被改动的事件标 `truncated: true`；usage 事件原样保留，缺 `model` 时补上用量账本解析出的模型。
 
+## 跨 Agent 消息（可选）
+
+`/v1/messages`、`/v1/messages/ack`、`/v1/messages/stream` 与 `uniflo message --json` 的类型，真源 `crates/uniflo-schema/src/message.rs`，决策见 `docs/decisions/ADR-0012-可选跨Agent消息总线.md`。
+
+| 类型 | 用途 | 字段 |
+|---|---|---|
+| `AgentMessage` | 一条跨会话消息 | `id`、`from`、`to`、`text`、`kind?`、`reply_to?`、`created_at`、`delivered_at?`、`acked_at?` |
+| `MessageTarget` | 发送时目标会话快照 | `key`、`harness`、`title?`、`cwd?`、`status`、`pid?`、`delivery`（`"hook"` \| `"pty_or_hook"` \| `"resume"`）、`resume_command?` |
+| `SendMessageRequest` | `POST /v1/messages` 请求体 | `to`（精确 key / 唯一前缀 / `cwd:<目录>`）、`from?`、`text`（≤ 64 KiB）、`kind?`、`reply_to?` |
+| `SendMessageResponse` | `POST /v1/messages` 响应 | `message`（`AgentMessage`）、`target`（`MessageTarget`） |
+| `InboxResponse` | `GET /v1/messages` 响应 | `to?`、`messages[]`（`AgentMessage`）、`unread` |
+| `AckMessagesRequest` | `POST /v1/messages/ack` 请求体 | `ids[]`、`to?`、`state?`（`"delivered"` \| `"acked"`，默认 `"acked"`） |
+| `AckMessagesResponse` | `POST /v1/messages/ack` 响应 | `updated` |
+
 ## 示例
 
 ```json

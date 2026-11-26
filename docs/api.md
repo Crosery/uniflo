@@ -2,7 +2,7 @@
 
 > `uniflo daemon` 暴露的 HTTP 接口：REST 拿快照，SSE / NDJSON / WebSocket 拿实时流。数据格式见 `docs/schema.md`。
 
-状态：`current` · 更新：2026-10-25
+状态：`current` · 更新：2026-11-26
 
 默认地址 `http://127.0.0.1:7311`。读接口只用 `GET`（和 CORS 预检 `OPTIONS`）；写接口用 `POST` / `DELETE`，必须满足 [写接口](#写接口) 的全部条件。所有成功响应带 `x-uniflo-seq` 头：响应生成时的最新 `seq`，可作为随后订阅的 `since`。
 
@@ -33,6 +33,10 @@
 | `POST /v1/sessions/{key}/open-terminal` | macOS `terminal=terminal`（默认）\|`iterm`\|`ghostty`；Windows `wt`（装了时默认）\|`powershell`\|`cmd` | 写接口。macOS、Windows 在新终端窗口切到 cwd 执行恢复命令，返回 `{opened, terminal, command, cwd}`，macOS 用 `open` 启动、不需要自动化权限；不支持恢复、目录不存在或终端未安装 422，终端名无效 400，启动失败 500（`reason` 为原因，附 `command`）；其他平台 501 并附 `command`、`command_powershell` |
 | `GET /v1/memory` | `cwd`（绝对路径，可用 `~`，可省） | `MemoryFile[]`：agent 记忆与指令文件 `{path, scope, harness, bytes, updated_at}`，范围见 `docs/agents.md#记忆与指令文件`；`cwd` 不是绝对路径 400 |
 | `GET /v1/memory/file` | `path`（必填） | `MemoryContent`：上面能列出的文件之一及其内容（最多 256 KB，超出 `truncated: true`）；其他路径 403，不存在 404 |
+| `GET /v1/messages` | `to`、`cwd`、`from`、`unread=true`、`undelivered=true`、`limit`（默认 50，最大 500） | `InboxResponse`：可选跨 Agent 消息收件箱（ADR-0012），返回 `{to?, messages[], unread}`；未挂载消息总线时 503 |
+| `POST /v1/messages` | JSON `SendMessageRequest`：`{to, text, from?, kind?, reply_to?}` | 写接口。按精确 key、唯一前缀或 `cwd:<目录>` 定位目标会话并投递至本地信箱与 SSE 实时流，返回 `SendMessageResponse`（含 `message` 与 `target` 投递提示 / `resume_command`）；空正文或超 64 KiB 返回 400，未知目标 404，前缀歧义 409 |
+| `POST /v1/messages/ack` | JSON `AckMessagesRequest`：`{ids?, to?, state?: "delivered"\|"acked"}` | 写接口。将指定消息或目标会话的待处理消息标为 `delivered`（Hook 已拉取）或 `acked`（默认已读），返回 `{updated}` |
+| `GET /v1/messages/stream` | `to`、`cwd` | SSE 实时推送流：`id` 为消息 id、`event` 为 `message`、`data` 为 `AgentMessage` JSON，零轮询即时到达 |
 
 `{key}` 需要 URL 编码（`claude%3A4f1c…`；key 里可能有 `/`，也必须编码）。类型定义见 `docs/schema.md#用量与价格接口的类型`、`docs/schema.md#agent-接入接口的类型`。
 
@@ -145,7 +149,7 @@
 | `X-Uniflo-Write: 1` | 自定义请求头，浏览器必须先过 CORS 预检，外站页面无法用简单请求触发 |
 | Token | 配置了 token 时必须携带 |
 
-任一条件不满足返回 403，`error` 说明是哪一条。`uniflo daemon --read-only` 启动时全部写接口返回 403，`/v1/health` 的 `read_only` 为 true。实现是 `uniflo_gateway::write::check`，网关守卫对 `GET` / `HEAD` / `OPTIONS` 以外的每个请求都调用它，新写接口无需另接线，只要在本节登记；规则见 ADR-0006。目前的写接口：`POST /v1/cleanup/plan`、`POST /v1/cleanup/plans/{id}/execute`、`DELETE /v1/archive/{key}`、`POST /v1/sessions/{key}/open-terminal`。
+任一条件不满足返回 403，`error` 说明是哪一条。`uniflo daemon --read-only` 启动时全部写接口返回 403，`/v1/health` 的 `read_only` 为 true。实现是 `uniflo_gateway::write::check`，网关守卫对 `GET` / `HEAD` / `OPTIONS` 以外的每个请求都调用它，新写接口无需另接线，只要在本节登记；规则见 ADR-0006。目前的写接口：`POST /v1/cleanup/plan`、`POST /v1/cleanup/plans/{id}/execute`、`DELETE /v1/archive/{key}`、`POST /v1/sessions/{key}/open-terminal`、`POST /v1/messages`、`POST /v1/messages/ack`。
 
 ## 例子
 

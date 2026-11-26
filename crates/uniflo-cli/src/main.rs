@@ -6,6 +6,7 @@ mod client;
 mod grep;
 mod i18n;
 mod mcp;
+mod message;
 mod notice;
 mod render;
 mod setup;
@@ -191,10 +192,15 @@ enum Cmd {
     Archive(clean::ArchiveArgs),
     /// stdio MCP server for agents (what `uniflo setup --mcp` registers).
     Mcp {
+        /// Enable optional cross-agent messaging tools (`uniflo_send_message`, `uniflo_inbox`, `uniflo_ack_messages`).
+        #[arg(long)]
+        message: bool,
         /// Seconds without a request before the in-process fallback index is dropped (tests).
         #[arg(long, default_value_t = 300.0, hide = true)]
         idle: f64,
     },
+    /// Optional cross-agent messaging (`send`, `inbox`, `ack`, `watch`, `hook`).
+    Message(message::MessageArgs),
     /// The agent Skill shipped with this binary.
     Skill {
         #[command(subcommand)]
@@ -232,7 +238,13 @@ fn run() -> Result<()> {
     // agent-facing ones (and `update` itself) never do.
     let notice = notice::begin(!matches!(
         cli.cmd,
-        Cmd::Daemon { .. } | Cmd::Mcp { .. } | Cmd::Setup(_) | Cmd::Skill { .. } | Cmd::Context(_) | Cmd::Update { .. }
+        Cmd::Daemon { .. }
+            | Cmd::Mcp { .. }
+            | Cmd::Message(_)
+            | Cmd::Setup(_)
+            | Cmd::Skill { .. }
+            | Cmd::Context(_)
+            | Cmd::Update { .. }
     ));
     let res = dispatch(cli);
     notice.show();
@@ -242,7 +254,13 @@ fn run() -> Result<()> {
 fn dispatch(cli: Cli) -> Result<()> {
     if !matches!(
         cli.cmd,
-        Cmd::Daemon { .. } | Cmd::Mcp { .. } | Cmd::Setup(_) | Cmd::Skill { .. } | Cmd::Context(_) | Cmd::Update { .. }
+        Cmd::Daemon { .. }
+            | Cmd::Mcp { .. }
+            | Cmd::Message(_)
+            | Cmd::Setup(_)
+            | Cmd::Skill { .. }
+            | Cmd::Context(_)
+            | Cmd::Update { .. }
     ) {
         setup::first_run();
     }
@@ -295,7 +313,10 @@ fn dispatch(cli: Cli) -> Result<()> {
         Cmd::Scan { json, no_cache } => scan(json, no_cache),
         Cmd::Update { check, prerelease, json } => update::run(check, prerelease, json),
         Cmd::Pricing(ref a) => usage::pricing(&cli, a),
-        Cmd::Mcp { idle } => mcp::run(&cli, Duration::try_from_secs_f64(idle).unwrap_or(Duration::MAX)),
+        Cmd::Mcp { message, idle } => {
+            mcp::run(&cli, Duration::try_from_secs_f64(idle).unwrap_or(Duration::MAX), message)
+        }
+        Cmd::Message(ref a) => message::run(&cli, a),
         Cmd::Skill { ref action } => {
             agent::skill(action);
             Ok(())
@@ -598,8 +619,10 @@ fn daemon(
         let _ = engine.save_cache();
         let fts = fts.then(|| start_fts(&engine, fts_hot_days)).flatten();
         let cleanup = Cleanup::new(engine.clone(), CleanupOptions::from_env()).ok().map(Arc::new);
+        let messages = uniflo_core::message::MessageBus::open(Some(&uniflo_core::paths::data_dir())).ok();
         let runner = tokio::spawn(engine.clone().run());
-        let router = uniflo_gateway::router_with(engine.clone(), guard, uniflo_gateway::Services { fts, cleanup });
+        let router =
+            uniflo_gateway::router_with(engine.clone(), guard, uniflo_gateway::Services { fts, cleanup, messages });
         let my_pid = std::process::id();
         let tracked = std::env::var_os("UNIFLO_DETACHED").is_some();
         if tracked {
@@ -883,6 +906,7 @@ impl Source {
             | Cmd::Update { .. }
             | Cmd::Pricing(_)
             | Cmd::Mcp { .. }
+            | Cmd::Message(_)
             | Cmd::Skill { .. }
             | Cmd::Setup(_)
             | Cmd::Context(_) => unreachable!(),

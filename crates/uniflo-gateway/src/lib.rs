@@ -33,6 +33,7 @@ mod cache;
 pub mod cleanup;
 mod guard;
 pub mod icons;
+mod message;
 mod search;
 mod stream;
 pub mod usage;
@@ -53,6 +54,7 @@ use serde::Deserialize;
 use std::convert::Infallible;
 use std::sync::Arc;
 use uniflo_core::cleanup::Cleanup;
+use uniflo_core::message::MessageBus;
 use uniflo_core::util::now_ms;
 use uniflo_core::{Engine, HistoryQuery};
 use uniflo_schema::{Envelope, SCHEMA_VERSION};
@@ -66,6 +68,7 @@ struct AppState {
     engine: Arc<Engine>,
     fts: Option<Arc<Fts>>,
     cleanup: Option<Arc<Cleanup>>,
+    messages: Option<Arc<MessageBus>>,
     read_only: bool,
     cache: Arc<ResponseCache>,
     flights: Arc<Singleflight>,
@@ -79,6 +82,7 @@ struct AppState {
 pub struct Services {
     pub fts: Option<Arc<Fts>>,
     pub cleanup: Option<Arc<Cleanup>>,
+    pub messages: Option<Arc<MessageBus>>,
 }
 
 /// Router without a full-text index: `/v1/search` answers 503.
@@ -96,6 +100,7 @@ pub fn router_with(engine: Arc<Engine>, guard: GuardOptions, services: Services)
         engine,
         fts: services.fts,
         cleanup: services.cleanup,
+        messages: services.messages,
         read_only: guard.read_only,
         cache: Arc::new(ResponseCache::default()),
         flights: Arc::new(Singleflight::default()),
@@ -129,6 +134,9 @@ pub fn router_with(engine: Arc<Engine>, guard: GuardOptions, services: Services)
         .route("/v1/cleanup/plan", post(cleanup::plan))
         .route("/v1/cleanup/plans/{id}/execute", post(cleanup::execute))
         .route("/v1/archive/{key}", delete(cleanup::remove))
+        .route("/v1/messages", get(message::list).post(message::send))
+        .route("/v1/messages/ack", post(message::ack))
+        .route("/v1/messages/stream", get(message::stream))
         .layer(axum::middleware::from_fn_with_state(guard, guard::guard))
         .with_state(state)
 }
@@ -163,7 +171,7 @@ async fn index() -> impl IntoResponse {
         "name": "uniflo",
         "version": env!("CARGO_PKG_VERSION"),
         "schema": SCHEMA_VERSION,
-        "endpoints": ["/demo", "/v1/health", "/v1/harnesses", "/v1/harnesses/{id}/icon.svg", "/v1/sessions", "/v1/sessions/{key}", "/v1/sessions/{key}/events", "/v1/search", "/v1/stream", "/v1/stream.ndjson", "/v1/ws", "/v1/stats", "/v1/usage", "/v1/sessions/{key}/usage", "/v1/sessions/{key}/trajectory", "/v1/models", "/v1/pricing", "/v1/cleanup/plan", "/v1/cleanup/plans/{id}/execute", "/v1/archive", "/v1/archive/{key}", "/v1/sessions/{key}/resume", "/v1/sessions/{key}/open-terminal", "/v1/memory", "/v1/memory/file"],
+        "endpoints": ["/demo", "/v1/health", "/v1/harnesses", "/v1/harnesses/{id}/icon.svg", "/v1/sessions", "/v1/sessions/{key}", "/v1/sessions/{key}/events", "/v1/search", "/v1/stream", "/v1/stream.ndjson", "/v1/ws", "/v1/stats", "/v1/usage", "/v1/sessions/{key}/usage", "/v1/sessions/{key}/trajectory", "/v1/models", "/v1/pricing", "/v1/cleanup/plan", "/v1/cleanup/plans/{id}/execute", "/v1/archive", "/v1/archive/{key}", "/v1/sessions/{key}/resume", "/v1/sessions/{key}/open-terminal", "/v1/memory", "/v1/memory/file", "/v1/messages", "/v1/messages/ack", "/v1/messages/stream"],
     }))
 }
 

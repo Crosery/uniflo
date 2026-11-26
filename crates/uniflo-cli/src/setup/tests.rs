@@ -239,13 +239,13 @@ fn without_a_terminal_only_the_plan_is_printed() {
 #[test]
 fn interactive_questions_and_confirmation() {
     let h = fixture();
-    // Skill only, harnesses 1 and claude by id, no hook, then decline the plan.
-    let out = h.setup(args(|_| {}), true, "2\n1,cursor\nn\nn\n");
+    // Skill only, harnesses 1 and claude by id, no hook, no messaging, then decline the plan.
+    let out = h.setup(args(|_| {}), true, "2\n1,cursor\nn\nn\nn\n");
     assert!(out.contains("接入方式") && out.contains("检测到") && out.contains("已取消"), "{out}");
     assert!(!h.path(".agents").exists());
     // The same questions in English.
     crate::i18n::set_zh(false);
-    let out = h.setup(args(|_| {}), true, "2\n1,cursor\nn\nn\n");
+    let out = h.setup(args(|_| {}), true, "2\n1,cursor\nn\nn\nn\n");
     crate::i18n::set_zh(true);
     assert!(
         out.contains("How should agents connect?") && out.contains("harnesses found") && out.contains("Apply?"),
@@ -253,15 +253,17 @@ fn interactive_questions_and_confirmation() {
     );
     assert!(out.contains("cancelled, nothing written") && !out.contains("接入"), "{out}");
     assert!(!h.path(".agents").exists());
-    // MCP for claude + cursor with the SessionStart hook, confirmed.
-    let out = h.setup(args(|_| {}), true, "\nclaude,cursor\ny\n\n");
+    // MCP for claude + cursor with the SessionStart hook, messaging left at default (no), confirmed.
+    let out = h.setup(args(|_| {}), true, "\nclaude,cursor\ny\n\n\n");
     assert!(out.contains("SessionStart"), "{out}");
     let settings = h.json(".claude/settings.json");
     let cmd = settings["hooks"]["SessionStart"][0]["hooks"][0]["command"].as_str().unwrap();
     assert_eq!(cmd, edit::hook_command(BIN));
-    assert!(h.json(".cursor/mcp.json")["mcpServers"]["uniflo"].is_object());
+    assert!(settings["hooks"].get("PostToolUse").is_none(), "messaging hook stays off by default");
+    assert_eq!(h.json(".cursor/mcp.json")["mcpServers"]["uniflo"], json!({"command": BIN, "args": ["mcp"]}));
     assert_eq!(h.state().harnesses["claude"].result, "skipped", "no claude CLI on PATH");
     assert!(h.state().hook.is_some());
+    assert!(!h.state().message && h.state().message_hook.is_none());
     h.setup(args(|a| (a.uninstall, a.yes) = (true, true)), false, "");
     assert!(!h.path(".claude/settings.json").exists(), "created only for the hook, removed with it");
     // Choosing "skip" is remembered.
@@ -372,6 +374,61 @@ fn antigravity_mcp_and_skill_install_and_uninstall() {
     assert_eq!(mcp["mcpServers"].as_object().unwrap().keys().collect::<Vec<_>>(), ["other"]);
     assert!(!link.exists());
     assert!(!h.path(".agents/skills/uniflo/SKILL.md").exists());
+}
+
+#[test]
+fn message_opt_in_is_off_by_default_and_uninstalls_symmetrically() {
+    let h = fixture();
+    // Default setup leaves messaging completely off.
+    h.setup(args(|a| (a.both, a.yes) = (true, true)), false, "");
+    assert!(!h.state().message);
+    assert!(h.state().message_hook.is_none());
+    assert!(!h.path(".claude/settings.json").exists());
+    assert_eq!(h.json(".cursor/mcp.json")["mcpServers"]["uniflo"]["args"], json!(["mcp"]));
+
+    // Explicit `--message` adds `--message` to MCP configs and Claude pull hooks.
+    h.setup(args(|a| (a.both, a.message, a.yes) = (true, true, true)), false, "");
+    assert!(h.state().message);
+    assert!(h.state().message_hook.is_some());
+    assert_eq!(h.json(".cursor/mcp.json")["mcpServers"]["uniflo"]["args"], json!(["mcp", "--message"]));
+    assert_eq!(h.json(".config/opencode/opencode.json")["mcp"]["uniflo"]["command"], json!([BIN, "mcp", "--message"]));
+    assert!(h.read(".codex/config.toml").contains("--message"));
+    let settings = h.json(".claude/settings.json");
+    assert_eq!(
+        settings["hooks"]["PostToolUse"][0]["hooks"][0]["command"].as_str().unwrap(),
+        edit::message_hook_command(BIN)
+    );
+    assert_eq!(
+        settings["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"].as_str().unwrap(),
+        edit::message_hook_command(BIN)
+    );
+
+    // `--reload` keeps `--message` enabled when binary moves.
+    let mut ctx = h.ctx();
+    ctx.bin = "/moved/uniflo".into();
+    let mut out = Vec::new();
+    flow(&ctx, &args(|a| (a.reload, a.yes) = (true, true)), false, &mut "".as_bytes(), &mut out).unwrap();
+    assert_eq!(
+        h.json(".cursor/mcp.json")["mcpServers"]["uniflo"],
+        json!({"command": "/moved/uniflo", "args": ["mcp", "--message"]})
+    );
+    assert_eq!(
+        h.json(".claude/settings.json")["hooks"]["PostToolUse"][0]["hooks"][0]["command"].as_str().unwrap(),
+        edit::message_hook_command("/moved/uniflo")
+    );
+
+    // Turning `--message` back off strips `--message` and removes the message hooks cleanly.
+    h.setup(args(|a| (a.both, a.yes) = (true, true)), false, "");
+    assert!(!h.state().message && h.state().message_hook.is_none());
+    assert_eq!(h.json(".cursor/mcp.json")["mcpServers"]["uniflo"]["args"], json!(["mcp"]));
+    assert!(!h.path(".claude/settings.json").exists(), "file created only for message hooks is removed");
+
+    // Opting in again and running `--uninstall` cleans up symmetrically.
+    h.setup(args(|a| (a.both, a.message, a.yes) = (true, true, true)), false, "");
+    assert!(h.path(".claude/settings.json").is_file());
+    h.setup(args(|a| (a.uninstall, a.yes) = (true, true)), false, "");
+    assert!(!h.path(".claude/settings.json").exists());
+    assert!(!h.state().message && h.state().message_hook.is_none());
 }
 
 #[test]

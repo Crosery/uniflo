@@ -35,8 +35,8 @@ const INVALID_PARAMS: i64 = -32602;
 /// `idle`: a fallback index unused this long is dropped. Agents keep their MCP servers for days,
 /// and the index holds every session (and the usage ledgers, the full-text reader) the daemon
 /// also has; rebuilding it takes seconds, so the window spans an agent's pauses between calls.
-pub fn run(cli: &Cli, idle: Duration) -> Result<()> {
-    let mut server = Server::new(cli.url.clone(), cli.token.clone(), cli.local);
+pub fn run(cli: &Cli, idle: Duration, message: bool) -> Result<()> {
+    let mut server = Server::new(cli.url.clone(), cli.token.clone(), cli.local, message);
     let mut out = std::io::stdout().lock();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
@@ -85,6 +85,7 @@ struct Server {
     url: String,
     token: Option<String>,
     local_only: bool,
+    message: bool,
     local: Option<Local>,
     noted: bool,
 }
@@ -116,8 +117,8 @@ impl Out {
 }
 
 impl Server {
-    fn new(url: String, token: Option<String>, local_only: bool) -> Server {
-        Server { url, token, local_only, local: None, noted: false }
+    fn new(url: String, token: Option<String>, local_only: bool, message: bool) -> Server {
+        Server { url, token, local_only, message, local: None, noted: false }
     }
 
     fn handle_line(&mut self, line: &str) -> Option<Value> {
@@ -147,9 +148,9 @@ impl Server {
         };
         let params = m.get("params").cloned().unwrap_or(Value::Null);
         let result = match method {
-            "initialize" => Ok(initialize(&params)),
+            "initialize" => Ok(initialize(&params, self.message)),
             "ping" => Ok(json!({})),
-            "tools/list" => Ok(json!({ "tools": tools() })),
+            "tools/list" => Ok(json!({ "tools": tools(self.message) })),
             "tools/call" => self.call(&params),
             _ if id.is_none() => return None,
             _ => Err(RpcError(METHOD_NOT_FOUND, format!("method not found: {method}"))),
@@ -182,6 +183,9 @@ impl Server {
             "uniflo_memory" => self.memory(&a)?,
             "uniflo_context" => self.context(&a)?,
             "uniflo_status" => self.status()?,
+            "uniflo_send_message" if self.message => self.send_message(&a)?,
+            "uniflo_inbox" if self.message => self.inbox(&a)?,
+            "uniflo_ack_messages" if self.message => self.ack_messages(&a)?,
             _ => return Err(invalid(format!("unknown tool: {name}"))),
         };
         if self.local.is_some() && !self.noted {
@@ -749,25 +753,144 @@ impl Server {
         }
         Ok(Out::ok(text, json!({ "health": health, "harnesses": harnesses })))
     }
+
+    fn daemon_write(&self, path: &str, body: Value) -> Result<Value, String> {
+        if self.local_only {
+            return Err("cross-agent messaging requires a running uniflo daemon (not --local)".into());
+        }
+        let c = Client::new(&self.url, self.token.clone()).map_err(|e| format!("{e:#}"))?;
+        c.write_json::<Value>("POST", path, Some(&body))
+            .map_err(|e| format!("{e:#} (is `uniflo daemon` running at {}?)", self.url))
+    }
+
+    fn daemon_get(&self, path: &str) -> Result<Value, String> {
+        if self.local_only {
+            return Err("cross-agent messaging requires a running uniflo daemon (not --local)".into());
+        }
+        let c = Client::new(&self.url, self.token.clone()).map_err(|e| format!("{e:#}"))?;
+        c.get_json::<Value>(path).map_err(|e| format!("{e:#} (is `uniflo daemon` running at {}?)", self.url))
+    }
+
+    fn send_message(&mut self, a: &Args) -> Result<Out, RpcError> {
+        let to = a.req_str("to")?;
+        let text = a.req_str("text")?;
+        let from = a.str("from")?;
+        let kind = a.str("kind")?;
+        let reply_to = a.str("reply_to")?;
+        let body = json!({ "to": to, "from": from, "text": text, "kind": kind, "reply_to": reply_to });
+        Ok(match self.daemon_write("/v1/messages", body) {
+            Ok(v) => {
+                let id = v["message"]["id"].as_str().unwrap_or("");
+                let target = v["target"]["key"].as_str().unwrap_or(to);
+                let status = v["target"]["status"].as_str().unwrap_or("?");
+                let delivery = v["target"]["delivery"].as_str().unwrap_or("?");
+                let mut summary = format!("sent {id} -> {target} ({status}, delivery={delivery})");
+                if delivery == "resume"
+                    && let Some(cmd) = v["target"]["resume_command"].as_str()
+                {
+                    let _ = write!(summary, "\nresume command (not executed): {cmd}");
+                }
+                Out::ok(summary, v)
+            }
+            Err(e) => Out::error(e),
+        })
+    }
+
+    fn inbox(&mut self, a: &Args) -> Result<Out, RpcError> {
+        let to = a.str("to")?;
+        let cwd = a.str("cwd")?;
+        let from = a.str("from")?;
+        let unread = a.bool("unread", true)?;
+        let undelivered = a.bool("undelivered", false)?;
+        let limit = a.int("limit", 1, 200, 50)?;
+        let mut qs = vec![format!("limit={limit}")];
+        if let Some(t) = to {
+            qs.push(format!("to={}", enc(t)));
+        }
+        if let Some(c) = cwd {
+            qs.push(format!("cwd={}", enc(c)));
+        }
+        if let Some(f) = from {
+            qs.push(format!("from={}", enc(f)));
+        }
+        if unread {
+            qs.push("unread=true".into());
+        }
+        if undelivered {
+            qs.push("undelivered=true".into());
+        }
+        Ok(match self.daemon_get(&format!("/v1/messages?{}", qs.join("&"))) {
+            Ok(v) => {
+                let list = v["messages"].as_array().cloned().unwrap_or_default();
+                let unread_n = v["unread"].as_u64().unwrap_or(0);
+                let mut text = format!("{} messages ({unread_n} unread)", list.len());
+                for m in &list {
+                    let _ = write!(
+                        text,
+                        "\n- {} {} -> {} ({}): {}",
+                        m["id"].as_str().unwrap_or(""),
+                        m["from"].as_str().unwrap_or(""),
+                        m["to"].as_str().unwrap_or(""),
+                        age(m["created_at"].as_i64().unwrap_or(0)),
+                        m["text"].as_str().unwrap_or("")
+                    );
+                }
+                Out::ok(text, v)
+            }
+            Err(e) => Out::error(e),
+        })
+    }
+
+    fn ack_messages(&mut self, a: &Args) -> Result<Out, RpcError> {
+        let to = a.str("to")?;
+        let state = a.str("state")?;
+        let ids: Vec<String> = match a.0.get("ids") {
+            None | Some(Value::Null) => Vec::new(),
+            Some(Value::Array(arr)) => arr
+                .iter()
+                .map(|v| v.as_str().map(str::to_owned).ok_or_else(|| invalid("ids items must be strings")))
+                .collect::<Result<_, _>>()?,
+            Some(_) => return Err(invalid("ids must be an array of strings")),
+        };
+        if ids.is_empty() && to.is_none() {
+            return Err(invalid("provide ids or to"));
+        }
+        let body = json!({ "ids": ids, "to": to, "state": state });
+        Ok(match self.daemon_write("/v1/messages/ack", body) {
+            Ok(v) => {
+                let n = v["updated"].as_u64().unwrap_or(0);
+                Out::ok(format!("updated {n} messages"), v)
+            }
+            Err(e) => Out::error(e),
+        })
+    }
 }
 
 fn error_reply(id: Value, code: i64, msg: &str) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": msg } })
 }
 
-fn initialize(params: &Value) -> Value {
+fn initialize(params: &Value, message: bool) -> Value {
     let asked = params.get("protocolVersion").and_then(Value::as_str).unwrap_or("");
     let version = PROTOCOL_VERSIONS.iter().find(|v| **v == asked).unwrap_or(&PROTOCOL_VERSIONS[0]);
+    let mut instructions = "Read-only access to every local agent-harness session (Claude Code, Codex, omp, OpenCode, Gemini CLI, …). \
+        Find sessions with uniflo_sessions (search syntax: h:claude s:work in:<cwd> since:2d 'fuzzy), read one with uniflo_session, \
+        search transcript text with uniflo_search, costs with uniflo_usage. Session keys look like claude:<id>; \
+        open a #<event-id> from search with uniflo_session (key, around). Answers are compact text: a legend names \
+        the |-separated columns, an `@ <dir>` line is the cwd of the rows below it, `↳` rows are subagents of the row above, \
+        counts past 10k keep 3 significant digits and `-` means unknown; structured:true adds the exact JSON."
+        .to_owned();
+    if message {
+        instructions.push_str(
+            " Optional cross-agent messaging is enabled: send messages with uniflo_send_message (to=<key|prefix|cwd:<dir>>), \
+             read pending messages with uniflo_inbox, and mark read with uniflo_ack_messages.",
+        );
+    }
     json!({
         "protocolVersion": version,
         "capabilities": { "tools": { "listChanged": false } },
         "serverInfo": { "name": "uniflo", "title": "Uniflo", "version": env!("CARGO_PKG_VERSION") },
-        "instructions": "Read-only access to every local agent-harness session (Claude Code, Codex, omp, OpenCode, Gemini CLI, …). \
-            Find sessions with uniflo_sessions (search syntax: h:claude s:work in:<cwd> since:2d 'fuzzy), read one with uniflo_session, \
-            search transcript text with uniflo_search, costs with uniflo_usage. Session keys look like claude:<id>; \
-            open a #<event-id> from search with uniflo_session (key, around). Answers are compact text: a legend names \
-            the |-separated columns, an `@ <dir>` line is the cwd of the rows below it, `↳` rows are subagents of the row above, \
-            counts past 10k keep 3 significant digits and `-` means unknown; structured:true adds the exact JSON.",
+        "instructions": instructions,
     })
 }
 
@@ -1239,7 +1362,18 @@ impl Args<'_> {
 
 /// Every tool gets a `structured` property besides its own: `props` must be a JSON object.
 fn tool(name: &str, title: &str, description: &str, props: Value, required: &[&str]) -> Value {
-    let mut props = props;
+    tool_with(name, title, description, props, required, true, true)
+}
+
+fn tool_with(
+    name: &str,
+    title: &str,
+    description: &str,
+    mut props: Value,
+    required: &[&str],
+    read_only: bool,
+    idempotent: bool,
+) -> Value {
     if let Value::Object(m) = &mut props {
         // Described once in the server instructions rather than on every tool.
         m.insert("structured".into(), json!({ "type": "boolean" }));
@@ -1249,13 +1383,13 @@ fn tool(name: &str, title: &str, description: &str, props: Value, required: &[&s
         "title": title,
         "description": description,
         "inputSchema": { "type": "object", "properties": props, "required": required },
-        "annotations": { "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false },
+        "annotations": { "readOnlyHint": read_only, "destructiveHint": false, "idempotentHint": idempotent, "openWorldHint": false },
     })
 }
 
-fn tools() -> Vec<Value> {
+fn tools(message: bool) -> Vec<Value> {
     let key = json!({ "type": "string", "description": "Session key (claude:<id>), a unique id prefix, or uniflo://session/<key>#<event-id>" });
-    vec![
+    let mut list = vec![
         tool(
             "uniflo_sessions",
             "List sessions",
@@ -1358,7 +1492,52 @@ fn tools() -> Vec<Value> {
             json!({}),
             &[],
         ),
-    ]
+    ];
+    if message {
+        list.push(tool_with(
+            "uniflo_send_message",
+            "Send message to another session",
+            "Send a message through Uniflo's local message bus to another local agent session (by key, unique prefix, or cwd:<dir>). Returns delivery hint and resume command if offline.",
+            json!({
+                "to": { "type": "string", "description": "Recipient session key (claude:<id>), unique prefix, or cwd:<dir> / absolute path" },
+                "text": { "type": "string", "description": "Message body (max 64 KiB)" },
+                "from": { "type": "string", "description": "Sender session key or label" },
+                "kind": { "type": "string", "description": "Optional tag (e.g. task, reply, status)" },
+                "reply_to": { "type": "string", "description": "Optional message id being replied to" },
+            }),
+            &["to", "text"],
+            false,
+            false,
+        ));
+        list.push(tool(
+            "uniflo_inbox",
+            "Read message inbox",
+            "List messages addressed to a session or working directory (defaults to unread messages). Same as GET /v1/messages.",
+            json!({
+                "to": { "type": "string", "description": "Recipient session key, prefix, or cwd:<dir>" },
+                "cwd": { "type": "string", "description": "Filter by recipient working directory" },
+                "from": { "type": "string", "description": "Filter by sender" },
+                "unread": { "type": "boolean", "default": true },
+                "undelivered": { "type": "boolean", "default": false },
+                "limit": { "type": "integer", "minimum": 1, "maximum": 200, "default": 50 },
+            }),
+            &[],
+        ));
+        list.push(tool_with(
+            "uniflo_ack_messages",
+            "Acknowledge messages",
+            "Mark messages as acknowledged (or delivered) via POST /v1/messages/ack.",
+            json!({
+                "ids": { "type": "array", "items": { "type": "string" }, "description": "Message ids (m-1, m-2, …)" },
+                "to": { "type": "string", "description": "Mark all pending messages for this recipient session" },
+                "state": { "type": "string", "enum": ["delivered", "acked"], "default": "acked" },
+            }),
+            &[],
+            false,
+            true,
+        ));
+    }
+    list
 }
 
 #[cfg(test)]
@@ -1366,7 +1545,7 @@ mod tests {
     use super::*;
 
     fn server() -> Server {
-        Server::new("http://127.0.0.1:9".into(), None, false)
+        Server::new("http://127.0.0.1:9".into(), None, false, false)
     }
 
     fn call(s: &mut Server, line: &str) -> Value {
@@ -1392,7 +1571,7 @@ mod tests {
         assert!(s.local.is_none() && !s.noted);
         assert!(engine.upgrade().is_none(), "nothing else keeps the engine alive");
 
-        let mut s = Server::new("http://127.0.0.1:9".into(), None, true);
+        let mut s = Server::new("http://127.0.0.1:9".into(), None, true, false);
         s.local = Some(empty_local().0);
         s.release_idle();
         assert!(s.local.is_some(), "--local keeps its index");
@@ -1446,5 +1625,30 @@ mod tests {
         assert_eq!(a.int("c", 1, 100, 20).unwrap(), 3);
         assert_eq!(a.int("d", 1, 100, 20).unwrap(), 100);
         assert_eq!(a.int("missing", 1, 100, 20).unwrap(), 20);
+    }
+
+    #[test]
+    fn message_tools_are_opt_in() {
+        // Default server hides messaging tools and rejects calls to them.
+        let mut off = server();
+        let list = call(&mut off, r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#);
+        let tools = list["result"]["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 10);
+        assert!(tools.iter().all(|t| t["name"] != "uniflo_send_message"));
+        let denied = call(
+            &mut off,
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"uniflo_send_message","arguments":{"to":"claude:1","text":"hi"}}}"#,
+        );
+        assert_eq!(denied["error"]["code"], -32602);
+
+        // Opt-in `--message` server exposes the 3 messaging tools with accurate readOnlyHint.
+        let mut on = Server::new("http://127.0.0.1:9".into(), None, true, true);
+        let list = call(&mut on, r#"{"jsonrpc":"2.0","id":3,"method":"tools/list"}"#);
+        let tools = list["result"]["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 13);
+        let send = tools.iter().find(|t| t["name"] == "uniflo_send_message").unwrap();
+        assert_eq!(send["annotations"]["readOnlyHint"], false);
+        let inbox = tools.iter().find(|t| t["name"] == "uniflo_inbox").unwrap();
+        assert_eq!(inbox["annotations"]["readOnlyHint"], true);
     }
 }

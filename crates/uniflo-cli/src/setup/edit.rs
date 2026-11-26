@@ -24,26 +24,46 @@ pub enum Outcome {
     Invalid(String),
 }
 
-/// Uniflo's stdio entry for `bin` in a harness's JSON shape.
+/// Uniflo's stdio entry for `bin` in a harness's JSON shape (pure read-only `mcp`).
+#[cfg(test)]
 pub fn entry(shape: Shape, bin: &str) -> Value {
+    entry_with(shape, bin, false)
+}
+
+/// Uniflo's stdio entry for `bin`, optionally enabling `--message`.
+pub fn entry_with(shape: Shape, bin: &str, message: bool) -> Value {
+    let args: Vec<&str> = if message { vec!["mcp", "--message"] } else { vec!["mcp"] };
     match shape {
-        Shape::Plain => json!({ "command": bin, "args": ["mcp"] }),
-        Shape::Stdio => json!({ "type": "stdio", "command": bin, "args": ["mcp"] }),
-        Shape::Copilot => json!({ "type": "local", "command": bin, "args": ["mcp"], "tools": ["*"] }),
-        Shape::OpenCode => json!({ "type": "local", "command": [bin, "mcp"], "enabled": true }),
+        Shape::Plain => json!({ "command": bin, "args": args }),
+        Shape::Stdio => json!({ "type": "stdio", "command": bin, "args": args }),
+        Shape::Copilot => json!({ "type": "local", "command": bin, "args": args, "tools": ["*"] }),
+        Shape::OpenCode => {
+            let mut cmd = vec![bin];
+            cmd.extend(args);
+            json!({ "type": "local", "command": cmd, "enabled": true })
+        }
     }
 }
 
-/// An entry that runs `<…/uniflo> mcp`, in any of the shapes.
-pub fn is_ours(v: &Value) -> bool {
-    let words: Vec<&str> = match (&v["command"], &v["args"]) {
+fn entry_words(v: &Value) -> Option<Vec<&str>> {
+    match (&v["command"], &v["args"]) {
         (Value::String(c), Value::Array(a)) => {
-            std::iter::once(c.as_str()).chain(a.iter().filter_map(Value::as_str)).collect()
+            Some(std::iter::once(c.as_str()).chain(a.iter().filter_map(Value::as_str)).collect())
         }
-        (Value::Array(c), Value::Null) => c.iter().filter_map(Value::as_str).collect(),
-        _ => return false,
-    };
-    matches!(words.as_slice(), [program, "mcp"] if is_uniflo(program))
+        (Value::Array(c), Value::Null) => Some(c.iter().filter_map(Value::as_str).collect()),
+        _ => None,
+    }
+}
+
+/// An entry that runs `<…/uniflo> mcp` (or `<…/uniflo> mcp --message`), in any of the shapes.
+pub fn is_ours(v: &Value) -> bool {
+    let Some(words) = entry_words(v) else { return false };
+    matches!(words.as_slice(), [program, "mcp"] | [program, "mcp", "--message"] if is_uniflo(program))
+}
+
+/// Whether an entry [`is_ours`] enables `--message`.
+pub fn entry_has_message(v: &Value) -> bool {
+    entry_words(v).is_some_and(|w| matches!(w.as_slice(), [_, "mcp", "--message"]))
 }
 
 pub fn is_uniflo(program: &str) -> bool {
@@ -145,7 +165,13 @@ pub fn json_remove(text: Option<&str>, key: &str, created: &[String]) -> Outcome
 }
 
 /// `[mcp_servers.uniflo]` with `command = bin`, `args = ["mcp"]` (Codex without its CLI).
+#[cfg(test)]
 pub fn toml_set(text: Option<&str>, bin: &str) -> Outcome {
+    toml_set_with(text, bin, false)
+}
+
+/// `[mcp_servers.uniflo]` with optional `--message`.
+pub fn toml_set_with(text: Option<&str>, bin: &str, message: bool) -> Outcome {
     let mut doc: toml_edit::DocumentMut = match text.unwrap_or("").parse() {
         Ok(d) => d,
         Err(e) => return Outcome::Invalid(format!("parse failed: {e}")),
@@ -164,15 +190,17 @@ pub fn toml_set(text: Option<&str>, bin: &str) -> Outcome {
         return Outcome::Invalid("`mcp_servers` is not a table".into());
     };
     if let Some(cur) = servers.get(NAME) {
-        match toml_entry(cur) {
-            Some(p) if p == bin => return Outcome::Unchanged,
+        match toml_entry_info(cur) {
+            Some((p, has_msg)) if p == bin && has_msg == message => return Outcome::Unchanged,
             Some(_) => {}
             None => return Outcome::Occupied,
         }
     }
     let mut t = toml_edit::Table::new();
     t.insert("command", toml_edit::value(bin));
-    t.insert("args", toml_edit::value(toml_edit::Array::from_iter(["mcp"])));
+    let args =
+        if message { toml_edit::Array::from_iter(["mcp", "--message"]) } else { toml_edit::Array::from_iter(["mcp"]) };
+    t.insert("args", toml_edit::value(args));
     servers.insert(NAME, toml_edit::Item::Table(t));
     Outcome::Write { text: doc.to_string(), created }
 }
@@ -200,31 +228,148 @@ pub fn toml_remove(text: Option<&str>, created: &[String]) -> Outcome {
     Outcome::Write { text, created: Vec::new() }
 }
 
-/// Program of a TOML `uniflo` entry Uniflo wrote.
-pub fn toml_entry(item: &toml_edit::Item) -> Option<String> {
+/// `(program, has_message_flag)` of a TOML `uniflo` entry Uniflo wrote.
+pub fn toml_entry_info(item: &toml_edit::Item) -> Option<(String, bool)> {
     let t = item.as_table_like()?;
     let program = t.get("command")?.as_str()?;
     let args: Vec<&str> = t.get("args")?.as_array()?.iter().filter_map(|v| v.as_str()).collect();
-    (args == ["mcp"] && is_uniflo(program)).then(|| program.to_owned())
+    if !is_uniflo(program) {
+        return None;
+    }
+    match args.as_slice() {
+        ["mcp"] => Some((program.to_owned(), false)),
+        ["mcp", "--message"] => Some((program.to_owned(), true)),
+        _ => None,
+    }
 }
 
-/// Program of the `uniflo` entry in a probe file: `Ok(None)` absent, `Err(())` present but not
-/// Uniflo's, `Ok(Some(program))` Uniflo's.
-pub fn probe_json(text: &str) -> Option<Result<Option<String>, ()>> {
+/// Program of a TOML `uniflo` entry Uniflo wrote.
+pub fn toml_entry(item: &toml_edit::Item) -> Option<String> {
+    toml_entry_info(item).map(|(p, _)| p)
+}
+
+/// Result of probing a harness config file for a `uniflo` entry:
+/// `Ok(None)` absent, `Err(())` someone else's, `Ok(Some((program, message)))` Uniflo's.
+pub type ProbeResult = Result<Option<(String, bool)>, ()>;
+
+pub fn probe_json_info(text: &str) -> Option<ProbeResult> {
     let root = parse_json(Some(text)).ok()?;
     Some(match root.get("mcpServers").and_then(|s| s.get(NAME)) {
         None => Ok(None),
-        Some(v) if is_ours(v) => Ok(program(v).map(str::to_owned)),
+        Some(v) if is_ours(v) => Ok(program(v).map(|p| (p.to_owned(), entry_has_message(v)))),
         Some(_) => Err(()),
     })
 }
 
-pub fn probe_toml(text: &str) -> Option<Result<Option<String>, ()>> {
+pub fn probe_toml_info(text: &str) -> Option<ProbeResult> {
     let doc: toml_edit::DocumentMut = text.parse().ok()?;
     Some(match doc.get("mcp_servers").and_then(|s| s.get(NAME)) {
         None => Ok(None),
-        Some(item) => toml_entry(item).map(Some).ok_or(()),
+        Some(item) => toml_entry_info(item).map(Some).ok_or(()),
     })
+}
+
+/// The optional Claude Code message pull hook command (`uniflo setup --message`).
+pub fn message_hook_command(bin: &str) -> String {
+    format!("{} message hook --harness claude 2>/dev/null || true", uniflo_core::resume::sh_quote(bin))
+}
+
+fn is_our_message_hook(h: &Value) -> bool {
+    h["type"] == "command"
+        && h["command"]
+            .as_str()
+            .is_some_and(|c| c.contains(" message hook ") && c.split(" message hook ").next().is_some_and(is_uniflo))
+}
+
+const MESSAGE_HOOK_EVENTS: [&str; 2] = ["PostToolUse", "UserPromptSubmit"];
+
+/// Add or refresh Uniflo's optional cross-agent message hook in `hooks.PostToolUse` and
+/// `hooks.UserPromptSubmit` of Claude's `settings.json`.
+pub fn message_hooks_set(text: Option<&str>, command: &str) -> Outcome {
+    let mut root = match parse_json(text) {
+        Ok(m) => m,
+        Err(e) => return Outcome::Invalid(e),
+    };
+    let mut created = Vec::new();
+    if text.is_none() {
+        created.push("file".to_owned());
+    }
+    if !root.contains_key("hooks") {
+        root.insert("hooks".into(), json!({}));
+        created.push("hooks".into());
+    }
+    let Some(hooks) = root.get_mut("hooks").and_then(Value::as_object_mut) else {
+        return Outcome::Invalid("`hooks` is not an object".into());
+    };
+    let mut changed = false;
+    for ev in MESSAGE_HOOK_EVENTS {
+        if !hooks.contains_key(ev) {
+            hooks.insert(ev.into(), json!([]));
+            created.push(format!("hooks.{ev}"));
+        }
+        let Some(groups) = hooks.get_mut(ev).and_then(Value::as_array_mut) else {
+            return Outcome::Invalid(format!("`hooks.{ev}` is not an array"));
+        };
+        let ours = groups
+            .iter_mut()
+            .filter_map(|g| g.get_mut("hooks").and_then(Value::as_array_mut))
+            .flat_map(|hs| hs.iter_mut())
+            .find(|h| is_our_message_hook(h));
+        match ours {
+            Some(h) if h["command"] == command => {}
+            Some(h) => {
+                h["command"] = json!(command);
+                changed = true;
+            }
+            None => {
+                groups.push(json!({ "hooks": [{ "type": "command", "command": command }] }));
+                changed = true;
+            }
+        }
+    }
+    if !changed {
+        return Outcome::Unchanged;
+    }
+    Outcome::Write { text: render_json(root, text), created }
+}
+
+/// Remove only Uniflo's optional message hooks from Claude's `settings.json`, leaving user hooks
+/// and `SessionStart` untouched.
+pub fn message_hooks_remove(text: Option<&str>, created: &[String]) -> Outcome {
+    let Some(t) = text else { return Outcome::Unchanged };
+    let mut root = match parse_json(Some(t)) {
+        Ok(m) => m,
+        Err(e) => return Outcome::Invalid(e),
+    };
+    let Some(hooks) = root.get_mut("hooks").and_then(Value::as_object_mut) else {
+        return Outcome::Unchanged;
+    };
+    let mut removed = false;
+    for ev in MESSAGE_HOOK_EVENTS {
+        let Some(groups) = hooks.get_mut(ev).and_then(Value::as_array_mut) else { continue };
+        groups.retain_mut(|g| {
+            let Some(hs) = g.get_mut("hooks").and_then(Value::as_array_mut) else { return true };
+            let n = hs.len();
+            hs.retain(|h| !is_our_message_hook(h));
+            removed |= hs.len() < n;
+            !(hs.is_empty() && n > 0)
+        });
+    }
+    if !removed {
+        return Outcome::Unchanged;
+    }
+    let had = |k: &str| created.iter().any(|c| c == k);
+    for ev in MESSAGE_HOOK_EVENTS {
+        let key = format!("hooks.{ev}");
+        if had(&key) && hooks.get(ev).and_then(Value::as_array).is_some_and(Vec::is_empty) {
+            hooks.shift_remove(ev);
+        }
+    }
+    if had("hooks") && hooks.is_empty() {
+        root.shift_remove("hooks");
+    }
+    let text = if root.is_empty() && had("file") { String::new() } else { render_json(root, Some(t)) };
+    Outcome::Write { text, created: Vec::new() }
 }
 
 /// The SessionStart hook command Uniflo adds to Claude Code.
@@ -442,12 +587,12 @@ mod tests {
         assert!(text.starts_with(before), "{text}");
         assert!(text.contains("[mcp_servers.uniflo]\ncommand = \"/opt/bin/uniflo\"\nargs = [\"mcp\"]"), "{text}");
         assert_eq!(toml_set(Some(&text), BIN), Outcome::Unchanged);
-        assert_eq!(probe_toml(&text), Some(Ok(Some(BIN.to_owned()))));
+        assert_eq!(probe_toml_info(&text), Some(Ok(Some((BIN.to_owned(), false)))));
         let Outcome::Write { text: back, .. } = toml_remove(Some(&text), &[]) else { panic!() };
         assert_eq!(back, before);
         let taken = "[mcp_servers.uniflo]\ncommand = \"npx\"\n";
         assert_eq!(toml_set(Some(taken), BIN), Outcome::Occupied);
-        assert_eq!(probe_toml(taken), Some(Err(())));
+        assert_eq!(probe_toml_info(taken), Some(Err(())));
         let Outcome::Write { text, created } = toml_set(None, BIN) else { panic!() };
         assert!(!text.contains("[mcp_servers]\n"), "implicit parent table: {text}");
         assert_eq!(toml_remove(Some(&text), &created), Outcome::Write { text: String::new(), created: vec![] });
@@ -471,6 +616,22 @@ mod tests {
         let Outcome::Write { text, created } = hook_set(None, &cmd) else { panic!() };
         assert_eq!(created, ["file", "hooks", "hooks.SessionStart"]);
         assert_eq!(hook_remove(Some(&text), &created), Outcome::Write { text: String::new(), created: vec![] });
+    }
+
+    #[test]
+    fn optional_message_hooks_preserve_session_start_and_user_hooks() {
+        let before = r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"'/opt/bin/uniflo' context --cwd \"$CLAUDE_PROJECT_DIR\" --limit 5 --since 14d 2>/dev/null || true"}]}],"PostToolUse":[{"hooks":[{"type":"command","command":"echo user"}]}]}}"#;
+        let cmd = message_hook_command("/opt/bin/uniflo");
+        assert!(cmd.contains("message hook --harness claude"));
+        let Outcome::Write { text, created } = message_hooks_set(Some(before), &cmd) else { panic!() };
+        assert_eq!(created, ["hooks.UserPromptSubmit"]);
+        assert_eq!(message_hooks_set(Some(&text), &cmd), Outcome::Unchanged);
+        let v: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(v["hooks"]["SessionStart"].as_array().unwrap().len(), 1);
+        assert_eq!(v["hooks"]["PostToolUse"].as_array().unwrap().len(), 2);
+        assert_eq!(v["hooks"]["UserPromptSubmit"].as_array().unwrap().len(), 1);
+        let Outcome::Write { text: back, .. } = message_hooks_remove(Some(&text), &created) else { panic!() };
+        assert_eq!(serde_json::from_str::<Value>(&back).unwrap(), serde_json::from_str::<Value>(before).unwrap());
     }
 
     #[test]

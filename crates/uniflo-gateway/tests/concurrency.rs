@@ -150,7 +150,7 @@ async fn start(num_sessions: usize) -> Srv {
     let router = uniflo_gateway::router_with(
         engine.clone(),
         GuardOptions::default(),
-        Services { fts: Some(fts.clone()), cleanup: None },
+        Services { fts: Some(fts.clone()), cleanup: None, messages: None },
     );
     tokio::spawn(uniflo_gateway::serve(listener, router, std::future::pending()));
     Srv { _dir: dir, engine, fts, claude_dir, addr }

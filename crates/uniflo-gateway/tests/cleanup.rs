@@ -240,7 +240,7 @@ fn world(ttl: Duration) -> World {
 async fn serve(w: &World, guard: GuardOptions) -> std::net::SocketAddr {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let services = Services { fts: Some(w.fts.clone()), cleanup: Some(w.cleanup.clone()) };
+    let services = Services { fts: Some(w.fts.clone()), cleanup: Some(w.cleanup.clone()), messages: None };
     let router = uniflo_gateway::router_with(w.engine.clone(), guard, services);
     tokio::spawn(uniflo_gateway::serve(listener, router, std::future::pending()));
     addr

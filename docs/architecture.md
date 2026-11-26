@@ -117,7 +117,7 @@ agent（Claude Code、Codex…）──stdio JSON-RPC──► uniflo mcp（unif
 网关路由（REST 同一段代码）→ structuredContent
 ```
 
-- `uniflo-core`：`resume`（各 harness 的恢复命令、会话 id 校验、POSIX / PowerShell 转义、终端启动脚本文本与 `open` 的 argv）、`memory`（记忆与指令文件的列举与无状态读权限判断）、`context`（项目最近会话的筛选与 Markdown）。都是纯函数，不碰网络。
+- `uniflo-core`：`resume`（各 harness 的恢复命令、会话 id 校验、POSIX / PowerShell 转义、终端启动脚本文本与 `open` 的 argv）、`memory`（记忆与指令文件的列举与无状态读权限判断）、`context`（项目最近会话的筛选与 Markdown）、`message`（可选跨 Agent 消息总线 `MessageBus`，内存 `RwLock` + SSE 广播 + `<数据目录>/messages/log.jsonl` 懒持久化，ADR-0012）。都是纯本地实现，不写任何 harness 会话文件。
 - `uniflo-gateway::agent`：`/v1/sessions/{key}/resume`、`/v1/sessions/{key}/open-terminal`（写接口，`open` 经可注入的 `Launcher` 运行，测试不开窗口；不用 Apple events，守护进程无需自动化权限）、`/v1/memory`、`/v1/memory/file`，以及 `get_in_process`。为此网关依赖 `tower`（`util` 特性，已在 axum 的依赖树里）。
 - `uniflo-cli`：`mcp`（协议层与工具）、`agent`（`resume` / `context` / `skill` 命令，`skill/SKILL.md` 编进二进制）、`setup/`（`harness.rs` 检测表、`edit.rs` JSON / TOML / hook 编辑与原子写、`mod.rs` 流程与 `setup.json` 记录）。setup 是安装器逻辑，只属于二进制，不进库 crate。
 

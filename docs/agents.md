@@ -2,7 +2,7 @@
 
 > 让 agent 直接查询本机所有会话：stdio MCP 服务器 `uniflo mcp`、随二进制分发的 Skill、一条命令全局接入的 `uniflo setup`，以及恢复会话、记忆与指令文件、接力上下文。
 
-状态：`current` · 更新：2026-11-17
+状态：`current` · 更新：2026-11-26
 
 同一能力有三个入口：REST（`docs/api.md`）、CLI `--json`、MCP `structuredContent`（工具参数传 `structured: true` 才带）。MCP 工具内部就是对网关 REST 路由的 `GET`，所以三者的数值与 id 一致（`crates/uniflo-cli/tests/agent.rs` 的 `mcp_cli_and_rest_agree` 逐项比对）。浮点也逐位一致：`serde_json` 开启了 `float_roundtrip`，响应解析后再输出不会改动最后一位。唯一会随时间变的是全文检索的 `score`：它带最近活动加权，隔一段时间再查会略有变化，比对时去掉它。
 
@@ -87,9 +87,9 @@
 
 ### 流程与参数
 
-- **交互**（stdin、stdout 都是终端）：选接入方式（MCP 默认 / Skill / 两者 / 跳过）→ 多选检测到的 harness（默认全选）→ 检测到 Claude Code 时问是否装 SessionStart hook（默认否）→ 列出要改的文件和命令 → 确认后执行。macOS / Linux 上是带颜色的方向键界面：`↑↓`（或 `j`/`k`）移动，空格勾选，`a` 全选/清空，回车确认，`Esc` 取消，数字键直接选单选项；Windows 和 `TERM=dumb` 回落到输入编号的文字提问，`NO_COLOR` 关闭颜色。`uniflo clean` 的确认同样用单键 `y`/`n`。
+- **交互**（stdin、stdout 都是终端）：选接入方式（MCP 默认 / Skill / 两者 / 跳过）→ 多选检测到的 harness（默认全选）→ 检测到 Claude Code 时问是否装 SessionStart hook（默认否）→ 问是否启用可选跨 Agent 消息（默认否，ADR-0012）→ 列出要改的文件和命令 → 确认后执行。macOS / Linux 上是带颜色的方向键界面：`↑↓`（或 `j`/`k`）移动，空格勾选，`a` 全选/清空，回车确认，`Esc` 取消，数字键直接选单选项；Windows 和 `TERM=dumb` 回落到输入编号的文字提问，`NO_COLOR` 关闭颜色。`uniflo clean` 的确认同样用单键 `y`/`n`。
 - **非交互**：只打印计划，不写任何文件；要执行加 `--yes`。`--dry-run` 在任何环境下都只打印。
-- 参数：`--mcp` / `--skill` / `--both` / `--none`（互斥）、`--agents claude,codex`、`--hook`、`-y/--yes`、`--dry-run`、`--uninstall`、`--reload`。环境变量 `UNIFLO_SETUP=mcp|skill|both|none` 等同对应参数；`UNIFLO_NO_SETUP=1` 关掉自动询问。
+- 参数：`--mcp` / `--skill` / `--both` / `--none`（互斥）、`--agents claude,codex`、`--hook`、`--message`（默认关闭，仅显式开启时给 MCP 条目加 `--message` 并为 Claude Code 写入静默拉取 hook）、`-y/--yes`、`--dry-run`、`--uninstall`、`--reload`。环境变量 `UNIFLO_SETUP=mcp|skill|both|none` 等同对应参数；`UNIFLO_NO_SETUP=1` 关掉自动询问。
 - **检测**：PATH 里有它的可执行文件，或它的配置目录存在，就算已安装；都没有就跳过，也不建目录。
 - MCP 条目里写的是当前 `uniflo` 可执行文件的绝对路径（`canonicalize` 后），换了安装位置用 `--reload` 刷新。
 
@@ -158,6 +158,15 @@ Pi、Grok 没有可用的 MCP 客户端，只装 Skill（选了 MCP 也会装）
 路径含空格等特殊字符时按 POSIX 规则加单引号。
 
 用绝对路径而不是 PATH 里的 `uniflo`，hook 运行环境的 PATH 不可靠；`--reload` 会刷新它。`--uninstall` 只删这一条。
+
+### 可选跨 Agent 消息（`--message`，默认关闭）
+
+遵循 [ADR-0012](decisions/ADR-0012-可选跨Agent消息总线.md)，默认 `uniflo setup` 与 `uniflo mcp` 仍为纯只读（仅暴露上表 10 个工具，不写消息 hook）。仅在用户显式启用 `uniflo setup --message`（或在交互提问中确认开启）时：
+
+- **MCP 扩展工具（`uniflo mcp --message`）**：额外暴露 `uniflo_send_message`（按会话 key / 前缀 / `cwd:<目录>` 发信，返回投递提示与恢复命令）、`uniflo_inbox`（查收件箱）、`uniflo_ack_messages`（标记 `delivered` / `acked`）。
+- **Claude Code 静默拉取 hook**：在 `~/.claude/settings.json` 的 `hooks.PostToolUse` 与 `hooks.UserPromptSubmit` 中追加 `<uniflo 绝对路径> message hook --harness claude 2>/dev/null || true`。无未投递消息或守护进程未运行时静默退出码 0、无任何输出；有新消息时标记 `delivered` 并输出 `<uniflo-messages>…</uniflo-messages>` 注入当前上下文。
+- **CLI 命令**：`uniflo message send <to> <text>`、`uniflo message inbox`、`uniflo message ack`、`uniflo message watch`（订阅 `/v1/messages/stream` SSE 实时流）、`uniflo message hook`。
+- **对称撤销**：状态记在 `setup.json` 的 `message` 与 `message_hook` 字段，重新运行不带 `--message` 的 `uniflo setup` 或运行 `uniflo setup --uninstall` 时干净移除，不影响用户自有条目和 `SessionStart` hook。
 
 ### 测试与沙箱
 

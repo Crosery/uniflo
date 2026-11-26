@@ -11,9 +11,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub mod cleanup;
+pub mod message;
 pub mod search;
 mod trajectory;
 mod usage;
+pub use message::*;
 pub use trajectory::*;
 pub use usage::*;
 mod agent;

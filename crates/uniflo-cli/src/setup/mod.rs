@@ -47,6 +47,9 @@ pub struct SetupArgs {
     /// Also add a Claude Code SessionStart hook that prints `uniflo context` into new sessions.
     #[arg(long)]
     pub hook: bool,
+    /// Enable optional cross-agent messaging (MCP send/inbox tools + silent Claude Code pull hook; off by default).
+    #[arg(long)]
+    pub message: bool,
     /// Apply without asking (outside a terminal nothing is written without it).
     #[arg(short = 'y', long)]
     pub yes: bool,
@@ -54,7 +57,7 @@ pub struct SetupArgs {
     #[arg(long)]
     pub dry_run: bool,
     /// Undo what setup recorded: remove `uniflo` entries and links, keep backups.
-    #[arg(long, conflicts_with_all = ["mcp", "skill", "both", "none", "reload", "hook"])]
+    #[arg(long, conflicts_with_all = ["mcp", "skill", "both", "none", "reload", "hook", "message"])]
     pub uninstall: bool,
     /// Point recorded entries at this executable and connect newly detected harnesses.
     #[arg(long)]
@@ -122,6 +125,11 @@ pub struct State {
     pub skill: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hook: Option<FileRec>,
+    /// Whether optional cross-agent messaging (`--message`) was opted into (off by default).
+    #[serde(default)]
+    pub message: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_hook: Option<FileRec>,
     /// Every file setup has written, symlink it created and backup it made.
     #[serde(default)]
     pub files: Vec<String>,
@@ -333,6 +341,7 @@ enum Step {
     },
     Toml {
         path: PathBuf,
+        message: bool,
     },
     Link {
         link: PathBuf,
@@ -371,9 +380,11 @@ struct Plan {
     /// Write SKILL.md here first (some harness gets the Skill).
     skill: Option<PathBuf>,
     hook: Option<(PathBuf, String)>,
-    /// Uninstall: remove these.
+    message_hook: Option<(PathBuf, String)>,
+    /// Uninstall / toggle-off: remove these.
     unskill: Option<PathBuf>,
     unhook: Option<FileRec>,
+    unmessage_hook: Option<FileRec>,
     undo: bool,
 }
 
@@ -381,7 +392,9 @@ struct Plan {
 fn flow(ctx: &Ctx, a: &SetupArgs, tty: bool, input: &mut dyn BufRead, out: &mut dyn Write) -> Result<()> {
     let mut state = State::load(&ctx.state_path);
     if a.uninstall {
-        let Some(st) = state.as_mut().filter(|s| !s.harnesses.is_empty() || s.skill.is_some() || s.hook.is_some())
+        let Some(st) = state
+            .as_mut()
+            .filter(|s| !s.harnesses.is_empty() || s.skill.is_some() || s.hook.is_some() || s.message_hook.is_some())
         else {
             writeln!(
                 out,
@@ -403,6 +416,8 @@ fn flow(ctx: &Ctx, a: &SetupArgs, tty: bool, input: &mut dyn BufRead, out: &mut 
         st.harnesses.clear();
         st.skill = None;
         st.hook = None;
+        st.message = false;
+        st.message_hook = None;
         st.mode = None;
         st.asked = true;
         st.save(&ctx.state_path)?;
@@ -427,7 +442,8 @@ fn flow(ctx: &Ctx, a: &SetupArgs, tty: bool, input: &mut dyn BufRead, out: &mut 
                 let known: Vec<&Detected> =
                     detected.iter().filter(|d| st.connected().any(|id| id == d.spec.id)).collect();
                 let hook = st.hook.is_some();
-                let refresh = plan(ctx, mode, &known, hook);
+                let message = st.message;
+                let refresh = plan(ctx, mode, &known, hook, message, None);
                 apply(ctx, &refresh, st, &mut std::io::sink())?;
                 st.save(&ctx.state_path)?;
                 refreshed(st, &known, mode, out)?;
@@ -442,7 +458,7 @@ fn flow(ctx: &Ctx, a: &SetupArgs, tty: bool, input: &mut dyn BufRead, out: &mut 
                 );
                 let fresh: Vec<&Detected> = detected.iter().filter(|d| new.contains(&d.spec.id)).collect();
                 if ask_yes(input, out, &q, true) {
-                    let add = plan(ctx, mode, &fresh, false);
+                    let add = plan(ctx, mode, &fresh, false, message, None);
                     print_plan(ctx, &add, out)?;
                     apply(ctx, &add, st, out)?;
                 } else {
@@ -548,7 +564,21 @@ fn flow(ctx: &Ctx, a: &SetupArgs, tty: bool, input: &mut dyn BufRead, out: &mut 
                     ),
                     false,
                 )));
-    let todo = plan(ctx, mode, &picked, hook);
+    let message = a.message
+        || (a.reload && state.as_ref().is_some_and(|s| s.message))
+        || (interactive
+            && (mode.mcp() || claude)
+            && ask_yes(
+                input,
+                out,
+                &tr!(
+                    "启用可选跨 Agent 消息（给 MCP 加发信/收件箱工具，并为 Claude Code 加静默拉取 hook，默认否）？",
+                    "Enable optional cross-agent messaging (MCP send/inbox tools + silent Claude Code pull hook, off by default)?"
+                ),
+                false,
+            ));
+    let old_message_hook = (!message).then(|| state.as_ref().and_then(|s| s.message_hook.clone())).flatten();
+    let todo = plan(ctx, mode, &picked, hook, message, old_message_hook);
     print_plan(ctx, &todo, out)?;
     if !confirmed(a, tty, input, out)? {
         return Ok(());
@@ -557,6 +587,10 @@ fn flow(ctx: &Ctx, a: &SetupArgs, tty: bool, input: &mut dyn BufRead, out: &mut 
     apply(ctx, &todo, &mut st, out)?;
     st.asked = true;
     st.mode = Some(mode);
+    st.message = message;
+    if !message {
+        st.message_hook = None;
+    }
     st.binary = Some(ctx.bin.clone());
     st.save(&ctx.state_path)?;
     let n = todo.items.len();
@@ -768,7 +802,14 @@ fn ask_agents<'a>(input: &mut dyn BufRead, out: &mut dyn Write, detected: &'a [D
 }
 
 /// What connecting `picked` in `mode` takes. Reads (never writes) the files involved.
-fn plan(ctx: &Ctx, mode: Mode, picked: &[&Detected], hook: bool) -> Plan {
+fn plan(
+    ctx: &Ctx,
+    mode: Mode,
+    picked: &[&Detected],
+    hook: bool,
+    message: bool,
+    unmessage_hook: Option<FileRec>,
+) -> Plan {
     let shared = ctx.skill_dir();
     let mut items = Vec::new();
     let mut needs_skill = false;
@@ -776,7 +817,7 @@ fn plan(ctx: &Ctx, mode: Mode, picked: &[&Detected], hook: bool) -> Plan {
         let spec = d.spec;
         let mut steps = Vec::new();
         if mode.mcp() {
-            steps.extend(mcp_steps(ctx, d));
+            steps.extend(mcp_steps(ctx, d, message));
         }
         if mode.skill() || (mode.mcp() && matches!(spec.mcp, Mcp::None)) {
             needs_skill = true;
@@ -810,11 +851,14 @@ fn plan(ctx: &Ctx, mode: Mode, picked: &[&Detected], hook: bool) -> Plan {
     let skill_file = shared.join("SKILL.md");
     let skill = (needs_skill && std::fs::read_to_string(&skill_file).ok().as_deref() != Some(crate::agent::SKILL))
         .then_some(skill_file);
+    let claude = picked.iter().any(|d| d.spec.id == "claude");
     let hook = hook.then(|| (ctx.env.file(".claude/settings.json"), edit::hook_command(&ctx.bin)));
-    Plan { mode, items, skill, hook, unskill: None, unhook: None, undo: false }
+    let message_hook =
+        (claude && message).then(|| (ctx.env.file(".claude/settings.json"), edit::message_hook_command(&ctx.bin)));
+    Plan { mode, items, skill, hook, message_hook, unskill: None, unhook: None, unmessage_hook, undo: false }
 }
 
-fn mcp_steps(ctx: &Ctx, d: &Detected) -> Vec<Step> {
+fn mcp_steps(ctx: &Ctx, d: &Detected, message: bool) -> Vec<Step> {
     let bin = ctx.bin.as_str();
     match &d.spec.mcp {
         Mcp::None => {
@@ -826,7 +870,7 @@ fn mcp_steps(ctx: &Ctx, d: &Detected) -> Vec<Step> {
         }
         Mcp::File { file, key, shape } => {
             let path = ctx.env.file(file);
-            let want = edit::entry(*shape, bin);
+            let want = edit::entry_with(*shape, bin, message);
             let text = std::fs::read_to_string(&path).ok();
             match edit::json_set(text.as_deref(), key, &want) {
                 Outcome::Write { .. } => vec![Step::Json { path, key, want }],
@@ -838,8 +882,8 @@ fn mcp_steps(ctx: &Ctx, d: &Detected) -> Vec<Step> {
             let Some(cli) = &d.cli else {
                 if *toml_fallback {
                     let text = std::fs::read_to_string(&probe_path).ok();
-                    return match edit::toml_set(text.as_deref(), bin) {
-                        Outcome::Write { .. } => vec![Step::Toml { path: probe_path }],
+                    return match edit::toml_set_with(text.as_deref(), bin, message) {
+                        Outcome::Write { .. } => vec![Step::Toml { path: probe_path, message }],
                         o => vec![note_for(ctx, &probe_path, "mcp_servers.uniflo", o)],
                     };
                 }
@@ -852,17 +896,21 @@ fn mcp_steps(ctx: &Ctx, d: &Detected) -> Vec<Step> {
                     ),
                 )];
             };
-            let argv = |tpl: &[&str]| -> Vec<String> {
-                std::iter::once(cli.display().to_string())
+            let argv = |tpl: &[&str], with_msg: bool| -> Vec<String> {
+                let mut v: Vec<String> = std::iter::once(cli.display().to_string())
                     .chain(tpl.iter().map(|w| if *w == "{bin}" { bin.to_owned() } else { (*w).to_owned() }))
-                    .collect()
+                    .collect();
+                if with_msg {
+                    v.push("--message".to_owned());
+                }
+                v
             };
             match found {
-                Some(Ok(Some(p))) if p == bin => {
+                Some(Ok(Some((p, has_msg)))) if p == bin && has_msg == message => {
                     let f = ctx.env.show(&probe_path);
                     vec![Step::Note(Note::Unchanged, tr!("MCP 已就绪（{f}）", "MCP in place ({f})"))]
                 }
-                Some(Ok(Some(_))) => vec![Step::Run { argv: argv(add), first: Some(argv(remove)) }],
+                Some(Ok(Some(_))) => vec![Step::Run { argv: argv(add, message), first: Some(argv(remove, false)) }],
                 Some(Err(())) => {
                     let f = ctx.env.show(&probe_path);
                     vec![Step::Note(
@@ -873,21 +921,21 @@ fn mcp_steps(ctx: &Ctx, d: &Detected) -> Vec<Step> {
                         ),
                     )]
                 }
-                Some(Ok(None)) | None => vec![Step::Run { argv: argv(add), first: None }],
+                Some(Ok(None)) | None => vec![Step::Run { argv: argv(add, message), first: None }],
             }
         }
     }
 }
 
 /// The file a harness's `mcp add` writes, and what its `uniflo` entry is: `None` unreadable,
-/// `Ok(None)` absent, `Ok(Some(program))` Uniflo's, `Err(())` someone else's.
-fn probe_cli(ctx: &Ctx, probe: &Probe) -> (PathBuf, Option<Result<Option<String>, ()>>) {
+/// `Ok(None)` absent, `Ok(Some((program, message)))` Uniflo's, `Err(())` someone else's.
+fn probe_cli(ctx: &Ctx, probe: &Probe) -> (PathBuf, Option<edit::ProbeResult>) {
     let (p, json) = match probe {
         Probe::Json(f) => (ctx.env.file(f), true),
         Probe::Toml(f) => (ctx.env.file(f), false),
     };
     let text = std::fs::read_to_string(&p).ok();
-    let found = text.and_then(|t| if json { edit::probe_json(&t) } else { edit::probe_toml(&t) });
+    let found = text.and_then(|t| if json { edit::probe_json_info(&t) } else { edit::probe_toml_info(&t) });
     (p, found)
 }
 
@@ -969,8 +1017,10 @@ fn uninstall_plan(ctx: &Ctx, st: &State) -> Plan {
         items,
         skill: None,
         hook: None,
+        message_hook: None,
         unskill: st.skill.as_ref().map(PathBuf::from),
         unhook: st.hook.clone(),
+        unmessage_hook: st.message_hook.clone(),
         undo: true,
     }
 }
@@ -1020,6 +1070,30 @@ fn print_plan(ctx: &Ctx, p: &Plan, out: &mut dyn Write) -> Result<()> {
             )
         )?;
     }
+    if let Some((f, cmd)) = &p.message_hook {
+        let f = ctx.env.show(f);
+        writeln!(
+            out,
+            "  {:<10} {}",
+            "message",
+            tr!(
+                "编辑 {f}：hooks.PostToolUse / UserPromptSubmit 追加 `{cmd}`（改前备份）",
+                "edit {f}: append `{cmd}` to hooks.PostToolUse / UserPromptSubmit (backed up first)"
+            )
+        )?;
+    }
+    if let Some(h) = &p.unmessage_hook {
+        let f = ctx.env.show(Path::new(&h.path));
+        writeln!(
+            out,
+            "  {:<10} {}",
+            "message",
+            tr!(
+                "编辑 {f}：移除 uniflo 的消息拉取 hook（改前备份）",
+                "edit {f}: remove the uniflo message pull hooks (backed up first)"
+            )
+        )?;
+    }
     Ok(())
 }
 
@@ -1040,7 +1114,7 @@ fn describe(ctx: &Ctx, s: &Step) -> String {
         Step::Json { path, key, .. } => {
             tr!("编辑 {}：写入 {key}.uniflo（改前备份）", "edit {}: set {key}.uniflo (backed up first)", show(path))
         }
-        Step::Toml { path } => tr!(
+        Step::Toml { path, .. } => tr!(
             "编辑 {}：写入 [mcp_servers.uniflo]（改前备份）",
             "edit {}: set [mcp_servers.uniflo] (backed up first)",
             show(path)
@@ -1131,6 +1205,41 @@ fn apply(ctx: &Ctx, p: &Plan, st: &mut State, out: &mut dyn Write) -> Result<()>
             )?;
         }
     }
+    if let Some((path, cmd)) = &p.message_hook {
+        let text = std::fs::read_to_string(path).ok();
+        match edit::message_hooks_set(text.as_deref(), cmd) {
+            Outcome::Write { text, created } => {
+                let b = edit::write(path, &text, &ctx.stamp)?;
+                st.backups.extend(b.map(|b| b.display().to_string()));
+                st.files.push(path.display().to_string());
+                let created = match &st.message_hook {
+                    Some(old) if created.is_empty() => old.created.clone(),
+                    _ => created,
+                };
+                st.message_hook = Some(FileRec { path: path.display().to_string(), created });
+                writeln!(out, "{}", step(Mark::Ok, &format!("{:<10} {}", "message", ctx.env.show(path))))?;
+            }
+            Outcome::Unchanged => {
+                st.message_hook
+                    .get_or_insert_with(|| FileRec { path: path.display().to_string(), created: Vec::new() });
+            }
+            o => writeln!(out, "{}", step(Mark::Info, &format!("{:<10} {o:?}", "message")))?,
+        }
+    }
+    if let Some(h) = &p.unmessage_hook {
+        let path = PathBuf::from(&h.path);
+        let text = std::fs::read_to_string(&path).ok();
+        if let Outcome::Write { text, .. } = edit::message_hooks_remove(text.as_deref(), &h.created) {
+            let b =
+                if text.is_empty() { edit::delete(&path, &ctx.stamp)? } else { edit::write(&path, &text, &ctx.stamp)? };
+            st.backups.extend(b.map(|b| b.display().to_string()));
+            writeln!(
+                out,
+                "{}",
+                step(Mark::Ok, &format!("{:<10} {}", "message", tr!("已移除 {}", "removed {}", ctx.env.show(&path))))
+            )?;
+        }
+    }
     if let Some(f) = &p.unskill {
         if f.is_file() {
             std::fs::remove_file(f)?;
@@ -1193,13 +1302,17 @@ fn exec(
                 },
             }
         }
-        Step::Toml { path } => {
+        Step::Toml { path, message } => {
             let text = std::fs::read_to_string(path).ok();
-            match edit::toml_set(text.as_deref(), &ctx.bin) {
+            match edit::toml_set_with(text.as_deref(), &ctx.bin, *message) {
                 Outcome::Write { text, created } => {
                     let b = edit::write(path, &text, &ctx.stamp).map_err(failed)?;
                     backups.extend(b.map(|b| b.display().to_string()));
                     files.push(path.display().to_string());
+                    let created = match &rec.mcp {
+                        Some(McpRec::Toml { created: old, .. }) if created.is_empty() => old.clone(),
+                        _ => created,
+                    };
                     rec.mcp = Some(McpRec::Toml { path: path.display().to_string(), created });
                     Ok(Some(tr!("已写入 {}", "wrote {}", ctx.env.show(path))))
                 }
