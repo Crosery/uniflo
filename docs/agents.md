@@ -93,33 +93,13 @@
 - **检测**：PATH 里有它的可执行文件，或它的配置目录存在，就算已安装；都没有就跳过，也不建目录。
 - MCP 条目里写的是当前 `uniflo` 可执行文件的绝对路径（`canonicalize` 后），换了安装位置用 `--reload` 刷新。
 
-### MCP 注册
+### MCP 与 Skill 接入（覆盖全部 33 个 harness）
 
-有官方命令的 harness 用命令注册；已有一个指向别处的 `uniflo` 条目且是 Uniflo 写的，先 `remove` 再 `add`；名字被别人占用则不动，只提示。
+`uniflo setup` 识别 Uniflo 支持的全部 **33 个 harness**：
 
-| harness（id） | 注册命令 | 写入位置（探测用） |
-|---|---|---|
-| Claude Code（`claude`） | `claude mcp add --scope user uniflo -- <uniflo> mcp` | `~/.claude.json` 的 `mcpServers` |
-| Codex（`codex`） | `codex mcp add uniflo -- <uniflo> mcp`；没有 `codex` 命令时用 `toml_edit` 改 `~/.codex/config.toml` 的 `[mcp_servers.uniflo]` | `~/.codex/config.toml` |
-| Gemini CLI（`gemini`） | `gemini mcp add -s user uniflo <uniflo> mcp` | `~/.gemini/settings.json` |
-| Factory Droid（`factory`，别名 `droid`） | `droid mcp add uniflo --type stdio -- <uniflo> mcp` | `~/.factory/mcp.json` |
-| CodeBuddy（`codebuddy`） | `codebuddy mcp add -s user uniflo -- <uniflo> mcp` | `~/.codebuddy/.mcp.json` |
-| Qoder（`qoder`，别名 `qodercli`） | `qodercli mcp add -s user uniflo -- <uniflo> mcp` | `~/.qoder/settings.json` |
-
-其余 harness 直接编辑 JSON（`CLAUDE_CONFIG_DIR`、`CODEX_HOME` 设置时，claude / codex 的文件随之改变位置）：
-
-| harness | 文件 | 条目 |
-|---|---|---|
-| Cursor | `~/.cursor/mcp.json` | `mcpServers.uniflo = {command, args: ["mcp"]}` |
-| oh-my-pi | `~/.omp/agent/mcp.json` | `mcpServers.uniflo = {type: "stdio", command, args}` |
-| OpenCode | `~/.config/opencode/opencode.json` | `mcp.uniflo = {type: "local", command: [<uniflo>, "mcp"], enabled: true}` |
-| Kimi Code | `~/.kimi-code/mcp.json` | `mcpServers.uniflo = {command, args}` |
-| Kiro | `~/.kiro/settings/mcp.json` | 同上 |
-| GitHub Copilot CLI | `~/.copilot/mcp-config.json` | `mcpServers.uniflo = {type: "local", command, args, tools: ["*"]}` |
-| Qwen Code | `~/.qwen/settings.json` | `mcpServers.uniflo = {command, args}` |
-| Antigravity | `~/.gemini/config/mcp_config.json` | `mcpServers.uniflo = {command, args: ["mcp"]}` |
-
-Pi、Grok 没有可用的 MCP 客户端，只装 Skill（选了 MCP 也会装）。
+- **官方 CLI 注册（6 个）**：`claude`、`codex`（无 CLI 时用 `toml_edit` 改 `~/.codex/config.toml`）、`gemini`、`factory`（别名 `droid`）、`codebuddy`、`qoder`（别名 `qodercli`）。
+- **原子 JSON 编辑（15 个）**：`antigravity`（`~/.gemini/config/mcp_config.json`）、`cursor`、`omp`、`opencode`、`pi`（`~/.pi/agent/mcp.json`）、`workbuddy`（`~/.workbuddy/mcp.json`）、`commandcode`（`~/.commandcode/mcp.json`）、`kilo`（`~/.config/kilo/kilo.jsonc`）、`mimocode`（`~/.config/mimocode/mimocode.jsonc`）、`zcode`（`~/.zcode/cli/config.json` 的 `mcp.servers`）、`prime`（`~/.prime/agent/settings.json`）、`kimi`、`kiro`、`copilot`、`qwen`。
+- **Skill / CLI 接入（12 个）**：`reasonix`、`devin`、`hermes`、`minimax`、`grok`、`dsh`、`crosery`、`openclaw`、`craft`、`cline`、`roo`、`kodu`（选择 MCP 模式时也会自动安装 Skill，使所有 harness 均可用）。
 
 编辑规则：
 
@@ -143,30 +123,29 @@ Pi、Grok 没有可用的 MCP 客户端，只装 Skill（选了 MCP 也会装）
 ### 自动触发
 
 - 第一次在终端里运行任意查询类命令（不含 `daemon`、`mcp`、`setup`、`skill`、`context`、`update`）且从未问过时，提示一次；回答"否"会记进 `setup.json`，不再追问。
-- `uniflo update` 安装成功后由新版本运行隐藏的 `uniflo setup --after-update`：先让守护进程换上新版本（任何环境都做），再处理接入（仅终端里）：从未配置过 → 完整询问一次；已配置 → 静默 `--reload` 并打印一行汇总，只对新检测到的 harness 询问；选过"跳过"→ 什么都不做。
+- `uniflo update` 安装成功后（以及 `install.sh` / `install.ps1` 安装末尾）会运行 `uniflo setup --after-update`：先让守护进程换上新版本（仅 `uniflo update` 且任何环境都做），再处理接入（仅终端里）：从未配置过 → 完整询问一次；已配置 → 自动静默刷新已接入条目并自动补接新检测到的 harness（不再重复打扰）；仅当版本引入了 `setup.json` 的 `seen_features` 尚未记录的新功能时才询问该新功能一次；选过"跳过"→ 什么都不做。
 - 安装脚本（`install.sh` / `install.ps1`）结尾：在终端里运行 `uniflo setup`；`--no-setup`、`UNIFLO_NO_SETUP=1` 或非终端时跳过。
 - `CI` 有值、`UNIFLO_NO_SETUP=1`、非终端、守护进程、MCP 服务器：从不提问。
 
-### SessionStart hook（可选，仅 Claude Code）
+### SessionStart 上下文 Hook（可选，8 个支持原生 Hook 的 harness）
 
-在 `~/.claude/settings.json` 的 `hooks.SessionStart` 追加一组 `{hooks: [{type: "command", command}]}`，命令为：
+对支持 `SessionStart` 原生 Hook 的 harness（`claude`、`codex`、`gemini`、`codebuddy`、`qoder`、`workbuddy`、`reasonix`、`devin`），开启 `--hook` 时按各自配置格式追加 `uniflo context` 命令，改前备份并记入 `setup.json` 的 `context_hooks`，`--uninstall` 对称移除。
 
-```sh
-<uniflo 绝对路径> context --cwd "$CLAUDE_PROJECT_DIR" --limit 5 --since 14d 2>/dev/null || true
-```
+### 可选跨 Agent 消息与进程级看门狗（`--message`，默认关闭）
 
-路径含空格等特殊字符时按 POSIX 规则加单引号。
+遵循 [ADR-0012](decisions/ADR-0012-可选跨Agent消息总线.md)，默认 `uniflo setup` 与 `uniflo mcp` 仍为纯只读（仅暴露 10 个工具，不写消息 hook）。仅在用户显式启用 `uniflo setup --message`（或在交互提问/新功能提示中确认开启）时：
 
-用绝对路径而不是 PATH 里的 `uniflo`，hook 运行环境的 PATH 不可靠；`--reload` 会刷新它。`--uninstall` 只删这一条。
-
-### 可选跨 Agent 消息（`--message`，默认关闭）
-
-遵循 [ADR-0012](decisions/ADR-0012-可选跨Agent消息总线.md)，默认 `uniflo setup` 与 `uniflo mcp` 仍为纯只读（仅暴露上表 10 个工具，不写消息 hook）。仅在用户显式启用 `uniflo setup --message`（或在交互提问中确认开启）时：
-
-- **MCP 扩展工具（`uniflo mcp --message`）**：额外暴露 `uniflo_send_message`（按会话 key / 前缀 / `cwd:<目录>` 发信，返回投递提示与恢复命令）、`uniflo_inbox`（查收件箱）、`uniflo_ack_messages`（标记 `delivered` / `acked`）。
-- **Claude Code 静默拉取 hook**：在 `~/.claude/settings.json` 的 `hooks.PostToolUse` 与 `hooks.UserPromptSubmit` 中追加 `<uniflo 绝对路径> message hook --harness claude 2>/dev/null || true`。无未投递消息或守护进程未运行时静默退出码 0、无任何输出；有新消息时标记 `delivered` 并输出 `<uniflo-messages>…</uniflo-messages>` 注入当前上下文。
-- **CLI 命令**：`uniflo message send <to> <text>`、`uniflo message inbox`、`uniflo message ack`、`uniflo message watch`（订阅 `/v1/messages/stream` SSE 实时流）、`uniflo message hook`。
-- **对称撤销**：状态记在 `setup.json` 的 `message` 与 `message_hook` 字段，重新运行不带 `--message` 的 `uniflo setup` 或运行 `uniflo setup --uninstall` 时干净移除，不影响用户自有条目和 `SessionStart` hook。
+- **全 MCP 进程级 SSE 看门狗（21 个 MCP harness 通用）**：每个 agent 启动时都会拉起 `uniflo mcp --message` 随进程同生共死；进程内置后台线程按当前工作目录直连守护进程 `/v1/messages/stream`（零轮询 SSE）：
+  - 新消息到达时毫秒级推送 JSON-RPC `notifications/message` 与 `notifications/resources/updated`（资源 `uniflo://inbox`）；
+  - 在任意 `uniflo_*` 工具返回尾部自动附带 `<uniflo-messages>…</uniflo-messages>` 并标记 `delivered`；
+  - 额外暴露 4 个工具：`uniflo_send_message`、`uniflo_inbox`、`uniflo_ack_messages`、`uniflo_wait_message`（阻塞在 SSE 看门狗上，收到回复毫秒级唤醒）。
+- **全量原生静默拉取 Hook（10 个支持 Hook 的 harness）**：自动按各家真实格式写入静默拉取命令 `<uniflo> message hook --harness <id> 2>/dev/null || true`：
+  - Claude 风格（`hooks.{PostToolUse,UserPromptSubmit}`）：`claude`（`~/.claude/settings.json`）、`codex`（`~/.codex/hooks.json`）、`codebuddy`（`~/.codebuddy/settings.json`）、`qoder`（`~/.qoder/settings.json`）、`workbuddy`（`~/.workbuddy/settings.json`）、`commandcode`（`~/.commandcode/settings.json`）、`devin`（`~/.config/devin/config.json`）；
+  - Gemini 风格（`hooks.{AfterTool,BeforeAgent}`）：`gemini`（`~/.gemini/settings.json`）；
+  - Antigravity 独立命名空间（`uniflo.{PreInvocation,PostToolUse}`）：`antigravity`（`~/.gemini/config/hooks.json`）；
+  - Reasonix 扁平风格（`hooks.{PostToolUse,UserPromptSubmit}`）：`reasonix`（`~/.reasonix/settings.json`）。
+- **Skill 与 CLI 兜底（覆盖剩余全部 harness）**：内置 `SKILL.md` 包含 `uniflo message send|inbox|ack|watch` 用法，即使无 MCP / 无原生 Hook 的 harness 也可通过 CLI 与 SSE 实时通信。
+- **对称撤销**：状态记在 `setup.json` 的 `message`、`message_hooks` 与 `seen_features` 字段，关闭 `--message` 或 `--uninstall` 时干净移除，不影响用户自有条目。
 
 ### 测试与沙箱
 

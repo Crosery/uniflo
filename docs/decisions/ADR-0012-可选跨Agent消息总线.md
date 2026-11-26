@@ -24,10 +24,11 @@ Uniflo 已经以单守护进程维护全机所有会话的实时索引（`key`�
    - 写接口：`POST /v1/messages`（发信）、`POST /v1/messages/ack`（标记已投递/已读）；全部自动经 `uniflo-gateway::write::check` 校验回环 Host/Origin、`X-Uniflo-Write: 1` 与可选 token，`--read-only` 时一律 403。
 4. **`uniflo setup` 默认关闭，显式按需启用（扩展 ADR-0007）**：
    - 默认运行 `uniflo setup`（含 `--mcp` / `--skill` / `--both`）**不启用**消息功能：MCP 条目仍注册纯只读的 `<uniflo> mcp`（仅 10 个 `readOnlyHint: true` 工具），不写任何消息 Hook。
-   - 仅当用户显式传 `--message` 或在交互提问（默认「否」）中确认开启时：
-     - MCP 条目注册 `<uniflo> mcp --message`，额外暴露 `uniflo_send_message`、`uniflo_inbox`、`uniflo_ack_messages` 三个工具；
-     - 检测到 Claude Code 时在 `~/.claude/settings.json` 的 `hooks.PostToolUse` 与 `hooks.UserPromptSubmit` 中添加 `<uniflo> message hook --harness claude 2>/dev/null || true`（先备份、原子写、不碰其他条目）。
-   - 写入状态记录在 `<配置目录>/setup.json`（`message`、`message_hooks`），`uniflo setup --uninstall` 对称清理，`--reload` 按记录保持开关并刷新路径。
+   - 仅当用户显式传 `--message` 或在交互提问（默认「否」）/ 升级新功能提示中确认开启时：
+     - **全 MCP 进程级 SSE 看门狗（21 个 MCP harness 通用）**：MCP 条目注册 `<uniflo> mcp --message`，每个 agent 启动时都会绑定一个随进程同生共死的轻量 SSE 看门狗线程（直连 `/v1/messages/stream?cwd=…`，零轮询、不扫盘、不争抢索引锁），实时推送 JSON-RPC `notifications/message` 与 `uniflo://inbox` 资源更新，并在工具返回尾部自动顺带投递未读消息；额外暴露 4 个工具：`uniflo_send_message`、`uniflo_inbox`、`uniflo_ack_messages`、`uniflo_wait_message`（阻塞等待回复，毫秒级唤醒）。
+     - **全量原生静默拉取 Hook（10 个支持声明式 Hook 的 harness）**：按各家真实格式自动写入 `uniflo message hook --harness <id> 2>/dev/null || true`，覆盖 `claude`、`codex`（`~/.codex/hooks.json`）、`gemini`（`~/.gemini/settings.json`）、`antigravity`（`~/.gemini/config/hooks.json` 的独立 `uniflo` 命名空间）、`codebuddy`、`qoder`、`workbuddy`、`commandcode`、`reasonix`、`devin`（改前备份、原子写、不碰用户自有条目）。
+     - **Skill 兜底（剩余 12 个无 MCP / 无 Hook harness）**：内置 `SKILL.md` 附带 `uniflo message send|inbox|ack|watch` 规范。
+   - 写入状态记录在 `<配置目录>/setup.json`（`message`、`message_hooks`、`seen_features`），`uniflo setup --uninstall` 对称清理，`--reload` 与升级后的 `--after-update` 自动刷新已有条目并补接新检测到的 harness，仅在出现尚未见过的重大新功能时才询问一次。
 
 ## 否决项
 

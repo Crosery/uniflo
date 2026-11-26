@@ -426,6 +426,12 @@ fn build_target(sess: &Session) -> MessageTarget {
     }
 }
 
+fn strip_macos_private(s: &str) -> &str {
+    s.strip_prefix("/private")
+        .filter(|r| *r == "/var" || *r == "/tmp" || r.starts_with("/var/") || r.starts_with("/tmp/"))
+        .unwrap_or(s)
+}
+
 fn normalize_dir(raw: &str) -> String {
     let s = raw.trim();
     let expanded = if let Some(rest) = s.strip_prefix("~/") {
@@ -437,16 +443,17 @@ fn normalize_dir(raw: &str) -> String {
     };
     let norm = expanded.replace('\\', "/");
     let trimmed = norm.trim_end_matches('/');
-    if trimmed.is_empty() && norm.starts_with('/') { "/".to_owned() } else { trimmed.to_owned() }
+    let out = if trimmed.is_empty() && norm.starts_with('/') { "/" } else { trimmed };
+    strip_macos_private(out).to_owned()
 }
 
 pub fn dir_matches(session_cwd: &str, want_norm: &str) -> bool {
     let cur = session_cwd.replace('\\', "/");
     let cur = cur.trim_end_matches('/');
     let cur = if cur.is_empty() && session_cwd.starts_with('/') { "/" } else { cur };
-    cur == want_norm
-        || (want_norm == "/" && cur.starts_with('/'))
-        || cur.strip_prefix(want_norm).is_some_and(|r| r.starts_with('/'))
+    let cur = strip_macos_private(cur);
+    let want = strip_macos_private(want_norm);
+    cur == want || (want == "/" && cur.starts_with('/')) || cur.strip_prefix(want).is_some_and(|r| r.starts_with('/'))
 }
 
 fn replay_journal(path: &Path, store: &mut Store) -> Result<()> {

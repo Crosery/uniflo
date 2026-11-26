@@ -288,48 +288,75 @@ fn first_run_prompt_gating() {
     assert!(!should_ask_first_run(true, none, Some(&configured)));
 }
 
-/// Scenario: update 收尾 — never configured / configured / a new harness.
+/// Scenario: update 收尾 — never configured / configured / auto-connect new harnesses / prompt only on new features.
 #[test]
 fn after_update_three_states() {
     assert_eq!(after_update_decision(None, &["claude"]), AfterUpdate::Ask);
-    let mut st = State { mode: Some(Mode::Mcp), asked: true, ..Default::default() };
+    let mut st =
+        State { mode: Some(Mode::Mcp), asked: true, seen_features: vec![FEATURE_MESSAGE.into()], ..Default::default() };
     st.harnesses
         .insert("claude".into(), Rec { result: "connected".into(), mcp: Some(McpRec::Cli), ..Default::default() });
     st.harnesses
         .insert("codex".into(), Rec { result: "connected".into(), mcp: Some(McpRec::Cli), ..Default::default() });
-    assert_eq!(after_update_decision(Some(&st), &["claude", "codex"]), AfterUpdate::Reload { new: vec![] });
+    assert_eq!(
+        after_update_decision(Some(&st), &["claude", "codex"]),
+        AfterUpdate::Reload { new: vec![], new_features: vec![] }
+    );
     assert_eq!(
         after_update_decision(Some(&st), &["claude", "codex", "cursor"]),
-        AfterUpdate::Reload { new: vec!["cursor"] }
+        AfterUpdate::Reload { new: vec!["cursor"], new_features: vec![] }
     );
     st.harnesses.insert("cursor".into(), Rec { result: "declined".into(), ..Default::default() });
-    assert_eq!(after_update_decision(Some(&st), &["claude", "codex", "cursor"]), AfterUpdate::Reload { new: vec![] });
+    assert_eq!(
+        after_update_decision(Some(&st), &["claude", "codex", "cursor"]),
+        AfterUpdate::Reload { new: vec![], new_features: vec![] }
+    );
+    // Old state without `seen_features` surfaces the new `message` feature once.
+    let legacy = State { mode: Some(Mode::Mcp), asked: true, ..Default::default() };
+    assert_eq!(
+        after_update_decision(Some(&legacy), &["claude"]),
+        AfterUpdate::Reload { new: vec!["claude"], new_features: vec![FEATURE_MESSAGE] }
+    );
     let declined = State { asked: true, ..Default::default() };
     assert_eq!(after_update_decision(Some(&declined), &["claude"]), AfterUpdate::Nothing);
 }
 
-/// The after-update run end to end: recorded entries follow the new executable silently, only
-/// the new harness is asked about, and a "no" is remembered.
+/// The after-update run end to end: silently refreshes existing harnesses AND auto-connects new
+/// harnesses without prompting; only prompts when an unseen new feature appears, and remembers it.
 #[test]
-fn after_update_refreshes_silently_and_asks_only_new() {
+fn after_update_refreshes_silently_and_prompts_only_for_new_features() {
     let h = Home::new();
     h.write(".cursor/mcp.json", "{}");
     h.setup(args(|a| (a.mcp, a.yes) = (true, true)), false, "");
     assert_eq!(h.json(".cursor/mcp.json")["mcpServers"]["uniflo"]["command"], BIN);
+    // Add a newly detected harness (Kiro) — after-update auto-connects it silently without asking.
     h.write(".kiro/settings/mcp.json", "{}");
     let mut ctx = h.ctx();
     ctx.bin = "/new/place/uniflo".into();
     let mut out = Vec::new();
-    flow(&ctx, &args(|a| a.after_update = true), true, &mut "n\n".as_bytes(), &mut out).unwrap();
+    flow(&ctx, &args(|a| a.after_update = true), true, &mut "".as_bytes(), &mut out).unwrap();
     let out = String::from_utf8(out).unwrap();
+    assert!(!out.contains("[Y/n]"), "routine update must not nag when no new feature appeared:\n{out}");
     assert_eq!(h.json(".cursor/mcp.json")["mcpServers"]["uniflo"]["command"], "/new/place/uniflo");
-    assert_eq!(out.matches("[Y/n]").count(), 1, "one question, about kiro only: {out}");
-    assert!(out.contains("Kiro") && !out.contains("Cursor"), "{out}");
-    assert_eq!(h.read(".kiro/settings/mcp.json"), "{}");
-    assert_eq!(h.state().harnesses["kiro"].result, "declined");
+    assert_eq!(h.json(".kiro/settings/mcp.json")["mcpServers"]["uniflo"]["command"], "/new/place/uniflo");
+
+    // Simulate upgrading from an older version before `message` existed (`seen_features` cleared):
+    // now after-update prompts once for the new feature, applies it on `y`, and never re-asks.
+    let mut st = h.state();
+    st.seen_features.clear();
+    st.save(&ctx.state_path).unwrap();
+    let mut out = Vec::new();
+    flow(&ctx, &args(|a| a.after_update = true), true, &mut "y\n".as_bytes(), &mut out).unwrap();
+    let out = String::from_utf8(out).unwrap();
+    assert_eq!(out.matches("[Y/n]").count() + out.matches("[y/N]").count(), 1, "one prompt for new feature:\n{out}");
+    assert!(h.state().message, "new feature enabled");
+    assert_eq!(h.json(".cursor/mcp.json")["mcpServers"]["uniflo"]["args"], json!(["mcp", "--message"]));
+
+    // Next update: silent again.
     let mut out = Vec::new();
     flow(&ctx, &args(|a| a.after_update = true), true, &mut "".as_bytes(), &mut out).unwrap();
-    assert!(!String::from_utf8(out).unwrap().contains("[Y/n]"), "not asked again");
+    let out = String::from_utf8(out).unwrap();
+    assert!(!out.contains("[Y/n]") && !out.contains("[y/N]"), "not asked again:\n{out}");
 }
 
 #[test]
@@ -386,10 +413,13 @@ fn message_opt_in_is_off_by_default_and_uninstalls_symmetrically() {
     assert!(!h.path(".claude/settings.json").exists());
     assert_eq!(h.json(".cursor/mcp.json")["mcpServers"]["uniflo"]["args"], json!(["mcp"]));
 
-    // Explicit `--message` adds `--message` to MCP configs and Claude pull hooks.
+    // Explicit `--message` adds `--message` to MCP configs AND native pull hooks across all hook-capable harnesses.
     h.setup(args(|a| (a.both, a.message, a.yes) = (true, true, true)), false, "");
     assert!(h.state().message);
     assert!(h.state().message_hook.is_some());
+    assert!(h.state().message_hooks.contains_key("claude"));
+    assert!(h.state().message_hooks.contains_key("codex"));
+    assert!(h.state().message_hooks.contains_key("gemini"));
     assert_eq!(h.json(".cursor/mcp.json")["mcpServers"]["uniflo"]["args"], json!(["mcp", "--message"]));
     assert_eq!(h.json(".config/opencode/opencode.json")["mcp"]["uniflo"]["command"], json!([BIN, "mcp", "--message"]));
     assert!(h.read(".codex/config.toml").contains("--message"));
@@ -401,6 +431,14 @@ fn message_opt_in_is_off_by_default_and_uninstalls_symmetrically() {
     assert_eq!(
         settings["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"].as_str().unwrap(),
         edit::message_hook_command(BIN)
+    );
+    assert_eq!(
+        h.json(".codex/hooks.json")["hooks"]["PostToolUse"][0]["hooks"][0]["command"].as_str().unwrap(),
+        edit::message_hook_command_for(BIN, "codex")
+    );
+    assert_eq!(
+        h.json(".gemini/settings.json")["hooks"]["AfterTool"][0]["hooks"][0]["command"].as_str().unwrap(),
+        edit::message_hook_command_for(BIN, "gemini")
     );
 
     // `--reload` keeps `--message` enabled when binary moves.
@@ -416,19 +454,72 @@ fn message_opt_in_is_off_by_default_and_uninstalls_symmetrically() {
         h.json(".claude/settings.json")["hooks"]["PostToolUse"][0]["hooks"][0]["command"].as_str().unwrap(),
         edit::message_hook_command("/moved/uniflo")
     );
+    assert_eq!(
+        h.json(".codex/hooks.json")["hooks"]["PostToolUse"][0]["hooks"][0]["command"].as_str().unwrap(),
+        edit::message_hook_command_for("/moved/uniflo", "codex")
+    );
 
-    // Turning `--message` back off strips `--message` and removes the message hooks cleanly.
+    // Turning `--message` back off strips `--message` and removes all message hooks cleanly.
     h.setup(args(|a| (a.both, a.yes) = (true, true)), false, "");
-    assert!(!h.state().message && h.state().message_hook.is_none());
+    assert!(!h.state().message && h.state().message_hook.is_none() && h.state().message_hooks.is_empty());
     assert_eq!(h.json(".cursor/mcp.json")["mcpServers"]["uniflo"]["args"], json!(["mcp"]));
     assert!(!h.path(".claude/settings.json").exists(), "file created only for message hooks is removed");
+    assert!(!h.path(".codex/hooks.json").exists());
+    assert!(!h.path(".gemini/settings.json").exists());
 
-    // Opting in again and running `--uninstall` cleans up symmetrically.
+    // Opting in again and running `--uninstall` cleans up symmetrically across all harnesses.
     h.setup(args(|a| (a.both, a.message, a.yes) = (true, true, true)), false, "");
     assert!(h.path(".claude/settings.json").is_file());
+    assert!(h.path(".codex/hooks.json").is_file());
+    assert!(h.path(".gemini/settings.json").is_file());
     h.setup(args(|a| (a.uninstall, a.yes) = (true, true)), false, "");
     assert!(!h.path(".claude/settings.json").exists());
-    assert!(!h.state().message && h.state().message_hook.is_none());
+    assert!(!h.path(".codex/hooks.json").exists());
+    assert!(!h.path(".gemini/settings.json").exists());
+    assert!(!h.state().message && h.state().message_hook.is_none() && h.state().message_hooks.is_empty());
+}
+
+#[test]
+fn multi_harness_extra_configs_and_antigravity_reasonix_hooks_roundtrip() {
+    let h = Home::new();
+    h.write(
+        ".gemini/config/hooks.json",
+        "{\"herdr\":{\"PreInvocation\":[{\"type\":\"command\",\"command\":\"echo keep\"}]}}\n",
+    );
+    h.write(".reasonix/settings.json", "{\"hooks\":{\"Stop\":[{\"match\":\"*\",\"command\":\"echo keep\"}]}}\n");
+    h.write(".zcode/cli/config.json", "{\"mcp\":{\"servers\":{\"other\":{\"type\":\"url\",\"url\":\"http://x\"}}}}\n");
+    h.write(".workbuddy/mcp.json", "{\"mcpServers\":{}}\n");
+    h.write(".pi/agent/mcp.json", "{\"mcpServers\":{}}\n");
+    h.setup(args(|a| (a.both, a.hook, a.message, a.yes) = (true, true, true, true)), false, "");
+
+    // Antigravity top-level `uniflo` hook namespace preserves `herdr`.
+    let agy_hooks = h.json(".gemini/config/hooks.json");
+    assert!(agy_hooks.get("herdr").is_some());
+    assert_eq!(
+        agy_hooks["uniflo"]["PreInvocation"][0]["command"].as_str().unwrap(),
+        edit::message_hook_command_for(BIN, "antigravity")
+    );
+    // Reasonix flat `{match, command}` hooks preserve `Stop`.
+    let rx_hooks = h.json(".reasonix/settings.json");
+    assert_eq!(rx_hooks["hooks"]["Stop"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        rx_hooks["hooks"]["PostToolUse"][0]["command"].as_str().unwrap(),
+        edit::message_hook_command_for(BIN, "reasonix")
+    );
+    // Nested ZCode `mcp.servers.uniflo` + WorkBuddy + Pi MCP configs all carry `--message`.
+    assert_eq!(h.json(".zcode/cli/config.json")["mcp"]["servers"]["uniflo"]["args"], json!(["mcp", "--message"]));
+    assert_eq!(h.json(".workbuddy/mcp.json")["mcpServers"]["uniflo"]["args"], json!(["mcp", "--message"]));
+    assert_eq!(h.json(".pi/agent/mcp.json")["mcpServers"]["uniflo"]["args"], json!(["mcp", "--message"]));
+
+    // Uninstall removes only Uniflo entries and preserves user configs.
+    h.setup(args(|a| (a.uninstall, a.yes) = (true, true)), false, "");
+    let agy_after = h.json(".gemini/config/hooks.json");
+    assert!(agy_after.get("herdr").is_some() && agy_after.get("uniflo").is_none());
+    let rx_after = h.json(".reasonix/settings.json");
+    assert_eq!(rx_after["hooks"]["Stop"].as_array().unwrap().len(), 1);
+    assert!(rx_after["hooks"].get("PostToolUse").is_none());
+    assert!(h.json(".zcode/cli/config.json")["mcp"]["servers"].get("uniflo").is_none());
+    assert!(h.json(".zcode/cli/config.json")["mcp"]["servers"].get("other").is_some());
 }
 
 #[test]

@@ -288,8 +288,8 @@ case ":$PATH:" in
 esac
 
 if [ "$no_setup" = 0 ] && [ -t 1 ] && (: </dev/tty) 2>/dev/null; then
-  say "$(pick "运行 uniflo setup：把 MCP / Skill 接入本机 agent（之后可用 uniflo setup --uninstall 撤销）" "running uniflo setup: wires MCP / Skill into local agents (undo any time with uniflo setup --uninstall)")"
-  "$dest" setup </dev/tty || say "$(pick "uniflo setup 没有完成，之后可以随时运行 uniflo setup" "uniflo setup did not finish; you can run uniflo setup again any time")"
+  say "$(pick "运行 uniflo setup：首次接入本机 agent，已配置过则静默同步新增与更新（可用 uniflo setup --uninstall 撤销）" "running uniflo setup: configures local agents on first install, or syncs updates silently (undo with uniflo setup --uninstall)")"
+  "$dest" setup --after-update </dev/tty || say "$(pick "uniflo setup 没有完成，之后可以随时运行 uniflo setup" "uniflo setup did not finish; you can run uniflo setup again any time")"
 else
   say "$(pick "跳过 uniflo setup；之后可运行 uniflo setup 把 MCP / Skill 接入本机 agent" "skipping uniflo setup; run uniflo setup later to wire MCP / Skill into local agents")"
 fi

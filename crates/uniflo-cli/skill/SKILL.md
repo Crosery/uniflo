@@ -79,6 +79,22 @@ curl -s "$UNIFLO_URL/v1/memory/file?path=<listed path>"
 CLI commands index in-process (slower, one-shot); `uniflo context` prints nothing. Start it
 with `uniflo daemon`.
 
+## Cross-agent messaging (optional, when enabled)
+
+If `uniflo setup --message` is enabled, any harness (MCP or Skill-only) can exchange messages
+through the local daemon without touching other harnesses' session files:
+
+```sh
+uniflo message send <key|prefix|cwd:/path> "message text" --from <my-key>
+uniflo message inbox --to <my-key>                  # unread messages (or --cwd "$PWD")
+uniflo message ack <m-1>                            # mark acknowledged (or --to <my-key>)
+uniflo message watch --cwd "$PWD"                   # zero-polling SSE stream
+```
+
+When running with `uniflo mcp --message`, each MCP server binds a live per-process SSE watchdog
+to the daemon: use `uniflo_send_message`, `uniflo_inbox`, `uniflo_wait_message` (blocks until
+a peer replies in milliseconds), and `uniflo_ack_messages`, or read `uniflo://inbox`.
+
 ## Save tokens
 
 The MCP tools' text already carries what you need to act on (session keys, `#event` ids,

@@ -49,6 +49,201 @@ style!(pink, "1;38;5;213");
 /// Cyan → blue → violet → pink across the letters.
 const GRADIENT: [u8; 6] = [51, 45, 75, 105, 141, 213];
 
+/// 6-line Unicode block wordmark (inspired by xcu / agy CLIs), colored with a horizontal gradient.
+const BLOCK_LOGO: [&str; 6] = [
+    "██╗   ██╗███╗   ██╗██╗███████╗██╗      ██████╗",
+    "██║   ██║████╗  ██║██║██╔════╝██║     ██╔═══██╗",
+    "██║   ██║██╔██╗ ██║██║█████╗  ██║     ██║   ██║",
+    "██║   ██║██║╚██╗██║██║██╔══╝  ██║     ██║   ██║",
+    "╚██████╔╝██║ ╚████║██║██║     ███████╗╚██████╔╝",
+    " ╚═════╝ ╚═╝  ╚═══╝╚═╝╚═╝     ╚══════╝ ╚═════╝",
+];
+
+fn gradient_line(line: &str) -> String {
+    if !color() {
+        return line.to_owned();
+    }
+    let chars: Vec<char> = line.chars().collect();
+    let total = chars.len().max(1);
+    let mut out = String::with_capacity(line.len() * 2);
+    for (i, ch) in chars.iter().enumerate() {
+        if *ch == ' ' {
+            out.push(' ');
+            continue;
+        }
+        let idx = (i * GRADIENT.len()) / total;
+        let code = GRADIENT[idx.min(GRADIENT.len() - 1)];
+        out.push_str(&format!("\x1b[1;38;5;{code}m{ch}\x1b[0m"));
+    }
+    out
+}
+
+/// Section divider bar (` title  ━━━━━━━━━━━━━━━ `), matching xcu's clean grouped layout.
+pub fn section(title: &str, meta: &str) -> String {
+    let cols = raw::columns().clamp(60, 88);
+    let head = if meta.is_empty() { format!(" {} ", bold(title)) } else { format!(" {}  {} ", bold(title), dim(meta)) };
+    let used = visible_width(&head);
+    let rule = "━".repeat(cols.saturating_sub(used + 1).max(4));
+    format!("{head}{}", dim(&rule))
+}
+
+/// The full home/help dashboard printed for bare `uniflo` and `uniflo --help`.
+pub fn home_dashboard(version: &str, url: &str, health: Option<&serde_json::Value>, show_options: bool) -> String {
+    let mut out = String::new();
+    out.push('\n');
+    for line in BLOCK_LOGO {
+        out.push_str(&gradient_line(line));
+        out.push('\n');
+    }
+    let tagline = tr!("所有 agent 的会话，本机统一读取", "Every local agent session, unified in real time");
+    let status = match health {
+        Some(h) if h["ok"] == true => {
+            let sessions = h["sessions"].as_u64().unwrap_or(0);
+            let working = h["working"].as_u64().unwrap_or(0);
+            let host = url.trim_start_matches("http://").trim_end_matches('/');
+            format!(
+                "{} {} · {}",
+                good("●"),
+                dim(host),
+                tr!("{sessions} 会话 · {working} 工作中", "{sessions} sessions · {working} working")
+            )
+        }
+        _ => format!(
+            "{} {}",
+            dim("○"),
+            dim(&tr!("守护进程未运行（uniflo daemon 启动）", "daemon offline (run `uniflo daemon`)"))
+        ),
+    };
+    out.push_str(&format!("{}   {} · {status}\n\n", bold(&tagline), accent(&format!("v{version}"))));
+    out.push_str(&format!(
+        "{}  {}   {}\n",
+        bold(&tr!("用法", "Usage")),
+        accent("uniflo <命令> [参数]"),
+        dim(&tr!(
+            "--json 机器可读 · --local 离线直读 · uniflo <命令> -h 详参",
+            "--json machine · --local offline · uniflo <cmd> -h details"
+        ))
+    ));
+
+    type CmdRow<'a> = (&'a str, &'a str, &'a str);
+    let groups: [(&str, &str, &[CmdRow<'_>]); 4] = [
+        (
+            "常用 · 会话与检索",
+            "Sessions & Search",
+            &[
+                ("uniflo ps", "正在工作的会话", "Sessions currently working"),
+                (
+                    "uniflo ls [查询]",
+                    "搜索与列出会话（s:work h:claude in:目录 since:2h）",
+                    "List / search sessions (fd/fzf filters)",
+                ),
+                ("uniflo show <key>", "查看会话摘要与最近事件", "Session metadata and latest events"),
+                ("uniflo tail <key> -f", "实时跟随会话转录流", "Print transcript; -f follows live"),
+                ("uniflo grep <词>", "全文检索消息、思考与工具输出", "Full-text search across all transcripts"),
+                ("uniflo watch", "全局实时 NDJSON 事件流", "Stream live NDJSON envelopes"),
+            ],
+        ),
+        (
+            "统计 · 用量与清理",
+            "Usage & Cleanup",
+            &[
+                (
+                    "uniflo usage",
+                    "按 harness / 模型 / 项目 / 日期统计 Token 与费用",
+                    "Token usage & API-equivalent cost",
+                ),
+                ("uniflo pricing [sync]", "查看或立即同步模型价格目录", "Price catalog status / sync now"),
+                ("uniflo harnesses", "本机 33 个 harness 适配覆盖与会话计数", "All 33 harnesses and session counts"),
+                (
+                    "uniflo clean",
+                    "归档旧会话并安全移入系统回收站（先计划后确认）",
+                    "Archive & move old sessions to trash",
+                ),
+                ("uniflo archive", "查看已归档会话（ls / rm <key>）", "Inspect or delete cleaned archives"),
+            ],
+        ),
+        (
+            "协作 · Agent 接入与消息",
+            "Agents & Messaging",
+            &[
+                (
+                    "uniflo setup",
+                    "一键接入全部 33 个 harness（MCP / Skill / 原生 Hook）",
+                    "Connect harnesses (MCP / Skill / native hooks)",
+                ),
+                (
+                    "uniflo message …",
+                    "跨 Agent 实时消息总线（send / inbox / ack / watch）",
+                    "Cross-agent message bus & SSE watch",
+                ),
+                ("uniflo resume <key>", "在原 harness 与原目录恢复指定会话", "Resume a session in its own harness"),
+                ("uniflo context", "输出当前项目近期会话 Markdown 接力上下文", "Recent project sessions as Markdown"),
+                (
+                    "uniflo mcp [--message]",
+                    "stdio MCP 服务器（加 --message 附带进程级 SSE 看门狗）",
+                    "stdio MCP server (+ SSE watchdog with --message)",
+                ),
+                ("uniflo skill print", "输出内置 Agent Skill 规范", "Print bundled agent SKILL.md"),
+            ],
+        ),
+        (
+            "服务 · 守护进程与升级",
+            "Daemon & Updates",
+            &[
+                (
+                    "uniflo daemon",
+                    "启动/管理后台本地网关（--stop / --restart / -f）",
+                    "Start or manage background gateway",
+                ),
+                ("uniflo update", "网络测速智能选源并自升级（--check / --pre）", "Smart mirror-probed self-upgrade"),
+                ("uniflo scan", "一次性进程内扫描，检查各适配器覆盖率", "One-shot local scan & coverage stats"),
+            ],
+        ),
+    ];
+
+    for (zh_title, en_title, rows) in groups {
+        out.push('\n');
+        out.push_str(&section(&tr!("{zh_title}", "{en_title}"), ""));
+        out.push('\n');
+        for (cmd, zh_desc, en_desc) in rows {
+            let pad = 26usize.saturating_sub(width(cmd));
+            let desc = tr!("{zh_desc}", "{en_desc}");
+            out.push_str(&format!("  {}{}{}\n", accent(cmd), " ".repeat(pad), desc));
+        }
+    }
+
+    if show_options {
+        out.push('\n');
+        out.push_str(&section(&tr!("全局参数", "Global Options"), ""));
+        out.push('\n');
+        for (flag, zh_desc, en_desc) in [
+            (
+                "--url <URL>",
+                "守护进程地址 [env: UNIFLO_URL, 默认 http://127.0.0.1:7311]",
+                "Daemon URL [env: UNIFLO_URL, default http://127.0.0.1:7311]",
+            ),
+            ("--token <TOKEN>", "网关 Bearer Token [env: UNIFLO_TOKEN]", "Bearer token [env: UNIFLO_TOKEN]"),
+            ("--local", "跳过守护进程，直接进程内建索引查询", "Skip daemon; index in-process"),
+            ("-h, --help", "查看帮助（子命令加 -h 看详参）", "Print help (use `<cmd> -h` for subcommand details)"),
+            ("-V, --version", "输出版本号", "Print version"),
+        ] {
+            let pad = 22usize.saturating_sub(width(flag));
+            out.push_str(&format!("  {}{}{}\n", bold(flag), " ".repeat(pad), dim(&tr!("{zh_desc}", "{en_desc}"))));
+        }
+    }
+
+    let demo = format!("{}/demo", url.trim_end_matches('/'));
+    out.push('\n');
+    out.push_str(&format!(
+        "  {} {}   {}   {}\n",
+        dim(&tr!("控制台", "Console")),
+        accent(&demo),
+        dim("·"),
+        dim(&tr!("首次使用运行 uniflo setup 一键接入全部本机 agent", "Run `uniflo setup` to connect local agents"))
+    ));
+    out
+}
+
 /// The wordmark with a version and a one-line tagline, for the commands people sit in front of.
 pub fn banner(version: &str) -> String {
     let word: String = "uniflo"

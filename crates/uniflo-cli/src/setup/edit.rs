@@ -2,7 +2,7 @@
 //! hook) changes; key order, other entries and the indentation style are kept. A file that does
 //! not parse is reported and left alone. Writes back the file up first and replace it atomically.
 
-use super::harness::Shape;
+use super::harness::{HookFormat, Shape};
 use anyhow::{Context, Result};
 use serde_json::{Map, Value, json};
 use std::path::{Path, PathBuf};
@@ -116,8 +116,12 @@ fn render_json(m: Map<String, Value>, before: Option<&str>) -> String {
     s
 }
 
-/// Add or refresh `<key>.uniflo` = `want`.
-pub fn json_set(text: Option<&str>, key: &str, want: &Value) -> Outcome {
+/// Add or refresh `<key_path>.uniflo` = `want` (supports single keys like `&["mcpServers"]` and
+/// nested paths like `&["mcp", "servers"]`).
+pub fn json_set_path(text: Option<&str>, key_path: &[&str], want: &Value) -> Outcome {
+    if key_path.is_empty() {
+        return Outcome::Invalid("empty JSON key path".into());
+    }
     let mut root = match parse_json(text) {
         Ok(m) => m,
         Err(e) => return Outcome::Invalid(e),
@@ -126,42 +130,89 @@ pub fn json_set(text: Option<&str>, key: &str, want: &Value) -> Outcome {
     if text.is_none() {
         created.push("file".to_owned());
     }
-    if !root.contains_key(key) {
-        root.insert(key.to_owned(), Value::Object(Map::new()));
-        created.push(key.to_owned());
+    let mut cur = &mut root;
+    let mut prefix = String::new();
+    for seg in key_path {
+        if !prefix.is_empty() {
+            prefix.push('.');
+        }
+        prefix.push_str(seg);
+        if !cur.contains_key(*seg) {
+            cur.insert((*seg).to_owned(), Value::Object(Map::new()));
+            created.push(prefix.clone());
+        }
+        let Some(next) = cur.get_mut(*seg).and_then(Value::as_object_mut) else {
+            return Outcome::Invalid(format!("`{prefix}` is not an object"));
+        };
+        cur = next;
     }
-    let Some(servers) = root.get_mut(key).and_then(Value::as_object_mut) else {
-        return Outcome::Invalid(format!("`{key}` is not an object"));
-    };
-    match servers.get(NAME) {
-        Some(cur) if cur == want => return Outcome::Unchanged,
-        Some(cur) if !is_ours(cur) => return Outcome::Occupied,
+    match cur.get(NAME) {
+        Some(existing) if existing == want => return Outcome::Unchanged,
+        Some(existing) if !is_ours(existing) => return Outcome::Occupied,
         _ => {}
     }
-    servers.insert(NAME.to_owned(), want.clone());
+    cur.insert(NAME.to_owned(), want.clone());
     Outcome::Write { text: render_json(root, text), created }
 }
 
-/// Remove `<key>.uniflo` when Uniflo wrote it; drop containers in `created` left empty.
-pub fn json_remove(text: Option<&str>, key: &str, created: &[String]) -> Outcome {
+/// Remove `<key_path>.uniflo` when Uniflo wrote it; drop containers in `created` left empty.
+pub fn json_remove_path(text: Option<&str>, key_path: &[&str], created: &[String]) -> Outcome {
     let Some(t) = text else { return Outcome::Unchanged };
+    if key_path.is_empty() {
+        return Outcome::Unchanged;
+    }
     let mut root = match parse_json(Some(t)) {
         Ok(m) => m,
         Err(e) => return Outcome::Invalid(e),
     };
-    let Some(servers) = root.get_mut(key).and_then(Value::as_object_mut) else { return Outcome::Unchanged };
-    match servers.get(NAME) {
-        None => return Outcome::Unchanged,
-        Some(v) if !is_ours(v) => return Outcome::Occupied,
-        _ => {}
+    fn remove_rec(
+        obj: &mut Map<String, Value>,
+        path: &[&str],
+        prefix: &str,
+        created: &[String],
+    ) -> Result<bool, Option<Outcome>> {
+        let seg = path[0];
+        let full = if prefix.is_empty() { seg.to_owned() } else { format!("{prefix}.{seg}") };
+        let Some(child) = obj.get_mut(seg).and_then(Value::as_object_mut) else {
+            return Ok(false);
+        };
+        let changed = if path.len() == 1 {
+            match child.get(NAME) {
+                None => return Ok(false),
+                Some(v) if !is_ours(v) => return Err(Some(Outcome::Occupied)),
+                _ => {
+                    child.shift_remove(NAME);
+                    true
+                }
+            }
+        } else {
+            remove_rec(child, &path[1..], &full, created)?
+        };
+        if changed && child.is_empty() && created.iter().any(|c| c == &full) {
+            obj.shift_remove(seg);
+        }
+        Ok(changed)
     }
-    servers.shift_remove(NAME);
-    if servers.is_empty() && created.iter().any(|c| c == key) {
-        root.shift_remove(key);
+    match remove_rec(&mut root, key_path, "", created) {
+        Err(Some(o)) => return o,
+        Err(None) | Ok(false) => return Outcome::Unchanged,
+        Ok(true) => {}
     }
     let text =
         if root.is_empty() && created.iter().any(|c| c == "file") { String::new() } else { render_json(root, text) };
     Outcome::Write { text, created: Vec::new() }
+}
+
+/// Add or refresh `<key>.uniflo` = `want` (supports dot-separated nested keys like `"mcp.servers"`).
+pub fn json_set(text: Option<&str>, key: &str, want: &Value) -> Outcome {
+    let segs: Vec<&str> = key.split('.').collect();
+    json_set_path(text, &segs, want)
+}
+
+/// Remove `<key>.uniflo` when Uniflo wrote it; drop containers in `created` left empty.
+pub fn json_remove(text: Option<&str>, key: &str, created: &[String]) -> Outcome {
+    let segs: Vec<&str> = key.split('.').collect();
+    json_remove_path(text, &segs, created)
 }
 
 /// `[mcp_servers.uniflo]` with `command = bin`, `args = ["mcp"]` (Codex without its CLI).
@@ -269,23 +320,56 @@ pub fn probe_toml_info(text: &str) -> Option<ProbeResult> {
     })
 }
 
-/// The optional Claude Code message pull hook command (`uniflo setup --message`).
+/// The optional cross-agent message pull hook command for a given harness (`uniflo setup --message`).
+pub fn message_hook_command_for(bin: &str, harness: &str) -> String {
+    format!("{} message hook --harness {harness} 2>/dev/null || true", uniflo_core::resume::sh_quote(bin))
+}
+
+/// The optional Claude Code message pull hook command (backward-compatible test helper).
+#[cfg(test)]
 pub fn message_hook_command(bin: &str) -> String {
-    format!("{} message hook --harness claude 2>/dev/null || true", uniflo_core::resume::sh_quote(bin))
+    message_hook_command_for(bin, "claude")
+}
+
+/// The SessionStart context hook command for a given harness (`uniflo setup --hook`).
+pub fn context_hook_command_for(bin: &str, harness: &str) -> String {
+    if harness == "claude" {
+        return hook_command(bin);
+    }
+    format!(
+        "{} context --cwd \"${{CLAUDE_PROJECT_DIR:-$PWD}}\" --limit 5 --since 14d 2>/dev/null || true",
+        uniflo_core::resume::sh_quote(bin)
+    )
+}
+
+fn is_our_message_cmd(c: &str) -> bool {
+    c.contains(" message hook ") && c.split(" message hook ").next().is_some_and(is_uniflo)
+}
+
+fn is_our_context_cmd(c: &str) -> bool {
+    c.contains(" context --cwd ") && c.split(" context ").next().is_some_and(is_uniflo)
 }
 
 fn is_our_message_hook(h: &Value) -> bool {
-    h["type"] == "command"
-        && h["command"]
-            .as_str()
-            .is_some_and(|c| c.contains(" message hook ") && c.split(" message hook ").next().is_some_and(is_uniflo))
+    h["command"].as_str().is_some_and(is_our_message_cmd) && (h.get("type").is_none() || h["type"] == "command")
 }
 
+fn is_our_context_hook(h: &Value) -> bool {
+    h["command"].as_str().is_some_and(is_our_context_cmd) && (h.get("type").is_none() || h["type"] == "command")
+}
+
+#[cfg(test)]
 const MESSAGE_HOOK_EVENTS: [&str; 2] = ["PostToolUse", "UserPromptSubmit"];
 
-/// Add or refresh Uniflo's optional cross-agent message hook in `hooks.PostToolUse` and
-/// `hooks.UserPromptSubmit` of Claude's `settings.json`.
-pub fn message_hooks_set(text: Option<&str>, command: &str) -> Outcome {
+/// Generic multi-harness hook installer supporting Claude, Gemini, Antigravity, and Reasonix JSON schemas.
+pub fn multi_hooks_set(
+    text: Option<&str>,
+    format: HookFormat,
+    events: &[&str],
+    command: &str,
+    message: bool,
+) -> Outcome {
+    let is_ours: fn(&Value) -> bool = if message { is_our_message_hook } else { is_our_context_hook };
     let mut root = match parse_json(text) {
         Ok(m) => m,
         Err(e) => return Outcome::Invalid(e),
@@ -294,6 +378,33 @@ pub fn message_hooks_set(text: Option<&str>, command: &str) -> Outcome {
     if text.is_none() {
         created.push("file".to_owned());
     }
+
+    if format == HookFormat::Antigravity {
+        // Antigravity `~/.gemini/config/hooks.json`: top-level `"uniflo": { PreInvocation: [...], PostToolUse: [...] }`.
+        let mut ns = Map::new();
+        for ev in events {
+            let entry = if *ev == "PostToolUse" || *ev == "PreToolUse" {
+                json!([{ "matcher": ".*", "hooks": [{ "type": "command", "command": command, "timeout": 5 }] }])
+            } else {
+                json!([{ "type": "command", "command": command, "timeout": 5 }])
+            };
+            ns.insert((*ev).to_owned(), entry);
+        }
+        let want = Value::Object(ns);
+        match root.get(NAME) {
+            Some(cur) if cur == &want => return Outcome::Unchanged,
+            Some(cur) if !is_antigravity_ours(cur, is_ours) => return Outcome::Occupied,
+            None => {
+                created.push(NAME.to_owned());
+                root.insert(NAME.to_owned(), want);
+            }
+            Some(_) => {
+                root.insert(NAME.to_owned(), want);
+            }
+        }
+        return Outcome::Write { text: render_json(root, text), created };
+    }
+
     if !root.contains_key("hooks") {
         root.insert("hooks".into(), json!({}));
         created.push("hooks".into());
@@ -302,29 +413,70 @@ pub fn message_hooks_set(text: Option<&str>, command: &str) -> Outcome {
         return Outcome::Invalid("`hooks` is not an object".into());
     };
     let mut changed = false;
-    for ev in MESSAGE_HOOK_EVENTS {
-        if !hooks.contains_key(ev) {
-            hooks.insert(ev.into(), json!([]));
+    for ev in events {
+        if !hooks.contains_key(*ev) {
+            hooks.insert((*ev).into(), json!([]));
             created.push(format!("hooks.{ev}"));
         }
-        let Some(groups) = hooks.get_mut(ev).and_then(Value::as_array_mut) else {
+        let Some(groups) = hooks.get_mut(*ev).and_then(Value::as_array_mut) else {
             return Outcome::Invalid(format!("`hooks.{ev}` is not an array"));
         };
-        let ours = groups
-            .iter_mut()
-            .filter_map(|g| g.get_mut("hooks").and_then(Value::as_array_mut))
-            .flat_map(|hs| hs.iter_mut())
-            .find(|h| is_our_message_hook(h));
-        match ours {
-            Some(h) if h["command"] == command => {}
-            Some(h) => {
-                h["command"] = json!(command);
-                changed = true;
+        match format {
+            HookFormat::Reasonix => {
+                let ours = groups.iter_mut().find(|h| is_ours(h));
+                match ours {
+                    Some(h) if h["command"] == command => {}
+                    Some(h) => {
+                        h["command"] = json!(command);
+                        changed = true;
+                    }
+                    None => {
+                        groups.push(json!({ "match": "*", "command": command }));
+                        changed = true;
+                    }
+                }
             }
-            None => {
-                groups.push(json!({ "hooks": [{ "type": "command", "command": command }] }));
-                changed = true;
+            HookFormat::Gemini => {
+                let hook_name = if message { "uniflo-message" } else { "uniflo-context" };
+                let ours = groups
+                    .iter_mut()
+                    .filter_map(|g| g.get_mut("hooks").and_then(Value::as_array_mut))
+                    .flat_map(|hs| hs.iter_mut())
+                    .find(|h| is_ours(h));
+                match ours {
+                    Some(h) if h["command"] == command => {}
+                    Some(h) => {
+                        h["command"] = json!(command);
+                        changed = true;
+                    }
+                    None => {
+                        groups.push(json!({
+                            "matcher": "",
+                            "hooks": [{ "name": hook_name, "type": "command", "command": command }]
+                        }));
+                        changed = true;
+                    }
+                }
             }
+            HookFormat::Claude => {
+                let ours = groups
+                    .iter_mut()
+                    .filter_map(|g| g.get_mut("hooks").and_then(Value::as_array_mut))
+                    .flat_map(|hs| hs.iter_mut())
+                    .find(|h| is_ours(h));
+                match ours {
+                    Some(h) if h["command"] == command => {}
+                    Some(h) => {
+                        h["command"] = json!(command);
+                        changed = true;
+                    }
+                    None => {
+                        groups.push(json!({ "hooks": [{ "type": "command", "command": command }] }));
+                        changed = true;
+                    }
+                }
+            }
+            HookFormat::Antigravity => unreachable!(),
         }
     }
     if !changed {
@@ -333,36 +485,61 @@ pub fn message_hooks_set(text: Option<&str>, command: &str) -> Outcome {
     Outcome::Write { text: render_json(root, text), created }
 }
 
-/// Remove only Uniflo's optional message hooks from Claude's `settings.json`, leaving user hooks
-/// and `SessionStart` untouched.
-pub fn message_hooks_remove(text: Option<&str>, created: &[String]) -> Outcome {
+/// Symmetric removal for [`multi_hooks_set`], preserving all user hooks and sibling hook types.
+pub fn multi_hooks_remove(
+    text: Option<&str>,
+    format: HookFormat,
+    events: &[&str],
+    created: &[String],
+    message: bool,
+) -> Outcome {
     let Some(t) = text else { return Outcome::Unchanged };
+    let is_ours: fn(&Value) -> bool = if message { is_our_message_hook } else { is_our_context_hook };
     let mut root = match parse_json(Some(t)) {
         Ok(m) => m,
         Err(e) => return Outcome::Invalid(e),
     };
+    let had = |k: &str| created.iter().any(|c| c == k);
+
+    if format == HookFormat::Antigravity {
+        match root.get(NAME) {
+            None => return Outcome::Unchanged,
+            Some(v) if !is_antigravity_ours(v, is_ours) => return Outcome::Occupied,
+            Some(_) => {
+                root.shift_remove(NAME);
+            }
+        }
+        let text = if root.is_empty() && had("file") { String::new() } else { render_json(root, Some(t)) };
+        return Outcome::Write { text, created: Vec::new() };
+    }
+
     let Some(hooks) = root.get_mut("hooks").and_then(Value::as_object_mut) else {
         return Outcome::Unchanged;
     };
     let mut removed = false;
-    for ev in MESSAGE_HOOK_EVENTS {
-        let Some(groups) = hooks.get_mut(ev).and_then(Value::as_array_mut) else { continue };
-        groups.retain_mut(|g| {
-            let Some(hs) = g.get_mut("hooks").and_then(Value::as_array_mut) else { return true };
-            let n = hs.len();
-            hs.retain(|h| !is_our_message_hook(h));
-            removed |= hs.len() < n;
-            !(hs.is_empty() && n > 0)
-        });
+    for ev in events {
+        let Some(groups) = hooks.get_mut(*ev).and_then(Value::as_array_mut) else { continue };
+        if format == HookFormat::Reasonix {
+            let n = groups.len();
+            groups.retain(|h| !is_ours(h));
+            removed |= groups.len() < n;
+        } else {
+            groups.retain_mut(|g| {
+                let Some(hs) = g.get_mut("hooks").and_then(Value::as_array_mut) else { return true };
+                let n = hs.len();
+                hs.retain(|h| !is_ours(h));
+                removed |= hs.len() < n;
+                !(hs.is_empty() && n > 0)
+            });
+        }
     }
     if !removed {
         return Outcome::Unchanged;
     }
-    let had = |k: &str| created.iter().any(|c| c == k);
-    for ev in MESSAGE_HOOK_EVENTS {
+    for ev in events {
         let key = format!("hooks.{ev}");
-        if had(&key) && hooks.get(ev).and_then(Value::as_array).is_some_and(Vec::is_empty) {
-            hooks.shift_remove(ev);
+        if had(&key) && hooks.get(*ev).and_then(Value::as_array).is_some_and(Vec::is_empty) {
+            hooks.shift_remove(*ev);
         }
     }
     if had("hooks") && hooks.is_empty() {
@@ -370,6 +547,37 @@ pub fn message_hooks_remove(text: Option<&str>, created: &[String]) -> Outcome {
     }
     let text = if root.is_empty() && had("file") { String::new() } else { render_json(root, Some(t)) };
     Outcome::Write { text, created: Vec::new() }
+}
+
+fn is_antigravity_ours(v: &Value, is_ours: fn(&Value) -> bool) -> bool {
+    let Some(obj) = v.as_object() else { return false };
+    !obj.is_empty()
+        && obj.values().all(|arr| {
+            arr.as_array().is_some_and(|items| {
+                !items.is_empty()
+                    && items.iter().all(|item| {
+                        is_ours(item)
+                            || item
+                                .get("hooks")
+                                .and_then(Value::as_array)
+                                .is_some_and(|hs| !hs.is_empty() && hs.iter().all(is_ours))
+                    })
+            })
+        })
+}
+
+/// Add or refresh Uniflo's optional cross-agent message hook in `hooks.PostToolUse` and
+/// `hooks.UserPromptSubmit` of Claude's `settings.json`.
+#[cfg(test)]
+pub fn message_hooks_set(text: Option<&str>, command: &str) -> Outcome {
+    multi_hooks_set(text, HookFormat::Claude, &MESSAGE_HOOK_EVENTS, command, true)
+}
+
+/// Remove only Uniflo's optional message hooks from Claude's `settings.json`, leaving user hooks
+/// and `SessionStart` untouched.
+#[cfg(test)]
+pub fn message_hooks_remove(text: Option<&str>, created: &[String]) -> Outcome {
+    multi_hooks_remove(text, HookFormat::Claude, &MESSAGE_HOOK_EVENTS, created, true)
 }
 
 /// The SessionStart hook command Uniflo adds to Claude Code.
@@ -380,6 +588,7 @@ pub fn hook_command(bin: &str) -> String {
     )
 }
 
+#[cfg(test)]
 fn is_our_hook(h: &Value) -> bool {
     h["type"] == "command"
         && h["command"].as_str().is_some_and(|c| {
@@ -388,6 +597,7 @@ fn is_our_hook(h: &Value) -> bool {
 }
 
 /// Add or refresh Uniflo's command in `hooks.SessionStart` of Claude's `settings.json`.
+#[cfg(test)]
 pub fn hook_set(text: Option<&str>, command: &str) -> Outcome {
     let mut root = match parse_json(text) {
         Ok(m) => m,
@@ -424,6 +634,7 @@ pub fn hook_set(text: Option<&str>, command: &str) -> Outcome {
     Outcome::Write { text: render_json(root, text), created }
 }
 
+#[cfg(test)]
 pub fn hook_remove(text: Option<&str>, created: &[String]) -> Outcome {
     let Some(t) = text else { return Outcome::Unchanged };
     let mut root = match parse_json(Some(t)) {

@@ -215,13 +215,26 @@ fn format_line(m: &AgentMessage) -> String {
 fn run_hook(cli: &Cli, harness: Option<&str>, session: Option<&str>, cwd: Option<&str>) -> Result<()> {
     let stdin_json = read_hook_stdin();
     let session_key = session.map(str::to_owned).or_else(|| {
-        let sid = stdin_json.as_ref().and_then(|v| v.get("session_id")).and_then(Value::as_str)?;
+        let v = stdin_json.as_ref()?;
+        let sid = ["session_id", "conversation_id", "conversationId", "sessionId"]
+            .iter()
+            .find_map(|k| v.get(*k).and_then(Value::as_str))
+            .filter(|s| !s.is_empty())?;
         if sid.contains(':') { Some(sid.to_owned()) } else { harness.map(|h| format!("{h}:{sid}")) }
     });
     let dir = cwd
         .map(str::to_owned)
-        .or_else(|| stdin_json.as_ref().and_then(|v| v.get("cwd")).and_then(Value::as_str).map(str::to_owned))
-        .or_else(|| std::env::var("CLAUDE_PROJECT_DIR").ok().filter(|s| !s.is_empty()));
+        .or_else(|| {
+            let v = stdin_json.as_ref()?;
+            ["cwd", "working_directory", "workingDirectory", "project_dir", "workspace_dir"]
+                .iter()
+                .find_map(|k| v.get(*k).and_then(Value::as_str))
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+        })
+        .or_else(|| std::env::var("CLAUDE_PROJECT_DIR").ok().filter(|s| !s.is_empty()))
+        .or_else(|| std::env::var("GEMINI_PROJECT_DIR").ok().filter(|s| !s.is_empty()))
+        .or_else(|| std::env::current_dir().ok().map(|p| p.display().to_string()));
 
     if session_key.is_none() && dir.is_none() {
         return Ok(());

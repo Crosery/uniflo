@@ -19,7 +19,7 @@ use crate::update::{Mark, step};
 use anyhow::{Context, Result, bail};
 use clap::Args;
 use edit::Outcome;
-use harness::{Detected, Env, Mcp, Probe, Skill, Spec};
+use harness::{Detected, Env, HookFormat, Mcp, Probe, Skill, Spec};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io::{BufRead, IsTerminal, Write};
@@ -44,10 +44,10 @@ pub struct SetupArgs {
     /// Only these harnesses, comma-separated ids (`claude,codex`); default: every one detected.
     #[arg(long, value_delimiter = ',')]
     pub agents: Vec<String>,
-    /// Also add a Claude Code SessionStart hook that prints `uniflo context` into new sessions.
+    /// Also add SessionStart context hooks for supported harnesses (Claude, Codex, Gemini, CodeBuddy, Qoder, WorkBuddy, Reasonix, Devin).
     #[arg(long)]
     pub hook: bool,
-    /// Enable optional cross-agent messaging (MCP send/inbox tools + silent Claude Code pull hook; off by default).
+    /// Enable optional cross-agent messaging (per-process SSE watchdog in all MCP harnesses + native silent pull hooks across all hook-capable harnesses; off by default).
     #[arg(long)]
     pub message: bool,
     /// Apply without asking (outside a terminal nothing is written without it).
@@ -105,6 +105,11 @@ impl Mode {
     }
 }
 
+/// Major optional features tracked in `setup.json`; `uniflo update` only prompts again when a new
+/// feature appears that is not yet listed in `State::seen_features`.
+pub const FEATURE_MESSAGE: &str = "message";
+pub const CURRENT_FEATURES: &[&str] = &[FEATURE_MESSAGE];
+
 /// `setup.json`.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct State {
@@ -123,13 +128,24 @@ pub struct State {
     /// The Skill file written (`~/.agents/skills/uniflo/SKILL.md`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skill: Option<String>,
+    /// Legacy single-harness Claude context hook record (kept for backward compatibility).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hook: Option<FileRec>,
+    /// Per-harness SessionStart context hooks (harness id → record).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub context_hooks: BTreeMap<String, HookRec>,
     /// Whether optional cross-agent messaging (`--message`) was opted into (off by default).
     #[serde(default)]
     pub message: bool,
+    /// Legacy single-harness Claude message hook record (kept for backward compatibility).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message_hook: Option<FileRec>,
+    /// Per-harness native message pull hooks (harness id → record).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub message_hooks: BTreeMap<String, HookRec>,
+    /// Features already offered to / configured by this user; prevents nagging on routine updates.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub seen_features: Vec<String>,
     /// Every file setup has written, symlink it created and backup it made.
     #[serde(default)]
     pub files: Vec<String>,
@@ -181,19 +197,84 @@ pub struct FileRec {
     pub created: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HookRec {
+    pub harness: String,
+    pub path: String,
+    pub format: HookFormat,
+    #[serde(default)]
+    pub events: Vec<String>,
+    #[serde(default)]
+    pub created: Vec<String>,
+}
+
 impl State {
     fn load(p: &Path) -> Option<State> {
         serde_json::from_slice(&std::fs::read(p).ok()?).ok()
     }
 
     fn save(&mut self, p: &Path) -> Result<()> {
-        self.version = 1;
+        self.version = 2;
         self.updated_at = uniflo_core::util::now_ms();
         dedup(&mut self.files);
         dedup(&mut self.links);
         dedup(&mut self.backups);
+        dedup(&mut self.seen_features);
         std::fs::create_dir_all(p.parent().context("setup.json has no parent")?)?;
         std::fs::write(p, serde_json::to_vec_pretty(self)?).with_context(|| format!("write {}", p.display()))
+    }
+
+    fn mark_features_seen(&mut self) {
+        for &f in CURRENT_FEATURES {
+            if !self.seen_features.iter().any(|x| x == f) {
+                self.seen_features.push(f.to_owned());
+            }
+        }
+    }
+
+    fn has_context_hooks(&self) -> bool {
+        self.hook.is_some() || !self.context_hooks.is_empty()
+    }
+
+    fn has_any_recorded(&self) -> bool {
+        !self.harnesses.is_empty()
+            || self.skill.is_some()
+            || self.hook.is_some()
+            || !self.context_hooks.is_empty()
+            || self.message_hook.is_some()
+            || !self.message_hooks.is_empty()
+    }
+
+    fn all_context_hook_recs(&self) -> Vec<HookRec> {
+        let mut out: Vec<HookRec> = self.context_hooks.values().cloned().collect();
+        if let Some(h) = &self.hook
+            && !out.iter().any(|r| r.path == h.path)
+        {
+            out.push(HookRec {
+                harness: "claude".into(),
+                path: h.path.clone(),
+                format: HookFormat::Claude,
+                events: vec!["SessionStart".into()],
+                created: h.created.clone(),
+            });
+        }
+        out
+    }
+
+    fn all_message_hook_recs(&self) -> Vec<HookRec> {
+        let mut out: Vec<HookRec> = self.message_hooks.values().cloned().collect();
+        if let Some(h) = &self.message_hook
+            && !out.iter().any(|r| r.path == h.path)
+        {
+            out.push(HookRec {
+                harness: "claude".into(),
+                path: h.path.clone(),
+                format: HookFormat::Claude,
+                events: vec!["PostToolUse".into(), "UserPromptSubmit".into()],
+                created: h.created.clone(),
+            });
+        }
+        out
     }
 
     fn connected(&self) -> impl Iterator<Item = &str> {
@@ -305,8 +386,9 @@ pub fn should_ask_first_run(tty: bool, var: fn(&str) -> Option<String>, state: O
 pub enum AfterUpdate {
     /// Never configured: the full interactive setup, once.
     Ask,
-    /// Configured: refresh silently; ask only about these newly detected harnesses.
-    Reload { new: Vec<&'static str> },
+    /// Configured: silently refresh existing harnesses and auto-connect newly detected ones;
+    /// prompt ONLY when `new_features` contains a newly shipped capability not yet seen by user.
+    Reload { new: Vec<&'static str>, new_features: Vec<&'static str> },
     /// Declined before.
     Nothing,
 }
@@ -317,7 +399,18 @@ pub fn after_update_decision(state: Option<&State>, detected: &[&'static str]) -
         None if !s.asked => AfterUpdate::Ask,
         None | Some(Mode::None) => AfterUpdate::Nothing,
         Some(_) => {
-            AfterUpdate::Reload { new: detected.iter().copied().filter(|id| !s.harnesses.contains_key(*id)).collect() }
+            let new = detected.iter().copied().filter(|id| !s.harnesses.contains_key(*id)).collect();
+            let new_features = CURRENT_FEATURES
+                .iter()
+                .copied()
+                .filter(|&f| {
+                    if s.seen_features.iter().any(|seen| seen == f) {
+                        return false;
+                    }
+                    !(f == FEATURE_MESSAGE && s.message)
+                })
+                .collect();
+            AfterUpdate::Reload { new, new_features }
         }
     }
 }
@@ -336,7 +429,7 @@ enum Step {
     },
     Json {
         path: PathBuf,
-        key: &'static str,
+        key: String,
         want: serde_json::Value,
     },
     Toml {
@@ -374,17 +467,25 @@ enum Note {
     Occupied,
 }
 
+struct HookAction {
+    harness: &'static str,
+    path: PathBuf,
+    format: HookFormat,
+    events: Vec<&'static str>,
+    command: String,
+}
+
 struct Plan {
     mode: Mode,
     items: Vec<Item>,
     /// Write SKILL.md here first (some harness gets the Skill).
     skill: Option<PathBuf>,
-    hook: Option<(PathBuf, String)>,
-    message_hook: Option<(PathBuf, String)>,
+    context_hooks: Vec<HookAction>,
+    message_hooks: Vec<HookAction>,
     /// Uninstall / toggle-off: remove these.
     unskill: Option<PathBuf>,
-    unhook: Option<FileRec>,
-    unmessage_hook: Option<FileRec>,
+    uncontext_hooks: Vec<HookRec>,
+    unmessage_hooks: Vec<HookRec>,
     undo: bool,
 }
 
@@ -392,10 +493,7 @@ struct Plan {
 fn flow(ctx: &Ctx, a: &SetupArgs, tty: bool, input: &mut dyn BufRead, out: &mut dyn Write) -> Result<()> {
     let mut state = State::load(&ctx.state_path);
     if a.uninstall {
-        let Some(st) = state
-            .as_mut()
-            .filter(|s| !s.harnesses.is_empty() || s.skill.is_some() || s.hook.is_some() || s.message_hook.is_some())
-        else {
+        let Some(st) = state.as_mut().filter(|s| s.has_any_recorded()) else {
             writeln!(
                 out,
                 "{}",
@@ -416,8 +514,10 @@ fn flow(ctx: &Ctx, a: &SetupArgs, tty: bool, input: &mut dyn BufRead, out: &mut 
         st.harnesses.clear();
         st.skill = None;
         st.hook = None;
+        st.context_hooks.clear();
         st.message = false;
         st.message_hook = None;
+        st.message_hooks.clear();
         st.mode = None;
         st.asked = true;
         st.save(&ctx.state_path)?;
@@ -436,37 +536,46 @@ fn flow(ctx: &Ctx, a: &SetupArgs, tty: bool, input: &mut dyn BufRead, out: &mut 
         match after_update_decision(state.as_ref(), &ids) {
             AfterUpdate::Nothing => return Ok(()),
             AfterUpdate::Ask => return flow(ctx, &SetupArgs::default(), tty, input, out),
-            AfterUpdate::Reload { new } => {
+            AfterUpdate::Reload { new, new_features } => {
                 let st = state.as_mut().context("state")?;
                 let mode = st.mode.unwrap_or(Mode::Mcp);
-                let known: Vec<&Detected> =
-                    detected.iter().filter(|d| st.connected().any(|id| id == d.spec.id)).collect();
-                let hook = st.hook.is_some();
+                // Refresh all previously connected harnesses AND seamlessly auto-connect newly detected ones.
+                let active: Vec<&Detected> = detected
+                    .iter()
+                    .filter(|d| st.connected().any(|id| id == d.spec.id) || new.contains(&d.spec.id))
+                    .collect();
+                let hook = st.has_context_hooks();
                 let message = st.message;
-                let refresh = plan(ctx, mode, &known, hook, message, None);
+                let refresh = plan(ctx, mode, &active, hook, message, Vec::new());
                 apply(ctx, &refresh, st, &mut std::io::sink())?;
+                st.binary = Some(ctx.bin.clone());
+                if new_features.is_empty() {
+                    st.mark_features_seen();
+                }
                 st.save(&ctx.state_path)?;
-                refreshed(st, &known, mode, out)?;
-                if new.is_empty() || !tty {
-                    return Ok(());
-                }
-                let names: Vec<&str> = new.iter().filter_map(|id| harness::lookup(id)).map(|s| s.name).collect();
-                let (names, label) = (names.join(", "), mode.label());
-                let q = tr!(
-                    "检测到新的 harness：{names}。为它们接入 {label}？",
-                    "New harnesses found: {names}. Connect them with {label}?"
-                );
-                let fresh: Vec<&Detected> = detected.iter().filter(|d| new.contains(&d.spec.id)).collect();
-                if ask_yes(input, out, &q, true) {
-                    let add = plan(ctx, mode, &fresh, false, message, None);
-                    print_plan(ctx, &add, out)?;
-                    apply(ctx, &add, st, out)?;
-                } else {
-                    for d in fresh {
-                        st.harnesses.insert(d.spec.id.into(), Rec { result: "declined".into(), ..Default::default() });
+                refreshed(st, &active, &new, mode, out)?;
+
+                // Only prompt when a genuinely NEW feature has been shipped since the last setup.
+                if !new_features.is_empty() && tty {
+                    if new_features.contains(&FEATURE_MESSAGE) {
+                        let hook_count = active
+                            .iter()
+                            .filter(|d| d.spec.hooks.is_some_and(|h| !h.message_events.is_empty()))
+                            .count();
+                        let q = tr!(
+                            "发现新功能：跨 Agent 消息与进程看门狗（全部 MCP 绑定 SSE 看门狗 + {hook_count} 个原生静默 Hook）——现在开启吗？",
+                            "New feature: cross-agent messaging & per-process SSE watchdog (all MCP harnesses + {hook_count} native pull hooks). Enable now?"
+                        );
+                        if ask_yes(input, out, &q, false) {
+                            let upgrade = plan(ctx, mode, &active, hook, true, Vec::new());
+                            apply(ctx, &upgrade, st, out)?;
+                            st.message = true;
+                        }
                     }
+                    st.mark_features_seen();
+                    st.save(&ctx.state_path)?;
                 }
-                return st.save(&ctx.state_path);
+                return Ok(());
             }
         }
     }
@@ -550,35 +659,51 @@ fn flow(ctx: &Ctx, a: &SetupArgs, tty: bool, input: &mut dyn BufRead, out: &mut 
         writeln!(out, "{}", tr!("uniflo setup：没有可接入的 harness", "uniflo setup: no harness to connect"))?;
         return Ok(());
     }
-    let claude = picked.iter().any(|d| d.spec.id == "claude");
-    let hook = claude
+    let ctx_hook_ids: Vec<&str> =
+        picked.iter().filter(|d| d.spec.hooks.is_some_and(|h| h.context_event.is_some())).map(|d| d.spec.id).collect();
+    let msg_hook_ids: Vec<&str> = picked
+        .iter()
+        .filter(|d| d.spec.hooks.is_some_and(|h| !h.message_events.is_empty()))
+        .map(|d| d.spec.id)
+        .collect();
+    let hook = !ctx_hook_ids.is_empty()
         && (a.hook
-            || (a.reload && state.as_ref().is_some_and(|s| s.hook.is_some()))
+            || (a.reload && state.as_ref().is_some_and(State::has_context_hooks))
             || (interactive
                 && ask_yes(
                     input,
                     out,
                     &tr!(
-                        "为 Claude Code 加 SessionStart hook（新会话开头附上本项目最近的会话列表）？",
-                        "Add a Claude Code SessionStart hook (new sessions start with this project's recent sessions)?"
+                        "为支持原生 Hook 的 harness（{}）加 SessionStart 上下文注入？",
+                        "Add SessionStart context hooks for {} (recent project sessions on start)?",
+                        ctx_hook_ids.join(", ")
                     ),
                     false,
                 )));
     let message = a.message
         || (a.reload && state.as_ref().is_some_and(|s| s.message))
         || (interactive
-            && (mode.mcp() || claude)
+            && (mode.mcp() || !msg_hook_ids.is_empty())
             && ask_yes(
                 input,
                 out,
-                &tr!(
-                    "启用可选跨 Agent 消息（给 MCP 加发信/收件箱工具，并为 Claude Code 加静默拉取 hook，默认否）？",
-                    "Enable optional cross-agent messaging (MCP send/inbox tools + silent Claude Code pull hook, off by default)?"
-                ),
+                &if msg_hook_ids.is_empty() {
+                    tr!(
+                        "启用可选跨 Agent 消息与进程看门狗（全部 MCP 绑定 SSE 实时看门狗，默认否）？",
+                        "Enable optional cross-agent messaging & per-process SSE watchdog for all MCP harnesses (off by default)?"
+                    )
+                } else {
+                    tr!(
+                        "启用可选跨 Agent 消息与进程看门狗（全部 MCP 绑定 SSE 看门狗 + {} 原生静默拉取 Hook，默认否）？",
+                        "Enable optional cross-agent messaging & per-process SSE watchdog (all MCP + {} native pull hooks, off by default)?",
+                        msg_hook_ids.join(", ")
+                    )
+                },
                 false,
             ));
-    let old_message_hook = (!message).then(|| state.as_ref().and_then(|s| s.message_hook.clone())).flatten();
-    let todo = plan(ctx, mode, &picked, hook, message, old_message_hook);
+    let old_message_hooks =
+        if !message { state.as_ref().map(State::all_message_hook_recs).unwrap_or_default() } else { Vec::new() };
+    let todo = plan(ctx, mode, &picked, hook, message, old_message_hooks);
     print_plan(ctx, &todo, out)?;
     if !confirmed(a, tty, input, out)? {
         return Ok(());
@@ -590,38 +715,51 @@ fn flow(ctx: &Ctx, a: &SetupArgs, tty: bool, input: &mut dyn BufRead, out: &mut 
     st.message = message;
     if !message {
         st.message_hook = None;
+        st.message_hooks.clear();
     }
+    st.mark_features_seen();
     st.binary = Some(ctx.bin.clone());
     st.save(&ctx.state_path)?;
     let n = todo.items.len();
     writeln!(
         out,
-        "{}",
-        tr!(
-            "完成：{n} 个 harness。记录 {}；撤销 `uniflo setup --uninstall`",
-            "Done: {n} harnesses. Record {}; undo with `uniflo setup --uninstall`",
-            ctx.state_path.display()
+        "\n{}",
+        step(
+            Mark::Ok,
+            &tr!(
+                "完成：{n} 个 harness 已配置 · 记录 {} · 撤销 `uniflo setup --uninstall`",
+                "Done: {n} harnesses configured · record {} · undo `uniflo setup --uninstall`",
+                ctx.env.show(&ctx.state_path)
+            )
         )
     )?;
     Ok(())
 }
 
-/// The one line `uniflo update` prints for a silent refresh, plus one per harness that failed.
-fn refreshed(st: &State, known: &[&Detected], mode: Mode, out: &mut dyn Write) -> Result<()> {
-    if known.is_empty() {
+/// The summary `uniflo update` prints after silently refreshing existing + newly detected harnesses.
+fn refreshed(st: &State, active: &[&Detected], newly_added: &[&str], mode: Mode, out: &mut dyn Write) -> Result<()> {
+    if active.is_empty() {
         return Ok(());
     }
-    let ids: Vec<&str> = known.iter().map(|d| d.spec.id).collect();
+    let ids: Vec<&str> = active.iter().map(|d| d.spec.id).collect();
     let (list, label) = (ids.join(", "), mode.label());
     writeln!(
         out,
         "{}",
-        step(Mark::Ok, &tr!("agent 接入已刷新：{list}（{label}）", "agent setup refreshed: {list} ({label})"))
+        step(Mark::Ok, &tr!("agent 接入已自动同步：{list}（{label}）", "agent setup synced: {list} ({label})"))
     )?;
+    if !newly_added.is_empty() {
+        let added = newly_added.join(", ");
+        writeln!(
+            out,
+            "{}",
+            step(Mark::Ok, &tr!("已自动补接新检测到的 harness：{added}", "auto-connected new harnesses: {added}"))
+        )?;
+    }
     for id in ids {
         if let Some(r) = st.harnesses.get(id).filter(|r| matches!(r.result.as_str(), "failed" | "occupied")) {
             let detail = r.detail.as_deref().unwrap_or("");
-            writeln!(out, "{}", step(Mark::Warn, &format!("{id:<10} {detail}")))?;
+            writeln!(out, "{}", step(Mark::Warn, &format!("{id:<12} {detail}")))?;
         }
     }
     Ok(())
@@ -802,17 +940,12 @@ fn ask_agents<'a>(input: &mut dyn BufRead, out: &mut dyn Write, detected: &'a [D
 }
 
 /// What connecting `picked` in `mode` takes. Reads (never writes) the files involved.
-fn plan(
-    ctx: &Ctx,
-    mode: Mode,
-    picked: &[&Detected],
-    hook: bool,
-    message: bool,
-    unmessage_hook: Option<FileRec>,
-) -> Plan {
+fn plan(ctx: &Ctx, mode: Mode, picked: &[&Detected], hook: bool, message: bool, unmessage_hooks: Vec<HookRec>) -> Plan {
     let shared = ctx.skill_dir();
     let mut items = Vec::new();
     let mut needs_skill = false;
+    let mut context_hooks = Vec::new();
+    let mut message_hooks = Vec::new();
     for d in picked {
         let spec = d.spec;
         let mut steps = Vec::new();
@@ -846,16 +979,42 @@ fn plan(
                 }
             });
         }
+        if let Some(h) = spec.hooks {
+            if hook && let Some(ev) = h.context_event {
+                context_hooks.push(HookAction {
+                    harness: spec.id,
+                    path: ctx.env.file(h.file),
+                    format: h.format,
+                    events: vec![ev],
+                    command: edit::context_hook_command_for(&ctx.bin, spec.id),
+                });
+            }
+            if message && !h.message_events.is_empty() {
+                message_hooks.push(HookAction {
+                    harness: spec.id,
+                    path: ctx.env.file(h.file),
+                    format: h.format,
+                    events: h.message_events.to_vec(),
+                    command: edit::message_hook_command_for(&ctx.bin, spec.id),
+                });
+            }
+        }
         items.push(Item { spec, steps });
     }
     let skill_file = shared.join("SKILL.md");
     let skill = (needs_skill && std::fs::read_to_string(&skill_file).ok().as_deref() != Some(crate::agent::SKILL))
         .then_some(skill_file);
-    let claude = picked.iter().any(|d| d.spec.id == "claude");
-    let hook = hook.then(|| (ctx.env.file(".claude/settings.json"), edit::hook_command(&ctx.bin)));
-    let message_hook =
-        (claude && message).then(|| (ctx.env.file(".claude/settings.json"), edit::message_hook_command(&ctx.bin)));
-    Plan { mode, items, skill, hook, message_hook, unskill: None, unhook: None, unmessage_hook, undo: false }
+    Plan {
+        mode,
+        items,
+        skill,
+        context_hooks,
+        message_hooks,
+        unskill: None,
+        uncontext_hooks: Vec::new(),
+        unmessage_hooks,
+        undo: false,
+    }
 }
 
 fn mcp_steps(ctx: &Ctx, d: &Detected, message: bool) -> Vec<Step> {
@@ -872,9 +1031,10 @@ fn mcp_steps(ctx: &Ctx, d: &Detected, message: bool) -> Vec<Step> {
             let path = ctx.env.file(file);
             let want = edit::entry_with(*shape, bin, message);
             let text = std::fs::read_to_string(&path).ok();
-            match edit::json_set(text.as_deref(), key, &want) {
-                Outcome::Write { .. } => vec![Step::Json { path, key, want }],
-                o => vec![note_for(ctx, &path, &format!("{key}.uniflo"), o)],
+            let key_str = key.join(".");
+            match edit::json_set_path(text.as_deref(), key, &want) {
+                Outcome::Write { .. } => vec![Step::Json { path, key: key_str, want }],
+                o => vec![note_for(ctx, &path, &format!("{key_str}.uniflo"), o)],
             }
         }
         Mcp::Cli { add, remove, probe, toml_fallback } => {
@@ -1016,78 +1176,82 @@ fn uninstall_plan(ctx: &Ctx, st: &State) -> Plan {
         mode: Mode::None,
         items,
         skill: None,
-        hook: None,
-        message_hook: None,
+        context_hooks: Vec::new(),
+        message_hooks: Vec::new(),
         unskill: st.skill.as_ref().map(PathBuf::from),
-        unhook: st.hook.clone(),
-        unmessage_hook: st.message_hook.clone(),
+        uncontext_hooks: st.all_context_hook_recs(),
+        unmessage_hooks: st.all_message_hook_recs(),
         undo: true,
     }
 }
 
 fn print_plan(ctx: &Ctx, p: &Plan, out: &mut dyn Write) -> Result<()> {
     if p.undo {
-        writeln!(out, "\n{}", ui::bold(&tr!("撤销计划：", "Undo plan:")))?;
+        writeln!(out, "\n{}", ui::section(&tr!("撤销计划", "Undo Plan"), ""))?;
     } else {
         let (label, bin) = (p.mode.label(), &ctx.bin);
-        writeln!(out, "\n{}", ui::bold(&tr!("接入计划 · {label} · {bin}", "Plan · {label} · {bin}")))?;
+        writeln!(
+            out,
+            "\n{}",
+            ui::section(
+                &tr!("接入计划 · {label}", "Setup Plan · {label}"),
+                &tr!("{} 个 harness", "{} harnesses", p.items.len())
+            )
+        )?;
+        writeln!(out, "  {} {}", ui::dim(&format!("{:<16}", "bin")), ui::dim(bin))?;
     }
     if let Some(f) = &p.skill {
         let f = ctx.env.show(f);
-        writeln!(out, "  {:<10} {}", "skill", tr!("写入 {f}", "write {f}"))?;
+        writeln!(out, "  {} {}", ui::accent(&format!("{:<16}", "skill")), tr!("写入 {f}", "write {f}"))?;
     }
     if let Some(f) = &p.unskill {
         let f = ctx.env.show(Path::new(f));
-        writeln!(out, "  {:<10} {}", "skill", tr!("删除 {f}", "delete {f}"))?;
+        writeln!(out, "  {} {}", ui::accent(&format!("{:<16}", "skill")), tr!("删除 {f}", "delete {f}"))?;
     }
     for it in &p.items {
         for (i, s) in it.steps.iter().enumerate() {
             let id = if i == 0 { it.spec.id } else { "" };
-            writeln!(out, "  {id:<10} {}", describe(ctx, s))?;
+            writeln!(out, "  {} {}", ui::bold(&format!("{id:<16}")), describe(ctx, s))?;
         }
     }
-    if let Some((f, cmd)) = &p.hook {
-        let f = ctx.env.show(f);
+    for h in &p.context_hooks {
+        let f = ctx.env.show(&h.path);
+        let evs = h.events.join(" / ");
         writeln!(
             out,
-            "  {:<10} {}",
-            "hook",
-            tr!(
-                "编辑 {f}：hooks.SessionStart 追加 `{cmd}`（改前备份）",
-                "edit {f}: append `{cmd}` to hooks.SessionStart (backed up first)"
-            )
+            "  {} {}",
+            ui::accent(&format!("{:<16}", format!("hook:{}", h.harness))),
+            tr!("编辑 {f}：{evs} 注入上下文（改前备份）", "edit {f}: add {evs} context hook (backed up first)")
         )?;
     }
-    if let Some(h) = &p.unhook {
+    for h in &p.uncontext_hooks {
         let f = ctx.env.show(Path::new(&h.path));
         writeln!(
             out,
-            "  {:<10} {}",
-            "hook",
+            "  {} {}",
+            ui::accent(&format!("{:<16}", format!("hook:{}", h.harness))),
             tr!(
                 "编辑 {f}：移除 uniflo 的 SessionStart hook（改前备份）",
                 "edit {f}: remove the uniflo SessionStart hook (backed up first)"
             )
         )?;
     }
-    if let Some((f, cmd)) = &p.message_hook {
-        let f = ctx.env.show(f);
+    for h in &p.message_hooks {
+        let f = ctx.env.show(&h.path);
+        let evs = h.events.join(" / ");
         writeln!(
             out,
-            "  {:<10} {}",
-            "message",
-            tr!(
-                "编辑 {f}：hooks.PostToolUse / UserPromptSubmit 追加 `{cmd}`（改前备份）",
-                "edit {f}: append `{cmd}` to hooks.PostToolUse / UserPromptSubmit (backed up first)"
-            )
+            "  {} {}",
+            ui::accent(&format!("{:<16}", format!("msg:{}", h.harness))),
+            tr!("编辑 {f}：{evs} 静默拉取消息（改前备份）", "edit {f}: add {evs} message hook (backed up first)")
         )?;
     }
-    if let Some(h) = &p.unmessage_hook {
+    for h in &p.unmessage_hooks {
         let f = ctx.env.show(Path::new(&h.path));
         writeln!(
             out,
-            "  {:<10} {}",
-            "message",
+            "  {} {}",
+            ui::accent(&format!("{:<16}", format!("msg:{}", h.harness))),
             tr!(
                 "编辑 {f}：移除 uniflo 的消息拉取 hook（改前备份）",
                 "edit {f}: remove the uniflo message pull hooks (backed up first)"
@@ -1098,30 +1262,62 @@ fn print_plan(ctx: &Ctx, p: &Plan, out: &mut dyn Write) -> Result<()> {
 }
 
 fn describe(ctx: &Ctx, s: &Step) -> String {
-    let cmd = |argv: &[String]| {
-        let mut w: Vec<String> = argv.iter().map(|a| uniflo_core::resume::sh_quote(a)).collect();
-        if let Some(name) = Path::new(&argv[0]).file_name() {
-            w[0] = name.to_string_lossy().into_owned();
-        }
-        w.join(" ")
+    let cli_name = |argv: &[String]| {
+        Path::new(&argv[0]).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| argv[0].clone())
     };
     let show = |p: &Path| ctx.env.show(p);
     match s {
-        Step::Run { argv, first: None } => tr!("运行 {}", "run {}", cmd(argv)),
-        Step::Run { argv, first: Some(f) } => {
-            tr!("刷新路径：运行 {}，再运行 {}", "refresh the path: run {}, then {}", cmd(f), cmd(argv))
+        Step::Run { argv, first: None } => {
+            let cli = cli_name(argv);
+            if argv.iter().any(|a| a == "--message") {
+                tr!("注册 MCP（{cli} mcp add · 含 SSE 看门狗）", "register MCP ({cli} mcp add + SSE watchdog)")
+            } else {
+                tr!("注册 MCP（{cli} mcp add）", "register MCP ({cli} mcp add)")
+            }
         }
-        Step::Json { path, key, .. } => {
-            tr!("编辑 {}：写入 {key}.uniflo（改前备份）", "edit {}: set {key}.uniflo (backed up first)", show(path))
+        Step::Run { argv, first: Some(_) } => {
+            let cli = cli_name(argv);
+            if argv.iter().any(|a| a == "--message") {
+                tr!(
+                    "刷新 MCP（{cli} mcp remove + add · 含 SSE 看门狗）",
+                    "refresh MCP ({cli} mcp remove + add + SSE watchdog)"
+                )
+            } else {
+                tr!("刷新 MCP（{cli} mcp remove + add）", "refresh MCP ({cli} mcp remove + add)")
+            }
         }
-        Step::Toml { path, .. } => tr!(
-            "编辑 {}：写入 [mcp_servers.uniflo]（改前备份）",
-            "edit {}: set [mcp_servers.uniflo] (backed up first)",
-            show(path)
-        ),
+        Step::Json { path, key, want } => {
+            if edit::entry_has_message(want) {
+                tr!(
+                    "编辑 {}：写入 {key}.uniflo（含 SSE 看门狗，改前备份）",
+                    "edit {}: set {key}.uniflo (+ SSE watchdog, backed up first)",
+                    show(path)
+                )
+            } else {
+                tr!("编辑 {}：写入 {key}.uniflo（改前备份）", "edit {}: set {key}.uniflo (backed up first)", show(path))
+            }
+        }
+        Step::Toml { path, message } => {
+            if *message {
+                tr!(
+                    "编辑 {}：写入 [mcp_servers.uniflo]（含 SSE 看门狗，改前备份）",
+                    "edit {}: set [mcp_servers.uniflo] (+ SSE watchdog, backed up first)",
+                    show(path)
+                )
+            } else {
+                tr!(
+                    "编辑 {}：写入 [mcp_servers.uniflo]（改前备份）",
+                    "edit {}: set [mcp_servers.uniflo] (backed up first)",
+                    show(path)
+                )
+            }
+        }
         Step::Link { link, target } => tr!("Skill 软链 {} → {}", "Skill link {} → {}", show(link), target.display()),
         Step::Shared => tr!("Skill：读取 ~/.agents/skills，无需软链", "Skill: reads ~/.agents/skills, no link needed"),
-        Step::RunRemove { argv } => tr!("运行 {}", "run {}", cmd(argv)),
+        Step::RunRemove { argv } => {
+            let cli = cli_name(argv);
+            tr!("移除 MCP（{cli} mcp remove）", "remove MCP ({cli} mcp remove)")
+        }
         Step::JsonRemove { path, key, .. } => {
             tr!("编辑 {}：移除 {key}.uniflo（改前备份）", "edit {}: remove {key}.uniflo (backed up first)", show(path))
         }
@@ -1173,70 +1369,145 @@ fn apply(ctx: &Ctx, p: &Plan, st: &mut State, out: &mut dyn Write) -> Result<()>
         rec.result = ["unchanged", done, "skipped", "occupied", "failed"][rank as usize].to_owned();
         rec.detail = (!msg.is_empty()).then(|| msg.clone());
         let mark = [Mark::Ok, Mark::Ok, Mark::Info, Mark::Warn, Mark::Fail][rank as usize];
-        writeln!(out, "{}", step(mark, &format!("{:<10} {msg}", it.spec.id)))?;
+        writeln!(out, "{}", step(mark, &format!("{:<12} {msg}", it.spec.id)))?;
     }
-    if let Some((path, cmd)) = &p.hook {
-        let text = std::fs::read_to_string(path).ok();
-        match edit::hook_set(text.as_deref(), cmd) {
+    for h in &p.context_hooks {
+        let text = std::fs::read_to_string(&h.path).ok();
+        match edit::multi_hooks_set(text.as_deref(), h.format, &h.events, &h.command, false) {
             Outcome::Write { text, created } => {
-                let b = edit::write(path, &text, &ctx.stamp)?;
+                let b = edit::write(&h.path, &text, &ctx.stamp)?;
                 st.backups.extend(b.map(|b| b.display().to_string()));
-                st.files.push(path.display().to_string());
-                st.hook = Some(FileRec { path: path.display().to_string(), created });
-                writeln!(out, "{}", step(Mark::Ok, &format!("{:<10} {}", "hook", ctx.env.show(path))))?;
-            }
-            Outcome::Unchanged => {
-                st.hook.get_or_insert_with(|| FileRec { path: path.display().to_string(), created: Vec::new() });
-            }
-            o => writeln!(out, "{}", step(Mark::Info, &format!("{:<10} {o:?}", "hook")))?,
-        }
-    }
-    if let Some(h) = &p.unhook {
-        let path = PathBuf::from(&h.path);
-        let text = std::fs::read_to_string(&path).ok();
-        if let Outcome::Write { text, .. } = edit::hook_remove(text.as_deref(), &h.created) {
-            let b =
-                if text.is_empty() { edit::delete(&path, &ctx.stamp)? } else { edit::write(&path, &text, &ctx.stamp)? };
-            st.backups.extend(b.map(|b| b.display().to_string()));
-            writeln!(
-                out,
-                "{}",
-                step(Mark::Ok, &format!("{:<10} {}", "hook", tr!("已移除 {}", "removed {}", ctx.env.show(&path))))
-            )?;
-        }
-    }
-    if let Some((path, cmd)) = &p.message_hook {
-        let text = std::fs::read_to_string(path).ok();
-        match edit::message_hooks_set(text.as_deref(), cmd) {
-            Outcome::Write { text, created } => {
-                let b = edit::write(path, &text, &ctx.stamp)?;
-                st.backups.extend(b.map(|b| b.display().to_string()));
-                st.files.push(path.display().to_string());
-                let created = match &st.message_hook {
+                st.files.push(h.path.display().to_string());
+                let created = match st.context_hooks.get(h.harness) {
                     Some(old) if created.is_empty() => old.created.clone(),
                     _ => created,
                 };
-                st.message_hook = Some(FileRec { path: path.display().to_string(), created });
-                writeln!(out, "{}", step(Mark::Ok, &format!("{:<10} {}", "message", ctx.env.show(path))))?;
+                if h.harness == "claude" {
+                    st.hook = Some(FileRec { path: h.path.display().to_string(), created: created.clone() });
+                }
+                st.context_hooks.insert(
+                    h.harness.to_owned(),
+                    HookRec {
+                        harness: h.harness.to_owned(),
+                        path: h.path.display().to_string(),
+                        format: h.format,
+                        events: h.events.iter().map(|s| (*s).to_owned()).collect(),
+                        created,
+                    },
+                );
+                writeln!(
+                    out,
+                    "{}",
+                    step(Mark::Ok, &format!("{:<12} {}", format!("hook:{}", h.harness), ctx.env.show(&h.path)))
+                )?;
             }
             Outcome::Unchanged => {
-                st.message_hook
-                    .get_or_insert_with(|| FileRec { path: path.display().to_string(), created: Vec::new() });
+                let rec = HookRec {
+                    harness: h.harness.to_owned(),
+                    path: h.path.display().to_string(),
+                    format: h.format,
+                    events: h.events.iter().map(|s| (*s).to_owned()).collect(),
+                    created: Vec::new(),
+                };
+                if h.harness == "claude" {
+                    st.hook.get_or_insert_with(|| FileRec { path: h.path.display().to_string(), created: Vec::new() });
+                }
+                st.context_hooks.entry(h.harness.to_owned()).or_insert(rec);
             }
-            o => writeln!(out, "{}", step(Mark::Info, &format!("{:<10} {o:?}", "message")))?,
+            o => writeln!(out, "{}", step(Mark::Info, &format!("{:<12} {o:?}", format!("hook:{}", h.harness))))?,
         }
     }
-    if let Some(h) = &p.unmessage_hook {
+    for h in &p.uncontext_hooks {
         let path = PathBuf::from(&h.path);
         let text = std::fs::read_to_string(&path).ok();
-        if let Outcome::Write { text, .. } = edit::message_hooks_remove(text.as_deref(), &h.created) {
+        let evs: Vec<&str> = h.events.iter().map(String::as_str).collect();
+        if let Outcome::Write { text, .. } =
+            edit::multi_hooks_remove(text.as_deref(), h.format, &evs, &h.created, false)
+        {
             let b =
                 if text.is_empty() { edit::delete(&path, &ctx.stamp)? } else { edit::write(&path, &text, &ctx.stamp)? };
             st.backups.extend(b.map(|b| b.display().to_string()));
             writeln!(
                 out,
                 "{}",
-                step(Mark::Ok, &format!("{:<10} {}", "message", tr!("已移除 {}", "removed {}", ctx.env.show(&path))))
+                step(
+                    Mark::Ok,
+                    &format!(
+                        "{:<12} {}",
+                        format!("hook:{}", h.harness),
+                        tr!("已移除 {}", "removed {}", ctx.env.show(&path))
+                    )
+                )
+            )?;
+        }
+    }
+    for h in &p.message_hooks {
+        let text = std::fs::read_to_string(&h.path).ok();
+        match edit::multi_hooks_set(text.as_deref(), h.format, &h.events, &h.command, true) {
+            Outcome::Write { text, created } => {
+                let b = edit::write(&h.path, &text, &ctx.stamp)?;
+                st.backups.extend(b.map(|b| b.display().to_string()));
+                st.files.push(h.path.display().to_string());
+                let created = match st.message_hooks.get(h.harness) {
+                    Some(old) if created.is_empty() => old.created.clone(),
+                    _ => created,
+                };
+                if h.harness == "claude" {
+                    st.message_hook = Some(FileRec { path: h.path.display().to_string(), created: created.clone() });
+                }
+                st.message_hooks.insert(
+                    h.harness.to_owned(),
+                    HookRec {
+                        harness: h.harness.to_owned(),
+                        path: h.path.display().to_string(),
+                        format: h.format,
+                        events: h.events.iter().map(|s| (*s).to_owned()).collect(),
+                        created,
+                    },
+                );
+                writeln!(
+                    out,
+                    "{}",
+                    step(Mark::Ok, &format!("{:<12} {}", format!("msg:{}", h.harness), ctx.env.show(&h.path)))
+                )?;
+            }
+            Outcome::Unchanged => {
+                let rec = HookRec {
+                    harness: h.harness.to_owned(),
+                    path: h.path.display().to_string(),
+                    format: h.format,
+                    events: h.events.iter().map(|s| (*s).to_owned()).collect(),
+                    created: Vec::new(),
+                };
+                if h.harness == "claude" {
+                    st.message_hook
+                        .get_or_insert_with(|| FileRec { path: h.path.display().to_string(), created: Vec::new() });
+                }
+                st.message_hooks.entry(h.harness.to_owned()).or_insert(rec);
+            }
+            o => writeln!(out, "{}", step(Mark::Info, &format!("{:<12} {o:?}", format!("msg:{}", h.harness))))?,
+        }
+    }
+    for h in &p.unmessage_hooks {
+        let path = PathBuf::from(&h.path);
+        let text = std::fs::read_to_string(&path).ok();
+        let evs: Vec<&str> = h.events.iter().map(String::as_str).collect();
+        if let Outcome::Write { text, .. } = edit::multi_hooks_remove(text.as_deref(), h.format, &evs, &h.created, true)
+        {
+            let b =
+                if text.is_empty() { edit::delete(&path, &ctx.stamp)? } else { edit::write(&path, &text, &ctx.stamp)? };
+            st.backups.extend(b.map(|b| b.display().to_string()));
+            writeln!(
+                out,
+                "{}",
+                step(
+                    Mark::Ok,
+                    &format!(
+                        "{:<12} {}",
+                        format!("msg:{}", h.harness),
+                        tr!("已移除 {}", "removed {}", ctx.env.show(&path))
+                    )
+                )
             )?;
         }
     }
@@ -1293,7 +1564,7 @@ fn exec(
                         Some(McpRec::Json { created: old, .. }) if created.is_empty() => old.clone(),
                         _ => created,
                     };
-                    rec.mcp = Some(McpRec::Json { path: path.display().to_string(), key: (*key).to_owned(), created });
+                    rec.mcp = Some(McpRec::Json { path: path.display().to_string(), key: key.clone(), created });
                     Ok(Some(tr!("已写入 {}", "wrote {}", ctx.env.show(path))))
                 }
                 o => match note_for(ctx, path, &format!("{key}.uniflo"), o) {

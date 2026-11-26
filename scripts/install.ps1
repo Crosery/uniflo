@@ -251,8 +251,8 @@
         }
 
         if (-not $noSetup -and [Environment]::UserInteractive -and -not [Console]::IsInputRedirected -and -not [Console]::IsOutputRedirected) {
-            Say (Pick '\u8fd0\u884c uniflo setup\uff1a\u628a MCP / Skill \u63a5\u5165\u672c\u673a agent\uff08\u4e4b\u540e\u53ef\u7528 uniflo setup --uninstall \u64a4\u9500\uff09' 'running uniflo setup: wires MCP / Skill into local agents (undo any time with uniflo setup --uninstall)')
-            & $dest setup
+            Say (Pick '\u8fd0\u884c uniflo setup\uff1a\u9996\u6b21\u63a5\u5165\u672c\u673a agent\uff0c\u5df2\u914d\u7f6e\u8fc7\u5219\u9759\u9ed8\u540c\u6b65\u65b0\u589e\u4e0e\u66f4\u65b0\uff08\u53ef\u7528 uniflo setup --uninstall \u64a4\u9500\uff09' 'running uniflo setup: configures local agents on first install, or syncs updates silently (undo with uniflo setup --uninstall)')
+            & $dest setup --after-update
             if ($LASTEXITCODE -ne 0) { Say (Pick 'uniflo setup \u6ca1\u6709\u5b8c\u6210\uff0c\u4e4b\u540e\u53ef\u4ee5\u968f\u65f6\u8fd0\u884c uniflo setup' 'uniflo setup did not finish; you can run uniflo setup again any time') }
         } else {
             Say (Pick '\u8df3\u8fc7 uniflo setup\uff1b\u4e4b\u540e\u53ef\u8fd0\u884c uniflo setup \u628a MCP / Skill \u63a5\u5165\u672c\u673a agent' 'skipping uniflo setup; run uniflo setup later to wire MCP / Skill into local agents')

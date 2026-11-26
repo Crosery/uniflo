@@ -13,13 +13,17 @@ use crate::client::Client;
 use crate::{Cli, enc};
 use anyhow::{Result, anyhow};
 use serde_json::{Map, Value, json};
+use std::collections::VecDeque;
 use std::fmt::Write as _;
-use std::io::{BufRead, Write};
-use std::sync::Arc;
+use std::io::{BufRead, BufReader, Write};
+use std::net::TcpStream;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 use uniflo_core::util::{now_ms, preview};
 use uniflo_core::{Engine, EngineOptions};
 use uniflo_gateway::GuardOptions;
+use uniflo_schema::AgentMessage;
 use uniflo_schema::search::{HIGHLIGHT_END, HIGHLIGHT_START};
 use uniflo_search::fts::{Fts, FtsOptions};
 
@@ -32,12 +36,203 @@ const INVALID_REQUEST: i64 = -32600;
 const METHOD_NOT_FOUND: i64 = -32601;
 const INVALID_PARAMS: i64 = -32602;
 
+/// Shared state of the per-process SSE message watchdog bound to `uniflo mcp --message`.
+/// Starts automatically with the MCP server process and shuts down when stdin closes.
+struct Watchdog {
+    cwd: Option<String>,
+    shutdown: Arc<AtomicBool>,
+    initialized: Arc<AtomicBool>,
+    subscribed: Arc<AtomicBool>,
+    queue: Arc<(Mutex<VecDeque<AgentMessage>>, Condvar)>,
+}
+
+impl Watchdog {
+    fn start(url: String, token: Option<String>, stdout: Arc<Mutex<std::io::Stdout>>) -> Arc<Watchdog> {
+        let cwd = std::env::current_dir().ok().map(|p| p.display().to_string());
+        let wd = Arc::new(Watchdog {
+            cwd: cwd.clone(),
+            shutdown: Arc::new(AtomicBool::new(false)),
+            initialized: Arc::new(AtomicBool::new(false)),
+            subscribed: Arc::new(AtomicBool::new(false)),
+            queue: Arc::new((Mutex::new(VecDeque::new()), Condvar::new())),
+        });
+        let w = wd.clone();
+        std::thread::spawn(move || watchdog_loop(url, token, cwd, w, stdout));
+        wd
+    }
+
+    fn stop(&self) {
+        self.shutdown.store(true, Ordering::Relaxed);
+        self.queue.1.notify_all();
+    }
+
+    fn drain(&self) -> Vec<AgentMessage> {
+        let mut q = self.queue.0.lock().unwrap();
+        q.drain(..).collect()
+    }
+
+    fn wait_for(&self, timeout: Duration, filter_to: Option<&str>) -> Vec<AgentMessage> {
+        let deadline = Instant::now() + timeout;
+        let mut q = self.queue.0.lock().unwrap();
+        loop {
+            let mut matched = Vec::new();
+            let mut keep = VecDeque::new();
+            while let Some(m) = q.pop_front() {
+                let hit = match filter_to {
+                    Some(t) => m.to == t || m.to.starts_with(t),
+                    None => true,
+                };
+                if hit {
+                    matched.push(m);
+                } else {
+                    keep.push_back(m);
+                }
+            }
+            *q = keep;
+            if !matched.is_empty() || self.shutdown.load(Ordering::Relaxed) {
+                return matched;
+            }
+            let Some(rem) = deadline.checked_duration_since(Instant::now()) else {
+                return Vec::new();
+            };
+            let (guard, res) = self.queue.1.wait_timeout(q, rem).unwrap();
+            q = guard;
+            if res.timed_out() && q.is_empty() {
+                return Vec::new();
+            }
+        }
+    }
+}
+
+fn write_json_line(out: &Arc<Mutex<std::io::Stdout>>, v: &Value) -> std::io::Result<()> {
+    let mut g = out.lock().unwrap();
+    g.write_all(v.to_string().as_bytes())?;
+    g.write_all(b"\n")?;
+    g.flush()
+}
+
+fn watchdog_loop(
+    url: String,
+    token: Option<String>,
+    cwd: Option<String>,
+    wd: Arc<Watchdog>,
+    stdout: Arc<Mutex<std::io::Stdout>>,
+) {
+    while !wd.shutdown.load(Ordering::Relaxed) {
+        let _ = watchdog_stream_once(&url, token.as_deref(), cwd.as_deref(), &wd, &stdout);
+        // Gentle backoff when daemon is restarting or offline.
+        for _ in 0..20 {
+            if wd.shutdown.load(Ordering::Relaxed) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+}
+
+fn watchdog_stream_once(
+    url: &str,
+    token: Option<&str>,
+    cwd: Option<&str>,
+    wd: &Watchdog,
+    stdout: &Arc<Mutex<std::io::Stdout>>,
+) -> Result<()> {
+    let rest = url.strip_prefix("http://").ok_or_else(|| anyhow!("non-http url"))?;
+    let hostport = rest.split('/').next().unwrap_or(rest);
+    let (host, port) = match hostport.rsplit_once(':') {
+        Some((h, p)) => (h.to_owned(), p.parse::<u16>()?),
+        None => (hostport.to_owned(), 80),
+    };
+    let path = match cwd {
+        Some(c) if !c.is_empty() => format!("/v1/messages/stream?cwd={}", enc(c)),
+        _ => "/v1/messages/stream".to_owned(),
+    };
+    let sock = std::net::ToSocketAddrs::to_socket_addrs(&format!("{host}:{port}"))?
+        .next()
+        .ok_or_else(|| anyhow!("resolve failed"))?;
+    let mut s = TcpStream::connect_timeout(&sock, Duration::from_secs(2))?;
+    s.set_nodelay(true)?;
+    s.set_read_timeout(Some(Duration::from_secs(2)))?;
+    let auth = token.map(|t| format!("Authorization: Bearer {t}\r\n")).unwrap_or_default();
+    write!(s, "GET {path} HTTP/1.1\r\nHost: {host}:{port}\r\n{auth}Accept: text/event-stream\r\n\r\n")?;
+    s.flush()?;
+    let mut reader = BufReader::new(s);
+    let mut line = String::new();
+    reader.read_line(&mut line)?;
+    if !line.contains(" 200 ") {
+        return Err(anyhow!("stream status: {}", line.trim()));
+    }
+    loop {
+        line.clear();
+        if reader.read_line(&mut line)? == 0 || line == "\r\n" || line == "\n" {
+            break;
+        }
+    }
+    loop {
+        if wd.shutdown.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+        line.clear();
+        match reader.read_line(&mut line) {
+            Ok(0) => return Ok(()),
+            Ok(_) => {
+                if let Some(data) = line.trim_end().strip_prefix("data:")
+                    && let Ok(msg) = serde_json::from_str::<AgentMessage>(data.trim_start())
+                {
+                    {
+                        let mut q = wd.queue.0.lock().unwrap();
+                        if q.len() >= 100 {
+                            q.pop_front();
+                        }
+                        if !q.iter().any(|x| x.id == msg.id) {
+                            q.push_back(msg.clone());
+                        }
+                        wd.queue.1.notify_all();
+                    }
+                    // Notify MCP client immediately once handshake is initialized.
+                    if wd.initialized.load(Ordering::Relaxed) {
+                        let note = json!({
+                            "jsonrpc": "2.0",
+                            "method": "notifications/message",
+                            "params": {
+                                "level": "info",
+                                "logger": "uniflo",
+                                "data": {
+                                    "id": msg.id,
+                                    "from": msg.from,
+                                    "to": msg.to,
+                                    "text": msg.text,
+                                    "kind": msg.kind,
+                                    "reply_to": msg.reply_to,
+                                }
+                            }
+                        });
+                        let _ = write_json_line(stdout, &note);
+                        if wd.subscribed.load(Ordering::Relaxed) {
+                            let res_note = json!({
+                                "jsonrpc": "2.0",
+                                "method": "notifications/resources/updated",
+                                "params": { "uri": "uniflo://inbox" }
+                            });
+                            let _ = write_json_line(stdout, &res_note);
+                        }
+                    }
+                }
+            }
+            Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => continue,
+            Err(e) => return Err(e.into()),
+        }
+    }
+}
+
 /// `idle`: a fallback index unused this long is dropped. Agents keep their MCP servers for days,
 /// and the index holds every session (and the usage ledgers, the full-text reader) the daemon
 /// also has; rebuilding it takes seconds, so the window spans an agent's pauses between calls.
 pub fn run(cli: &Cli, idle: Duration, message: bool) -> Result<()> {
-    let mut server = Server::new(cli.url.clone(), cli.token.clone(), cli.local, message);
-    let mut out = std::io::stdout().lock();
+    let stdout = Arc::new(Mutex::new(std::io::stdout()));
+    let watchdog = (message && !cli.local).then(|| Watchdog::start(cli.url.clone(), cli.token.clone(), stdout.clone()));
+    let mut server =
+        Server::new_with_watchdog(cli.url.clone(), cli.token.clone(), cli.local, message, watchdog.clone());
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         for line in std::io::stdin().lock().lines() {
@@ -66,10 +261,11 @@ pub fn run(cli: &Cli, idle: Duration, message: bool) -> Result<()> {
             continue;
         }
         if let Some(reply) = server.handle_line(&line) {
-            out.write_all(reply.to_string().as_bytes())?;
-            out.write_all(b"\n")?;
-            out.flush()?;
+            write_json_line(&stdout, &reply)?;
         }
+    }
+    if let Some(wd) = watchdog {
+        wd.stop();
     }
     Ok(())
 }
@@ -86,6 +282,7 @@ struct Server {
     token: Option<String>,
     local_only: bool,
     message: bool,
+    watchdog: Option<Arc<Watchdog>>,
     local: Option<Local>,
     noted: bool,
 }
@@ -117,8 +314,19 @@ impl Out {
 }
 
 impl Server {
+    #[cfg(test)]
     fn new(url: String, token: Option<String>, local_only: bool, message: bool) -> Server {
-        Server { url, token, local_only, message, local: None, noted: false }
+        Server::new_with_watchdog(url, token, local_only, message, None)
+    }
+
+    fn new_with_watchdog(
+        url: String,
+        token: Option<String>,
+        local_only: bool,
+        message: bool,
+        watchdog: Option<Arc<Watchdog>>,
+    ) -> Server {
+        Server { url, token, local_only, message, watchdog, local: None, noted: false }
     }
 
     fn handle_line(&mut self, line: &str) -> Option<Value> {
@@ -148,10 +356,36 @@ impl Server {
         };
         let params = m.get("params").cloned().unwrap_or(Value::Null);
         let result = match method {
-            "initialize" => Ok(initialize(&params, self.message)),
+            "initialize" => {
+                if let Some(wd) = &self.watchdog {
+                    wd.initialized.store(true, Ordering::Relaxed);
+                }
+                Ok(initialize(&params, self.message))
+            }
             "ping" => Ok(json!({})),
             "tools/list" => Ok(json!({ "tools": tools(self.message) })),
             "tools/call" => self.call(&params),
+            "resources/list" if self.message => Ok(json!({
+                "resources": [{
+                    "uri": "uniflo://inbox",
+                    "name": "Uniflo Agent Inbox",
+                    "description": "Live unread cross-agent messages for this session's working directory",
+                    "mimeType": "text/plain"
+                }]
+            })),
+            "resources/read" if self.message => self.read_resource(&params),
+            "resources/subscribe" if self.message => {
+                if let Some(wd) = &self.watchdog {
+                    wd.subscribed.store(true, Ordering::Relaxed);
+                }
+                Ok(json!({}))
+            }
+            "resources/unsubscribe" if self.message => {
+                if let Some(wd) = &self.watchdog {
+                    wd.subscribed.store(false, Ordering::Relaxed);
+                }
+                Ok(json!({}))
+            }
             _ if id.is_none() => return None,
             _ => Err(RpcError(METHOD_NOT_FOUND, format!("method not found: {method}"))),
         };
@@ -186,11 +420,29 @@ impl Server {
             "uniflo_send_message" if self.message => self.send_message(&a)?,
             "uniflo_inbox" if self.message => self.inbox(&a)?,
             "uniflo_ack_messages" if self.message => self.ack_messages(&a)?,
+            "uniflo_wait_message" if self.message => self.wait_message(&a)?,
             _ => return Err(invalid(format!("unknown tool: {name}"))),
         };
         if self.local.is_some() && !self.noted {
             self.noted = true;
             out.text = format!("{LOCAL_NOTE}\n\n{}", out.text);
+        }
+        // Piggyback any pending SSE watchdog messages onto non-inbox tool replies (works for ALL MCP harnesses!).
+        if self.message
+            && !matches!(name, "uniflo_inbox" | "uniflo_wait_message")
+            && let Some(wd) = &self.watchdog
+        {
+            let pending = wd.drain();
+            if !pending.is_empty() {
+                let ids: Vec<String> = pending.iter().map(|m| m.id.clone()).collect();
+                let _ = self.daemon_write("/v1/messages/ack", json!({ "ids": ids, "state": "delivered" }));
+                out.text.push_str("\n\n<uniflo-messages>");
+                for m in &pending {
+                    let reply = m.reply_to.as_deref().map(|r| format!(" reply_to={r}")).unwrap_or_default();
+                    let _ = write!(out.text, "\n[{} from={}{reply}] {}", m.id, m.from, m.text);
+                }
+                out.text.push_str("\n</uniflo-messages>");
+            }
         }
         let mut result = json!({
             "content": [{ "type": "text", "text": out.text }],
@@ -864,6 +1116,103 @@ impl Server {
             Err(e) => Out::error(e),
         })
     }
+
+    fn wait_message(&mut self, a: &Args) -> Result<Out, RpcError> {
+        let to = a.str("to")?.map(str::to_owned);
+        let cwd = a
+            .str("cwd")?
+            .map(str::to_owned)
+            .or_else(|| self.watchdog.as_ref().and_then(|w| w.cwd.clone()))
+            .or_else(|| std::env::current_dir().ok().map(|p| p.display().to_string()));
+        let timeout_secs = a.int("timeout_secs", 1, 60, 30)? as u64;
+        let ack = a.bool("ack", false)?;
+
+        // Check already-undelivered messages immediately before waiting on the SSE watchdog.
+        let mut qs = vec!["undelivered=true".to_owned(), "limit=50".to_owned()];
+        if let Some(ref t) = to {
+            qs.push(format!("to={}", enc(t)));
+        } else if let Some(ref c) = cwd {
+            qs.push(format!("cwd={}", enc(c)));
+        }
+        if let Ok(v) = self.daemon_get(&format!("/v1/messages?{}", qs.join("&"))) {
+            let list = v["messages"].as_array().cloned().unwrap_or_default();
+            if !list.is_empty() {
+                let ids: Vec<String> = list.iter().filter_map(|m| m["id"].as_str().map(str::to_owned)).collect();
+                let state = if ack { "acked" } else { "delivered" };
+                let _ = self.daemon_write("/v1/messages/ack", json!({ "ids": ids, "state": state }));
+                let mut text = format!("{} messages arrived", list.len());
+                for m in &list {
+                    let _ = write!(
+                        text,
+                        "\n- {} {} -> {}: {}",
+                        m["id"].as_str().unwrap_or(""),
+                        m["from"].as_str().unwrap_or(""),
+                        m["to"].as_str().unwrap_or(""),
+                        m["text"].as_str().unwrap_or("")
+                    );
+                }
+                return Ok(Out::ok(text, v));
+            }
+        }
+
+        // Wait on the per-process SSE watchdog (wakes in milliseconds when a peer sends a message).
+        let Some(wd) = self.watchdog.clone() else {
+            return Ok(Out::ok(
+                "no new messages (watchdog inactive in --local mode)".into(),
+                json!({ "messages": [] }),
+            ));
+        };
+        let arrived = wd.wait_for(Duration::from_secs(timeout_secs), to.as_deref());
+        if arrived.is_empty() {
+            return Ok(Out::ok(format!("no new messages within {timeout_secs}s"), json!({ "messages": [] })));
+        }
+        let ids: Vec<String> = arrived.iter().map(|m| m.id.clone()).collect();
+        let state = if ack { "acked" } else { "delivered" };
+        let _ = self.daemon_write("/v1/messages/ack", json!({ "ids": ids, "state": state }));
+        let mut text = format!("{} messages arrived", arrived.len());
+        for m in &arrived {
+            let _ = write!(text, "\n- {} {} -> {}: {}", m.id, m.from, m.to, m.text);
+        }
+        Ok(Out::ok(text, json!({ "messages": arrived })))
+    }
+
+    fn read_resource(&mut self, params: &Value) -> Result<Value, RpcError> {
+        let uri = params.get("uri").and_then(Value::as_str).ok_or_else(|| invalid("missing uri"))?;
+        if uri != "uniflo://inbox" {
+            return Err(invalid(format!("unknown resource: {uri}")));
+        }
+        let cwd = self
+            .watchdog
+            .as_ref()
+            .and_then(|w| w.cwd.clone())
+            .or_else(|| std::env::current_dir().ok().map(|p| p.display().to_string()));
+        let path = match cwd {
+            Some(c) => format!("/v1/messages?unread=true&limit=50&cwd={}", enc(&c)),
+            None => "/v1/messages?unread=true&limit=50".to_owned(),
+        };
+        let text = match self.daemon_get(&path) {
+            Ok(v) => {
+                let list = v["messages"].as_array().cloned().unwrap_or_default();
+                if list.is_empty() {
+                    "inbox empty".to_owned()
+                } else {
+                    let mut buf = format!("{} unread messages", list.len());
+                    for m in &list {
+                        let _ = write!(
+                            buf,
+                            "\n[{} from={}] {}",
+                            m["id"].as_str().unwrap_or(""),
+                            m["from"].as_str().unwrap_or(""),
+                            m["text"].as_str().unwrap_or("")
+                        );
+                    }
+                    buf
+                }
+            }
+            Err(e) => e,
+        };
+        Ok(json!({ "contents": [{ "uri": uri, "mimeType": "text/plain", "text": text }] }))
+    }
 }
 
 fn error_reply(id: Value, code: i64, msg: &str) -> Value {
@@ -882,13 +1231,24 @@ fn initialize(params: &Value, message: bool) -> Value {
         .to_owned();
     if message {
         instructions.push_str(
-            " Optional cross-agent messaging is enabled: send messages with uniflo_send_message (to=<key|prefix|cwd:<dir>>), \
-             read pending messages with uniflo_inbox, and mark read with uniflo_ack_messages.",
+            " Optional cross-agent messaging + per-process SSE watchdog is enabled: send messages with uniflo_send_message \
+             (to=<key|prefix|cwd:<dir>>), read pending messages with uniflo_inbox (or resource uniflo://inbox), block for \
+             real-time replies with uniflo_wait_message, and mark read with uniflo_ack_messages. Incoming messages for this \
+             working directory are also pushed as MCP notifications and appended to tool results automatically.",
         );
     }
+    let capabilities = if message {
+        json!({
+            "tools": { "listChanged": false },
+            "resources": { "subscribe": true, "listChanged": false },
+            "logging": {}
+        })
+    } else {
+        json!({ "tools": { "listChanged": false } })
+    };
     json!({
         "protocolVersion": version,
-        "capabilities": { "tools": { "listChanged": false } },
+        "capabilities": capabilities,
         "serverInfo": { "name": "uniflo", "title": "Uniflo", "version": env!("CARGO_PKG_VERSION") },
         "instructions": instructions,
     })
@@ -1536,6 +1896,20 @@ fn tools(message: bool) -> Vec<Value> {
             false,
             true,
         ));
+        list.push(tool_with(
+            "uniflo_wait_message",
+            "Wait for incoming message",
+            "Block on the per-process SSE watchdog until a message arrives for this agent (or timeout_secs elapses); wakes in milliseconds with zero polling.",
+            json!({
+                "to": { "type": "string", "description": "Optional recipient session key or prefix filter" },
+                "cwd": { "type": "string", "description": "Optional working directory filter (defaults to this MCP process cwd)" },
+                "timeout_secs": { "type": "integer", "minimum": 1, "maximum": 60, "default": 30 },
+                "ack": { "type": "boolean", "default": false, "description": "Mark received messages as acked (default: delivered)" },
+            }),
+            &[],
+            false,
+            false,
+        ));
     }
     list
 }
@@ -1641,14 +2015,19 @@ mod tests {
         );
         assert_eq!(denied["error"]["code"], -32602);
 
-        // Opt-in `--message` server exposes the 3 messaging tools with accurate readOnlyHint.
+        // Opt-in `--message` server exposes the 4 messaging tools + inbox resource with accurate readOnlyHint.
         let mut on = Server::new("http://127.0.0.1:9".into(), None, true, true);
+        let init = call(&mut on, r#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{}}"#);
+        assert_eq!(init["result"]["capabilities"]["resources"]["subscribe"], true);
+        let res = call(&mut on, r#"{"jsonrpc":"2.0","id":10,"method":"resources/list"}"#);
+        assert_eq!(res["result"]["resources"][0]["uri"], "uniflo://inbox");
         let list = call(&mut on, r#"{"jsonrpc":"2.0","id":3,"method":"tools/list"}"#);
         let tools = list["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 13);
+        assert_eq!(tools.len(), 14);
         let send = tools.iter().find(|t| t["name"] == "uniflo_send_message").unwrap();
         assert_eq!(send["annotations"]["readOnlyHint"], false);
         let inbox = tools.iter().find(|t| t["name"] == "uniflo_inbox").unwrap();
         assert_eq!(inbox["annotations"]["readOnlyHint"], true);
+        assert!(tools.iter().any(|t| t["name"] == "uniflo_wait_message"));
     }
 }

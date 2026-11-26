@@ -115,6 +115,7 @@ fn mcp_roundtrip(env: &Env, extra_args: &[&str], requests: &[Value]) -> Vec<Valu
         .map_while(Result::ok)
         .filter(|l| !l.trim().is_empty())
         .map(|l| serde_json::from_str(&l).unwrap())
+        .filter(|v: &Value| v.get("id").is_some())
         .collect();
     assert!(child.wait().unwrap().success());
     out
@@ -151,12 +152,68 @@ fn opt_in_mcp_cli_and_silent_hook_end_to_end() {
             }}),
         ],
     );
-    assert_eq!(replies[0]["result"]["tools"].as_array().unwrap().len(), 13);
+    assert_eq!(replies[0]["result"]["tools"].as_array().unwrap().len(), 14);
     assert_eq!(replies[1]["result"]["isError"], false);
     assert_eq!(replies[1]["result"]["structuredContent"]["target"]["key"], "claude:alpha");
     assert_eq!(replies[2]["result"]["structuredContent"]["messages"].as_array().unwrap().len(), 1);
     assert_eq!(replies[3]["result"]["structuredContent"]["updated"], 1);
     assert!(env.data_dir().join("messages/log.jsonl").is_file());
+
+    // 3b. Per-process SSE watchdog bound to `uniflo mcp --message`: wakes `uniflo_wait_message`
+    // in milliseconds and emits JSON-RPC `notifications/message` over stdio for any MCP harness.
+    let proj = env.dir.path().join("proj");
+    let mut wd_cmd = env.cmd();
+    wd_cmd
+        .current_dir(&proj)
+        .args(["mcp", "--message"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut wd_child = wd_cmd.spawn().unwrap();
+    let mut wd_in = wd_child.stdin.take().unwrap();
+    let mut wd_out = BufReader::new(wd_child.stdout.take().unwrap());
+    writeln!(wd_in, "{}", json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}})).unwrap();
+    wd_in.flush().unwrap();
+    let mut init_line = String::new();
+    wd_out.read_line(&mut init_line).unwrap();
+    assert!(init_line.contains("\"resources\""));
+    // Give SSE watchdog a brief moment to connect to `/v1/messages/stream?cwd=...`.
+    std::thread::sleep(Duration::from_millis(120));
+    // Start blocking `uniflo_wait_message`, then send from a peer in another thread.
+    writeln!(
+        wd_in,
+        "{}",
+        json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"uniflo_wait_message","arguments":{"timeout_secs":5,"ack":true,"structured":true}}})
+    )
+    .unwrap();
+    wd_in.flush().unwrap();
+    let t_send = Instant::now();
+    let push = env
+        .cmd()
+        .args(["message", "send", "claude:alpha", "ping-watchdog", "--from", "codex:peer", "--json"])
+        .output()
+        .unwrap();
+    assert!(push.status.success());
+    let mut saw_notif = false;
+    let mut wait_reply = None;
+    for _ in 0..5 {
+        let mut l = String::new();
+        wd_out.read_line(&mut l).unwrap();
+        let v: Value = serde_json::from_str(&l).unwrap();
+        if v["method"] == "notifications/message" {
+            saw_notif = v["params"]["data"]["text"] == "ping-watchdog";
+        } else if v["id"] == 2 {
+            wait_reply = Some(v);
+            break;
+        }
+    }
+    assert!(t_send.elapsed() < Duration::from_secs(3), "watchdog took {:?}", t_send.elapsed());
+    assert!(saw_notif, "expected live MCP notifications/message from SSE watchdog");
+    let reply = wait_reply.expect("expected uniflo_wait_message reply");
+    assert_eq!(reply["result"]["isError"], false);
+    assert!(reply["result"]["content"][0]["text"].as_str().unwrap().contains("ping-watchdog"));
+    drop(wd_in);
+    assert!(wd_child.wait().unwrap().success());
 
     // 4. CLI `message send` -> `message hook` injects once, then stays silent.
     let send = env

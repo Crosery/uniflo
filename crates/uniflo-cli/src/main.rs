@@ -44,7 +44,7 @@ struct Cli {
     #[arg(long, global = true)]
     local: bool,
     #[command(subcommand)]
-    cmd: Cmd,
+    cmd: Option<Cmd>,
 }
 
 #[derive(Subcommand)]
@@ -233,11 +233,33 @@ fn run() -> Result<()> {
     if let Ok(exe) = std::env::current_exe() {
         uniflo_core::install::remove_aside(&exe);
     }
+    let raw_args: Vec<String> = std::env::args().collect();
+    if matches!(raw_args.as_slice(), [_] | [_, _])
+        && matches!(raw_args.get(1).map(String::as_str), None | Some("-h" | "--help" | "help"))
+    {
+        let show_options = raw_args.len() > 1;
+        let url = std::env::var("UNIFLO_URL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| DEFAULT_URL.to_owned());
+        let token = std::env::var("UNIFLO_TOKEN").ok().filter(|s| !s.is_empty());
+        let health = Client::new(&url, token).ok().and_then(|c| c.get_json::<serde_json::Value>("/v1/health").ok());
+        print!("{}", ui::home_dashboard(env!("CARGO_PKG_VERSION"), &url, health.as_ref(), show_options));
+        return Ok(());
+    }
     let cli = Cli::parse();
+    let Some(cmd) = cli.cmd.as_ref() else {
+        let health = (!cli.local)
+            .then(|| {
+                Client::new(&cli.url, cli.token.clone())
+                    .ok()
+                    .and_then(|c| c.get_json::<serde_json::Value>("/v1/health").ok())
+            })
+            .flatten();
+        print!("{}", ui::home_dashboard(env!("CARGO_PKG_VERSION"), &cli.url, health.as_ref(), false));
+        return Ok(());
+    };
     // Commands that print for people get the "newer version" box afterwards; long-running and
     // agent-facing ones (and `update` itself) never do.
     let notice = notice::begin(!matches!(
-        cli.cmd,
+        cmd,
         Cmd::Daemon { .. }
             | Cmd::Mcp { .. }
             | Cmd::Message(_)
@@ -254,18 +276,21 @@ fn run() -> Result<()> {
 fn dispatch(cli: Cli) -> Result<()> {
     if !matches!(
         cli.cmd,
-        Cmd::Daemon { .. }
-            | Cmd::Mcp { .. }
-            | Cmd::Message(_)
-            | Cmd::Setup(_)
-            | Cmd::Skill { .. }
-            | Cmd::Context(_)
-            | Cmd::Update { .. }
+        None | Some(
+            Cmd::Daemon { .. }
+                | Cmd::Mcp { .. }
+                | Cmd::Message(_)
+                | Cmd::Setup(_)
+                | Cmd::Skill { .. }
+                | Cmd::Context(_)
+                | Cmd::Update { .. }
+        )
     ) {
         setup::first_run();
     }
     match cli.cmd {
-        Cmd::Daemon {
+        None => Ok(()),
+        Some(Cmd::Daemon {
             ref bind,
             ref cors_origins,
             ref allow_hosts,
@@ -280,7 +305,7 @@ fn dispatch(cli: Cli) -> Result<()> {
             foreground,
             stop,
             restart,
-        } => {
+        }) => {
             let guard = GuardOptions {
                 token: cli.token.clone(),
                 cors_origins: cors_origins.clone(),
@@ -310,20 +335,20 @@ fn dispatch(cli: Cli) -> Result<()> {
                 .then(|| PriceSync { delay: Duration::from_secs(price_sync_delay), ..Default::default() });
             daemon(bind, guard, stale_after, no_cache, !no_update_check, price_sync, !no_fts, fts_hot_days)
         }
-        Cmd::Scan { json, no_cache } => scan(json, no_cache),
-        Cmd::Update { check, prerelease, json } => update::run(check, prerelease, json),
-        Cmd::Pricing(ref a) => usage::pricing(&cli, a),
-        Cmd::Mcp { message, idle } => {
+        Some(Cmd::Scan { json, no_cache }) => scan(json, no_cache),
+        Some(Cmd::Update { check, prerelease, json }) => update::run(check, prerelease, json),
+        Some(Cmd::Pricing(ref a)) => usage::pricing(&cli, a),
+        Some(Cmd::Mcp { message, idle }) => {
             mcp::run(&cli, Duration::try_from_secs_f64(idle).unwrap_or(Duration::MAX), message)
         }
-        Cmd::Message(ref a) => message::run(&cli, a),
-        Cmd::Skill { ref action } => {
+        Some(Cmd::Message(ref a)) => message::run(&cli, a),
+        Some(Cmd::Skill { ref action }) => {
             agent::skill(action);
             Ok(())
         }
-        Cmd::Setup(ref a) => setup::run(a),
-        Cmd::Context(ref a) => agent::context(&cli, a),
-        ref cmd => Source::open(&cli)?.run(cmd),
+        Some(Cmd::Setup(ref a)) => setup::run(a),
+        Some(Cmd::Context(ref a)) => agent::context(&cli, a),
+        Some(ref cmd) => Source::open(&cli)?.run(cmd),
     }
 }
 
@@ -751,7 +776,7 @@ impl Source {
             if c.alive() {
                 return Ok(Source::Daemon(c));
             }
-            if matches!(cli.cmd, Cmd::Watch { .. }) || matches!(cli.cmd, Cmd::Tail { follow: true, .. }) {
+            if matches!(cli.cmd, Some(Cmd::Watch { .. }) | Some(Cmd::Tail { follow: true, .. })) {
                 bail!(tr!(
                     "{} 上没有守护进程（启动：`uniflo daemon`）",
                     "no daemon at {} (start one with `uniflo daemon`)",

@@ -12,14 +12,39 @@ pub struct Spec {
     pub dirs: &'static [&'static str],
     pub mcp: Mcp,
     pub skill: Skill,
+    /// Optional native hook configuration for context injection and/or cross-agent message pull.
+    pub hooks: Option<HookSpec>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HookFormat {
+    /// `hooks.<Event> = [{ hooks: [{ type: "command", command }] }]` (Claude Code, Codex, CodeBuddy, Qoder, WorkBuddy, Command Code, Devin).
+    Claude,
+    /// `hooks.<Event> = [{ matcher: "", hooks: [{ name, type: "command", command }] }]` (Gemini CLI).
+    Gemini,
+    /// Top-level `uniflo.{PreInvocation, PostToolUse}` namespace (Antigravity `hooks.json`).
+    Antigravity,
+    /// `hooks.<Event> = [{ match: "*", command }]` (Reasonix).
+    Reasonix,
+}
+
+#[derive(Clone, Copy)]
+pub struct HookSpec {
+    pub file: &'static str,
+    pub format: HookFormat,
+    /// Event used for `SessionStart` context injection (if supported).
+    pub context_event: Option<&'static str>,
+    /// Events used for silent cross-agent message pull hooks (`--message`).
+    pub message_events: &'static [&'static str],
 }
 
 pub enum Mcp {
     /// The harness's own `mcp add` / `mcp remove` (`{bin}` = the uniflo executable). `probe` is
     /// the file that command writes, only read to see whether a `uniflo` entry is already there.
     Cli { add: &'static [&'static str], remove: &'static [&'static str], probe: Probe, toml_fallback: bool },
-    /// Uniflo edits `file` itself: the `uniflo` member of the `key` object.
-    File { file: &'static str, key: &'static str, shape: Shape },
+    /// Uniflo edits `file` itself: the `uniflo` member under `key` (supports nested paths like `&["mcp", "servers"]`).
+    File { file: &'static str, key: &'static [&'static str], shape: Shape },
     /// No usable MCP client: the Skill is installed instead.
     None,
 }
@@ -64,6 +89,12 @@ pub const SPECS: &[Spec] = &[
             toml_fallback: false,
         },
         skill: Skill::Link(".claude/skills"),
+        hooks: Some(HookSpec {
+            file: ".claude/settings.json",
+            format: HookFormat::Claude,
+            context_event: Some("SessionStart"),
+            message_events: &["PostToolUse", "UserPromptSubmit"],
+        }),
     },
     Spec {
         id: "codex",
@@ -77,6 +108,12 @@ pub const SPECS: &[Spec] = &[
             toml_fallback: true,
         },
         skill: Skill::Shared,
+        hooks: Some(HookSpec {
+            file: ".codex/hooks.json",
+            format: HookFormat::Claude,
+            context_event: Some("SessionStart"),
+            message_events: &["PostToolUse", "UserPromptSubmit"],
+        }),
     },
     Spec {
         id: "gemini",
@@ -90,6 +127,26 @@ pub const SPECS: &[Spec] = &[
             toml_fallback: false,
         },
         skill: Skill::Shared,
+        hooks: Some(HookSpec {
+            file: ".gemini/settings.json",
+            format: HookFormat::Gemini,
+            context_event: Some("SessionStart"),
+            message_events: &["AfterTool", "BeforeAgent"],
+        }),
+    },
+    Spec {
+        id: "antigravity",
+        name: "Antigravity",
+        bins: &["agy"],
+        dirs: &[".gemini/antigravity", ".gemini/antigravity-cli", ".gemini/config"],
+        mcp: Mcp::File { file: ".gemini/config/mcp_config.json", key: &["mcpServers"], shape: Shape::Plain },
+        skill: Skill::Link(".gemini/config/skills"),
+        hooks: Some(HookSpec {
+            file: ".gemini/config/hooks.json",
+            format: HookFormat::Antigravity,
+            context_event: None,
+            message_events: &["PreInvocation", "PostToolUse"],
+        }),
     },
     Spec {
         id: "factory",
@@ -103,6 +160,7 @@ pub const SPECS: &[Spec] = &[
             toml_fallback: false,
         },
         skill: Skill::Link(".factory/skills"),
+        hooks: None,
     },
     Spec {
         id: "codebuddy",
@@ -116,6 +174,12 @@ pub const SPECS: &[Spec] = &[
             toml_fallback: false,
         },
         skill: Skill::Link(".codebuddy/skills"),
+        hooks: Some(HookSpec {
+            file: ".codebuddy/settings.json",
+            format: HookFormat::Claude,
+            context_event: Some("SessionStart"),
+            message_events: &["PostToolUse", "UserPromptSubmit"],
+        }),
     },
     Spec {
         id: "qoder",
@@ -129,78 +193,194 @@ pub const SPECS: &[Spec] = &[
             toml_fallback: false,
         },
         skill: Skill::Link(".qoder/skills"),
+        hooks: Some(HookSpec {
+            file: ".qoder/settings.json",
+            format: HookFormat::Claude,
+            context_event: Some("SessionStart"),
+            message_events: &["PostToolUse", "UserPromptSubmit"],
+        }),
+    },
+    Spec {
+        id: "workbuddy",
+        name: "WorkBuddy",
+        bins: &["workbuddy"],
+        dirs: &[".workbuddy"],
+        mcp: Mcp::File { file: ".workbuddy/mcp.json", key: &["mcpServers"], shape: Shape::Plain },
+        skill: Skill::Link(".workbuddy/skills"),
+        hooks: Some(HookSpec {
+            file: ".workbuddy/settings.json",
+            format: HookFormat::Claude,
+            context_event: Some("SessionStart"),
+            message_events: &["PostToolUse", "UserPromptSubmit"],
+        }),
     },
     Spec {
         id: "cursor",
         name: "Cursor",
         bins: &["cursor-agent"],
         dirs: &[".cursor"],
-        mcp: Mcp::File { file: ".cursor/mcp.json", key: "mcpServers", shape: Shape::Plain },
+        mcp: Mcp::File { file: ".cursor/mcp.json", key: &["mcpServers"], shape: Shape::Plain },
         skill: Skill::Link(".cursor/skills"),
+        hooks: None,
     },
     Spec {
         id: "omp",
         name: "oh-my-pi",
         bins: &["omp"],
         dirs: &[".omp"],
-        mcp: Mcp::File { file: ".omp/agent/mcp.json", key: "mcpServers", shape: Shape::Stdio },
+        mcp: Mcp::File { file: ".omp/agent/mcp.json", key: &["mcpServers"], shape: Shape::Stdio },
         skill: Skill::Shared,
+        hooks: None,
     },
     Spec {
         id: "opencode",
         name: "OpenCode",
         bins: &["opencode"],
         dirs: &[".config/opencode"],
-        mcp: Mcp::File { file: ".config/opencode/opencode.json", key: "mcp", shape: Shape::OpenCode },
+        mcp: Mcp::File { file: ".config/opencode/opencode.json", key: &["mcp"], shape: Shape::OpenCode },
         skill: Skill::Shared,
-    },
-    Spec {
-        id: "kimi",
-        name: "Kimi Code",
-        bins: &["kimi"],
-        dirs: &[".kimi-code"],
-        mcp: Mcp::File { file: ".kimi-code/mcp.json", key: "mcpServers", shape: Shape::Plain },
-        skill: Skill::Shared,
-    },
-    Spec {
-        id: "kiro",
-        name: "Kiro",
-        bins: &["kiro-cli", "kiro"],
-        dirs: &[".kiro"],
-        mcp: Mcp::File { file: ".kiro/settings/mcp.json", key: "mcpServers", shape: Shape::Plain },
-        skill: Skill::Link(".kiro/skills"),
-    },
-    Spec {
-        id: "copilot",
-        name: "GitHub Copilot CLI",
-        bins: &["copilot"],
-        dirs: &[".copilot"],
-        mcp: Mcp::File { file: ".copilot/mcp-config.json", key: "mcpServers", shape: Shape::Copilot },
-        skill: Skill::Link(".copilot/skills"),
-    },
-    Spec {
-        id: "qwen",
-        name: "Qwen Code",
-        bins: &["qwen"],
-        dirs: &[".qwen"],
-        mcp: Mcp::File { file: ".qwen/settings.json", key: "mcpServers", shape: Shape::Plain },
-        skill: Skill::Link(".qwen/skills"),
-    },
-    Spec {
-        id: "antigravity",
-        name: "Antigravity",
-        bins: &["agy"],
-        dirs: &[".gemini/antigravity", ".gemini/antigravity-cli", ".gemini/config"],
-        mcp: Mcp::File { file: ".gemini/config/mcp_config.json", key: "mcpServers", shape: Shape::Plain },
-        skill: Skill::Link(".gemini/config/skills"),
+        hooks: None,
     },
     Spec {
         id: "pi",
         name: "Pi",
         bins: &["pi"],
         dirs: &[".pi"],
-        mcp: Mcp::None,
+        mcp: Mcp::File { file: ".pi/agent/mcp.json", key: &["mcpServers"], shape: Shape::Plain },
         skill: Skill::Link(".pi/agent/skills"),
+        hooks: None,
+    },
+    Spec {
+        id: "commandcode",
+        name: "Command Code",
+        bins: &["commandcode"],
+        dirs: &[".commandcode"],
+        mcp: Mcp::File { file: ".commandcode/mcp.json", key: &["mcpServers"], shape: Shape::Plain },
+        skill: Skill::Link(".commandcode/skills"),
+        hooks: Some(HookSpec {
+            file: ".commandcode/settings.json",
+            format: HookFormat::Claude,
+            context_event: None,
+            message_events: &["PostToolUse"],
+        }),
+    },
+    Spec {
+        id: "kilo",
+        name: "Kilo Code",
+        bins: &["kilo"],
+        dirs: &[".config/kilo", ".local/share/kilo"],
+        mcp: Mcp::File { file: ".config/kilo/kilo.jsonc", key: &["mcp"], shape: Shape::OpenCode },
+        skill: Skill::Link(".config/kilo/skills"),
+        hooks: None,
+    },
+    Spec {
+        id: "mimocode",
+        name: "MiMo Code",
+        bins: &["mimocode"],
+        dirs: &[".config/mimocode", ".local/share/mimocode"],
+        mcp: Mcp::File { file: ".config/mimocode/mimocode.jsonc", key: &["mcp"], shape: Shape::OpenCode },
+        skill: Skill::Link(".config/mimocode/skills"),
+        hooks: None,
+    },
+    Spec {
+        id: "zcode",
+        name: "ZCode",
+        bins: &["zcode"],
+        dirs: &[".zcode"],
+        mcp: Mcp::File { file: ".zcode/cli/config.json", key: &["mcp", "servers"], shape: Shape::Stdio },
+        skill: Skill::Link(".zcode/skills"),
+        hooks: None,
+    },
+    Spec {
+        id: "prime",
+        name: "Prime Agent",
+        bins: &["prime"],
+        dirs: &[".prime"],
+        mcp: Mcp::File { file: ".prime/agent/settings.json", key: &["mcpServers"], shape: Shape::Stdio },
+        skill: Skill::Shared,
+        hooks: None,
+    },
+    Spec {
+        id: "kimi",
+        name: "Kimi Code",
+        bins: &["kimi"],
+        dirs: &[".kimi-code"],
+        mcp: Mcp::File { file: ".kimi-code/mcp.json", key: &["mcpServers"], shape: Shape::Plain },
+        skill: Skill::Shared,
+        hooks: None,
+    },
+    Spec {
+        id: "kiro",
+        name: "Kiro",
+        bins: &["kiro-cli", "kiro"],
+        dirs: &[".kiro"],
+        mcp: Mcp::File { file: ".kiro/settings/mcp.json", key: &["mcpServers"], shape: Shape::Plain },
+        skill: Skill::Link(".kiro/skills"),
+        hooks: None,
+    },
+    Spec {
+        id: "copilot",
+        name: "GitHub Copilot CLI",
+        bins: &["copilot"],
+        dirs: &[".copilot"],
+        mcp: Mcp::File { file: ".copilot/mcp-config.json", key: &["mcpServers"], shape: Shape::Copilot },
+        skill: Skill::Link(".copilot/skills"),
+        hooks: None,
+    },
+    Spec {
+        id: "qwen",
+        name: "Qwen Code",
+        bins: &["qwen"],
+        dirs: &[".qwen", ".qwenworkcn"],
+        mcp: Mcp::File { file: ".qwen/settings.json", key: &["mcpServers"], shape: Shape::Plain },
+        skill: Skill::Link(".qwen/skills"),
+        hooks: None,
+    },
+    Spec {
+        id: "reasonix",
+        name: "Reasonix",
+        bins: &["reasonix"],
+        dirs: &[".reasonix"],
+        mcp: Mcp::None,
+        skill: Skill::Link(".reasonix/skills"),
+        hooks: Some(HookSpec {
+            file: ".reasonix/settings.json",
+            format: HookFormat::Reasonix,
+            context_event: Some("SessionStart"),
+            message_events: &["PostToolUse", "UserPromptSubmit"],
+        }),
+    },
+    Spec {
+        id: "devin",
+        name: "Devin CLI",
+        bins: &["devin"],
+        dirs: &[".config/devin", ".local/share/devin"],
+        mcp: Mcp::None,
+        skill: Skill::Shared,
+        hooks: Some(HookSpec {
+            file: ".config/devin/config.json",
+            format: HookFormat::Claude,
+            context_event: Some("SessionStart"),
+            message_events: &["UserPromptSubmit"],
+        }),
+    },
+    Spec {
+        id: "hermes",
+        name: "Hermes",
+        bins: &["hermes"],
+        dirs: &[".hermes"],
+        mcp: Mcp::None,
+        skill: Skill::Link(".hermes/skills"),
+        hooks: None,
+    },
+    Spec {
+        id: "minimax",
+        name: "MiniMax Code",
+        bins: &["minimax"],
+        dirs: &[".minimax"],
+        mcp: Mcp::None,
+        skill: Skill::Link(".minimax/skills"),
+        hooks: None,
     },
     Spec {
         id: "grok",
@@ -209,10 +389,74 @@ pub const SPECS: &[Spec] = &[
         dirs: &[".grok"],
         mcp: Mcp::None,
         skill: Skill::Link(".grok/skills"),
+        hooks: None,
+    },
+    Spec {
+        id: "dsh",
+        name: "DeepSeek Harness",
+        bins: &["dsh"],
+        dirs: &[".dsh"],
+        mcp: Mcp::None,
+        skill: Skill::Shared,
+        hooks: None,
+    },
+    Spec {
+        id: "crosery",
+        name: "Crosery Agent",
+        bins: &["crosery"],
+        dirs: &[".crosery"],
+        mcp: Mcp::None,
+        skill: Skill::Shared,
+        hooks: None,
+    },
+    Spec {
+        id: "openclaw",
+        name: "OpenClaw",
+        bins: &["openclaw"],
+        dirs: &[".openclaw", ".clawdbot"],
+        mcp: Mcp::None,
+        skill: Skill::Shared,
+        hooks: None,
+    },
+    Spec {
+        id: "craft",
+        name: "Craft Agents",
+        bins: &["craft"],
+        dirs: &[".craft-agent"],
+        mcp: Mcp::None,
+        skill: Skill::Shared,
+        hooks: None,
+    },
+    Spec {
+        id: "cline",
+        name: "Cline",
+        bins: &["cline"],
+        dirs: &[".cline"],
+        mcp: Mcp::None,
+        skill: Skill::Shared,
+        hooks: None,
+    },
+    Spec {
+        id: "roo",
+        name: "Roo Code",
+        bins: &["roo"],
+        dirs: &[".roo"],
+        mcp: Mcp::None,
+        skill: Skill::Shared,
+        hooks: None,
+    },
+    Spec {
+        id: "kodu",
+        name: "Kodu",
+        bins: &["kodu"],
+        dirs: &[".kodu"],
+        mcp: Mcp::None,
+        skill: Skill::Shared,
+        hooks: None,
     },
 ];
 
-/// `--agents` also accepts the executable names.
+/// `--agents` also accepts executable names and common aliases.
 pub fn lookup(id: &str) -> Option<&'static Spec> {
     let id = match id.trim().to_ascii_lowercase().as_str() {
         "droid" => "factory".to_owned(),
@@ -220,6 +464,9 @@ pub fn lookup(id: &str) -> Option<&'static Spec> {
         "cursor-agent" => "cursor".to_owned(),
         "claude-code" => "claude".to_owned(),
         "agy" => "antigravity".to_owned(),
+        "kiro-cli" => "kiro".to_owned(),
+        "clawdbot" => "openclaw".to_owned(),
+        "craft-agent" => "craft".to_owned(),
         other => other.to_owned(),
     };
     SPECS.iter().find(|s| s.id == id)
@@ -332,6 +579,7 @@ mod tests {
         ids.sort_unstable();
         ids.dedup();
         assert_eq!(ids.len(), SPECS.len());
+        assert_eq!(SPECS.len(), 33, "setup SPECS covers all 33 adapters");
         for s in SPECS {
             if let Mcp::Cli { add, .. } = s.mcp {
                 assert!(add.contains(&"uniflo") && add.contains(&"{bin}") && add.last() == Some(&"mcp"), "{}", s.id);
