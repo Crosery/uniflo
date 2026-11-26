@@ -64,25 +64,53 @@ pub fn headless_resume_argv(harness: &str, id: &str, prompt: &str) -> Option<Vec
     let argv: Vec<String> = match h.as_str() {
         "antigravity" | "agy" => vec!["agy".into(), format!("-r={id}"), format!("-p={prompt}")],
         "claude" => vec!["claude".into(), "-p".into(), "--resume".into(), id.into(), "--".into(), prompt.into()],
-        "codex" => vec!["codex".into(), "exec".into(), "resume".into(), id.into(), prompt.into()],
+        "codex" => vec![
+            "codex".into(),
+            "exec".into(),
+            "resume".into(),
+            "--skip-git-repo-check".into(),
+            id.into(),
+            prompt.into(),
+        ],
         "opencode" => vec!["opencode".into(), "run".into(), "--pure".into(), "-s".into(), id.into(), prompt.into()],
         "omp" => {
             vec!["omp".into(), "-p".into(), "-r".into(), id.into(), "--max-time=60".into(), prompt.into()]
         }
         "pi" => vec!["pi".into(), "-p".into(), "--session".into(), id.into(), "--".into(), prompt.into()],
-        "gemini" => vec!["gemini".into(), "-r".into(), id.into(), "-p".into(), prompt.into()],
-        "cursor" => vec!["cursor-agent".into(), "-p".into(), "--resume".into(), id.into(), prompt.into()],
+        "gemini" => vec!["gemini".into(), "--skip-trust".into(), "-r".into(), id.into(), "-p".into(), prompt.into()],
+        "cursor" => {
+            vec!["cursor-agent".into(), "-p".into(), "--trust".into(), "--resume".into(), id.into(), prompt.into()]
+        }
         "codebuddy" => {
             vec!["codebuddy".into(), "-p".into(), "--resume".into(), id.into(), "--".into(), prompt.into()]
         }
-        "qoder" => vec!["qodercli".into(), "-p".into(), "--resume".into(), id.into(), "--".into(), prompt.into()],
+        "qoder" => vec!["qodercli".into(), "-p".into(), "--resume".into(), id.into(), prompt.into()],
         "workbuddy" => {
             vec!["workbuddy".into(), "-p".into(), "--resume".into(), id.into(), "--".into(), prompt.into()]
         }
-        "factory" => vec!["droid".into(), "-p".into(), "--resume".into(), id.into(), "--".into(), prompt.into()],
+        "factory" => vec!["droid".into(), "exec".into(), "-s".into(), id.into(), prompt.into()],
         _ => return None,
     };
     Some(argv)
+}
+
+/// Build headless resume `argv` for a concrete `Session`, preferring `--session-file` for Gemini
+/// whose Uniflo `id` is the chat filename stem rather than the internal UUID.
+pub fn headless_resume_argv_for_session(target: &Session, prompt: &str) -> Option<Vec<String>> {
+    if target.harness.eq_ignore_ascii_case("gemini")
+        && !target.source.is_empty()
+        && std::path::Path::new(&target.source).is_file()
+    {
+        return Some(vec![
+            "gemini".into(),
+            "--skip-trust".into(),
+            "--session-file".into(),
+            target.source.clone(),
+            "-p".into(),
+            prompt.into(),
+        ]);
+    }
+    headless_resume_argv(&target.harness, &target.id, prompt)
 }
 
 /// Whether `harness` has a supported headless resume recipe (for peer reachability hints).
@@ -728,7 +756,7 @@ pub async fn deliver_message(
     }
 
     // Step 3: Official headless context resume (zero hooks, works for idle/offline/plain-terminal sessions!).
-    if let Some(argv) = headless_resume_argv(&target.harness, &target.id, &wake_prompt) {
+    if let Some(argv) = headless_resume_argv_for_session(&target, &wake_prompt) {
         let display = format!("{} {}", argv[0], argv[1..argv.len().saturating_sub(1)].join(" "));
         let cwd = target.cwd.clone();
         let bus_bg = bus.clone();
@@ -1027,11 +1055,37 @@ mod tests {
         );
         assert_eq!(
             headless_resume_argv("codex", "abc-123", "hello"),
-            Some(vec!["codex".into(), "exec".into(), "resume".into(), "abc-123".into(), "hello".into()])
+            Some(vec![
+                "codex".into(),
+                "exec".into(),
+                "resume".into(),
+                "--skip-git-repo-check".into(),
+                "abc-123".into(),
+                "hello".into()
+            ])
         );
         assert_eq!(
             headless_resume_argv("opencode", "abc-123", "hello"),
             Some(vec!["opencode".into(), "run".into(), "--pure".into(), "-s".into(), "abc-123".into(), "hello".into()])
+        );
+        assert_eq!(
+            headless_resume_argv("factory", "abc-123", "hello"),
+            Some(vec!["droid".into(), "exec".into(), "-s".into(), "abc-123".into(), "hello".into()])
+        );
+        assert_eq!(
+            headless_resume_argv("cursor", "abc-123", "hello"),
+            Some(vec![
+                "cursor-agent".into(),
+                "-p".into(),
+                "--trust".into(),
+                "--resume".into(),
+                "abc-123".into(),
+                "hello".into()
+            ])
+        );
+        assert_eq!(
+            headless_resume_argv("qoder", "abc-123", "hello"),
+            Some(vec!["qodercli".into(), "-p".into(), "--resume".into(), "abc-123".into(), "hello".into()])
         );
         // Option-like session IDs are rejected.
         assert!(headless_resume_argv("claude", "--dangerously-skip-permissions", "hi").is_none());
