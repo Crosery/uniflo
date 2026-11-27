@@ -21,9 +21,15 @@ pub(crate) const NS_USAGE: u8 = 2;
 pub(crate) const NS_MODELS: u8 = 3;
 pub(crate) const NS_SESSION_USAGE: u8 = 4;
 pub(crate) const NS_SEARCH: u8 = 5;
+pub(crate) const NS_TRAJECTORY: u8 = 6;
+pub(crate) const NS_MODELS_ALL: u8 = 7;
 
 const MAX_ENTRIES: usize = 128;
 const MAX_BYTES: usize = 16 * 1024 * 1024;
+
+fn is_per_key_ns(ns: u8) -> bool {
+    matches!(ns, NS_SESSION_USAGE | NS_TRAJECTORY)
+}
 
 #[derive(Clone)]
 pub(crate) struct CachedBody {
@@ -70,6 +76,9 @@ struct CacheEntry {
 #[derive(Default)]
 struct CacheInner {
     entries: HashMap<CacheKey, CacheEntry>,
+    /// Highest generation seen per global namespace so a late-finishing older request can never
+    /// evict fresher entries or re-insert stale data.
+    latest_ns_gen: HashMap<u8, (u64, u64, u64)>,
     bytes: usize,
 }
 
@@ -94,7 +103,7 @@ impl ResponseCache {
     }
 
     pub(crate) fn get(&self, key: &CacheKey) -> Option<CachedBody> {
-        let inner = self.inner.read().unwrap();
+        let inner = self.inner.read().unwrap_or_else(|e| e.into_inner());
         let entry = inner.entries.get(key)?;
         let now = self.clock.fetch_add(1, Ordering::Relaxed) + 1;
         entry.used.store(now, Ordering::Relaxed);
@@ -106,19 +115,49 @@ impl ResponseCache {
         if size > self.max_bytes / 2 {
             return;
         }
-        let mut inner = self.inner.write().unwrap();
-        // Drop obsolete generations in the same namespace so stale versions never hog budget.
+        let mut inner = self.inner.write().unwrap_or_else(|e| e.into_inner());
         let ns = key.ns;
         let gen_tag = key.gen_tag;
-        let mut dropped = 0usize;
-        inner.entries.retain(|k, e| {
-            let obsolete = k.ns == ns && k.gen_tag != gen_tag;
-            if obsolete {
-                dropped += e.value.body.len();
+
+        if is_per_key_ns(ns) {
+            // Per-session namespaces version each key independently: reject out-of-order stale
+            // writes for the same key and purge only strictly older versions of that key.
+            let has_newer = inner.entries.keys().any(|k| k.ns == ns && k.key == key.key && k.gen_tag > gen_tag);
+            if has_newer {
+                return;
             }
-            !obsolete
-        });
-        inner.bytes = inner.bytes.saturating_sub(dropped);
+            let mut dropped = 0usize;
+            inner.entries.retain(|k, e| {
+                let obsolete = k.ns == ns && k.key == key.key && k.gen_tag < gen_tag;
+                if obsolete {
+                    dropped += e.value.body.len();
+                }
+                !obsolete
+            });
+            inner.bytes = inner.bytes.saturating_sub(dropped);
+        } else {
+            // Global namespaces share one monotonic generation: never let a slow older generation
+            // overwrite or evict entries belonging to a newer generation.
+            if let Some(&latest) = inner.latest_ns_gen.get(&ns) {
+                if gen_tag < latest {
+                    return;
+                }
+                if gen_tag > latest {
+                    inner.latest_ns_gen.insert(ns, gen_tag);
+                }
+            } else {
+                inner.latest_ns_gen.insert(ns, gen_tag);
+            }
+            let mut dropped = 0usize;
+            inner.entries.retain(|k, e| {
+                let obsolete = k.ns == ns && k.gen_tag < gen_tag;
+                if obsolete {
+                    dropped += e.value.body.len();
+                }
+                !obsolete
+            });
+            inner.bytes = inner.bytes.saturating_sub(dropped);
+        }
 
         let now = self.clock.fetch_add(1, Ordering::Relaxed) + 1;
         if let Some(old) = inner.entries.insert(key, CacheEntry { value, used: AtomicU64::new(now) }) {
@@ -140,7 +179,8 @@ impl ResponseCache {
 }
 
 /// Async singleflight: coalesces concurrent identical in-flight calls into one execution.
-/// Cancellation-safe: if a leader is cancelled before finishing, waiters fall back and run the work.
+/// Cancellation-safe: if a leader is cancelled before finishing, waiting callers loop and elect
+/// a single replacement leader instead of stampeding `f()`.
 #[derive(Default)]
 pub(crate) struct Singleflight {
     inflight: Mutex<HashMap<String, watch::Receiver<Option<FlightResult>>>>,
@@ -154,7 +194,7 @@ struct FlightGuard<'a> {
 impl Drop for FlightGuard<'_> {
     fn drop(&mut self) {
         if let Some(key) = self.key.take() {
-            self.inflight.lock().unwrap().remove(&key);
+            self.inflight.lock().unwrap_or_else(|e| e.into_inner()).remove(&key);
         }
     }
 }
@@ -170,32 +210,38 @@ impl Singleflight {
             Lead(watch::Sender<Option<FlightResult>>, FlightGuard<'a>),
         }
 
-        let slot = {
-            let mut map = self.inflight.lock().unwrap();
-            if let Some(rx) = map.get(&key).cloned() {
-                Slot::Wait(rx)
-            } else {
-                let (tx, rx) = watch::channel(None);
-                map.insert(key.clone(), rx);
-                Slot::Lead(tx, FlightGuard { inflight: &self.inflight, key: Some(key) })
-            }
-        };
+        loop {
+            let slot = {
+                let mut map = self.inflight.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(rx) = map.get(&key).cloned() {
+                    Slot::Wait(rx)
+                } else {
+                    let (tx, rx) = watch::channel(None);
+                    map.insert(key.clone(), rx);
+                    Slot::Lead(tx, FlightGuard { inflight: &self.inflight, key: Some(key.clone()) })
+                }
+            };
 
-        match slot {
-            Slot::Wait(mut rx) => {
-                if let Ok(val) = rx.wait_for(|v| v.is_some()).await
-                    && let Some(res) = val.clone()
-                {
+            match slot {
+                Slot::Wait(mut rx) => {
+                    if let Ok(val) = rx.wait_for(|v| v.is_some()).await
+                        && let Some(res) = val.clone()
+                    {
+                        return res;
+                    }
+                    // Leader was cancelled before publishing: re-enter the loop so waiters elect
+                    // a single replacement leader instead of all executing `f()` concurrently.
+                }
+                Slot::Lead(tx, guard) => {
+                    // Keep `guard` bound after `tx` so on cancellation/drop `guard` removes `key`
+                    // from `inflight` BEFORE `tx` drops and wakes waiting callers.
+                    let tx = tx;
+                    let guard = guard;
+                    let res = f().await;
+                    drop(guard);
+                    let _ = tx.send(Some(res.clone()));
                     return res;
                 }
-                // Leader cancelled before producing a value: run directly so this caller still succeeds.
-                f().await
-            }
-            Slot::Lead(tx, guard) => {
-                let res = f().await;
-                drop(guard);
-                let _ = tx.send(Some(res.clone()));
-                res
             }
         }
     }
@@ -271,5 +317,84 @@ mod tests {
         assert!(is_relative_time("30d"));
         assert!(!is_relative_time("2026-10-01"));
         assert!(!is_relative_time("1790000000000"));
+    }
+
+    #[test]
+    fn stale_generation_insert_does_not_evict_newer_entries() {
+        let cache = ResponseCache::new(16, 1024);
+        let newer = CacheKey { ns: NS_SESSIONS, gen_tag: (5, 0, 0), key: "fresh".into() };
+        let stale = CacheKey { ns: NS_SESSIONS, gen_tag: (4, 0, 0), key: "old".into() };
+        cache.insert(newer.clone(), CachedBody { content_type: "application/json", body: Bytes::from_static(b"new") });
+        cache.insert(stale.clone(), CachedBody { content_type: "application/json", body: Bytes::from_static(b"old") });
+        assert!(cache.get(&newer).is_some(), "stale generation must never wipe fresher entries");
+        assert!(cache.get(&stale).is_none(), "stale generation must be ignored");
+    }
+
+    #[test]
+    fn per_key_namespace_isolates_sessions_and_rejects_stale_updates() {
+        let cache = ResponseCache::new(16, 1024);
+        let a1 = CacheKey { ns: NS_TRAJECTORY, gen_tag: (1, 0, 1), key: "claude:a".into() };
+        let b5 = CacheKey { ns: NS_TRAJECTORY, gen_tag: (5, 0, 1), key: "claude:b".into() };
+        let a2 = CacheKey { ns: NS_TRAJECTORY, gen_tag: (2, 0, 1), key: "claude:a".into() };
+        cache.insert(a1.clone(), CachedBody { content_type: "application/json", body: Bytes::from_static(b"a1") });
+        cache.insert(b5.clone(), CachedBody { content_type: "application/json", body: Bytes::from_static(b"b5") });
+        // Higher rev on session B must NOT evict session A.
+        assert!(cache.get(&a1).is_some());
+        assert!(cache.get(&b5).is_some());
+        // Updating session A evicts only session A's older rev, keeping B intact, and rejects late a1.
+        cache.insert(a2.clone(), CachedBody { content_type: "application/json", body: Bytes::from_static(b"a2") });
+        assert!(cache.get(&a1).is_none());
+        assert!(cache.get(&a2).is_some());
+        assert!(cache.get(&b5).is_some());
+        cache.insert(a1.clone(), CachedBody { content_type: "application/json", body: Bytes::from_static(b"stale") });
+        assert!(cache.get(&a1).is_none());
+        assert!(cache.get(&a2).is_some());
+    }
+
+    #[tokio::test]
+    async fn singleflight_leader_cancellation_reelects_single_leader() {
+        let sf = Arc::new(Singleflight::default());
+        let runs = Arc::new(AtomicUsize::new(0));
+        let started = Arc::new(tokio::sync::Notify::new());
+
+        // Start a leader that blocks until aborted.
+        let sf_lead = sf.clone();
+        let runs_lead = runs.clone();
+        let started_lead = started.clone();
+        let leader = tokio::spawn(async move {
+            sf_lead
+                .run("k".into(), || async move {
+                    runs_lead.fetch_add(1, Ordering::SeqCst);
+                    started_lead.notify_one();
+                    std::future::pending::<FlightResult>().await
+                })
+                .await
+        });
+        started.notified().await;
+
+        // Queue 12 waiters on the leader's flight.
+        let mut waiters = Vec::new();
+        for _ in 0..12 {
+            let sf = sf.clone();
+            let runs = runs.clone();
+            waiters.push(tokio::spawn(async move {
+                sf.run("k".into(), || async move {
+                    runs.fetch_add(1, Ordering::SeqCst);
+                    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+                    Ok(CachedBody { content_type: "application/json", body: Bytes::from_static(b"ok") })
+                })
+                .await
+            }));
+        }
+        // Let all waiters register before aborting the leader.
+        tokio::time::sleep(std::time::Duration::from_millis(15)).await;
+        leader.abort();
+        let _ = leader.await;
+
+        for w in waiters {
+            let body = w.await.unwrap().unwrap();
+            assert_eq!(&body.body[..], b"ok");
+        }
+        assert_eq!(runs.load(Ordering::SeqCst), 2, "1 cancelled leader + 1 re-elected leader, no 12x stampede");
     }
 }

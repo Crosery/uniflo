@@ -18,7 +18,7 @@ use uniflo_core::util::home;
 use uniflo_schema::Session;
 
 pub(crate) async fn resume(State(s): State<AppState>, Path(key): Path<String>) -> Response {
-    match s.engine.session(&key) {
+    match s.engine.session_arc(&key) {
         Some(sess) => with_seq(&s.engine, Json(resume::resume(&sess)).into_response()),
         None => ApiError(StatusCode::NOT_FOUND, format!("unknown session {key}")).into_response(),
     }
@@ -43,7 +43,7 @@ pub(crate) async fn open_terminal(
     Query(p): Query<TerminalParams>,
     launcher: Option<Extension<Launcher>>,
 ) -> Response {
-    let Some(sess) = s.engine.session(&key) else {
+    let Some(sess) = s.engine.session_arc(&key) else {
         return ApiError(StatusCode::NOT_FOUND, format!("unknown session {key}")).into_response();
     };
     let launch = launcher.map_or_else(system_launcher, |Extension(l)| l);

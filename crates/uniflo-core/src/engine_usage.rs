@@ -422,6 +422,7 @@ impl Engine {
                     && e.session.usage != sum
                 {
                     Arc::make_mut(&mut e.session).usage = sum;
+                    e.rev = e.rev.wrapping_add(1);
                     moved.push(k.clone());
                 }
             }

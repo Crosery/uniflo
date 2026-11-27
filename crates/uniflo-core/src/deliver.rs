@@ -28,6 +28,9 @@ pub const MAX_AUTO_WAKE_HOPS: u8 = 2;
 const HEADLESS_TIMEOUT: Duration = Duration::from_secs(75);
 /// Cache TTL for external `herdr-core ls` / `tmux list-panes` probes.
 const PROBE_TTL: Duration = Duration::from_secs(8);
+/// Cache TTL for `ps -axo pid=,ppid=` process-tree snapshots (matches `procs::SHARED_PS_TTL`).
+#[cfg(unix)]
+const PPID_TTL: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeliveryMode {
@@ -223,9 +226,34 @@ fn herdr_cache() -> &'static Mutex<Option<ProbeCache<Vec<HerdrEntry>>>> {
     CACHE.get_or_init(|| Mutex::new(None))
 }
 
+fn herdr_probe_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
 fn tmux_cache() -> &'static Mutex<Option<ProbeCache<Vec<TmuxPane>>>> {
     static CACHE: OnceLock<Mutex<Option<ProbeCache<Vec<TmuxPane>>>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(None))
+}
+
+fn tmux_probe_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+#[cfg(unix)]
+type PpidCache = Mutex<Option<ProbeCache<HashMap<u32, u32>>>>;
+
+#[cfg(unix)]
+fn ppid_cache() -> &'static PpidCache {
+    static CACHE: OnceLock<PpidCache> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(None))
+}
+
+#[cfg(unix)]
+fn ppid_probe_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
 }
 
 /// Build an augmented `PATH` so background daemons started under minimal launchd/systemd
@@ -354,8 +382,15 @@ fn probe_herdr(force: bool) -> Vec<HerdrEntry> {
         return Vec::new();
     }
     if !force
-        && let Ok(g) = herdr_cache().lock()
-        && let Some(c) = g.as_ref()
+        && let Some(c) = herdr_cache().lock().unwrap_or_else(|e| e.into_inner()).as_ref()
+        && c.at.elapsed() < PROBE_TTL
+    {
+        return c.data.clone();
+    }
+    // Serialize refreshes so concurrent requests never spawn N × 17 `herdr-core` subprocesses.
+    let _probe = herdr_probe_lock().lock().unwrap_or_else(|e| e.into_inner());
+    if !force
+        && let Some(c) = herdr_cache().lock().unwrap_or_else(|e| e.into_inner()).as_ref()
         && c.at.elapsed() < PROBE_TTL
     {
         return c.data.clone();
@@ -415,9 +450,8 @@ fn probe_herdr(force: bool) -> Vec<HerdrEntry> {
             });
         }
     }
-    if let Ok(mut g) = herdr_cache().lock() {
-        *g = Some(ProbeCache { at: Instant::now(), data: entries.clone() });
-    }
+    *herdr_cache().lock().unwrap_or_else(|e| e.into_inner()) =
+        Some(ProbeCache { at: Instant::now(), data: entries.clone() });
     entries
 }
 
@@ -426,8 +460,14 @@ fn probe_tmux(force: bool) -> Vec<TmuxPane> {
         return Vec::new();
     }
     if !force
-        && let Ok(g) = tmux_cache().lock()
-        && let Some(c) = g.as_ref()
+        && let Some(c) = tmux_cache().lock().unwrap_or_else(|e| e.into_inner()).as_ref()
+        && c.at.elapsed() < PROBE_TTL
+    {
+        return c.data.clone();
+    }
+    let _probe = tmux_probe_lock().lock().unwrap_or_else(|e| e.into_inner());
+    if !force
+        && let Some(c) = tmux_cache().lock().unwrap_or_else(|e| e.into_inner()).as_ref()
         && c.at.elapsed() < PROBE_TTL
     {
         return c.data.clone();
@@ -449,16 +489,27 @@ fn probe_tmux(force: bool) -> Vec<TmuxPane> {
             }
         }
     }
-    if let Ok(mut g) = tmux_cache().lock() {
-        *g = Some(ProbeCache { at: Instant::now(), data: panes.clone() });
-    }
+    *tmux_cache().lock().unwrap_or_else(|e| e.into_inner()) =
+        Some(ProbeCache { at: Instant::now(), data: panes.clone() });
     panes
 }
 
-/// Snapshot of `pid -> ppid` on Unix (empty on Windows).
+/// Snapshot of `pid -> ppid` on Unix (empty on Windows), memoized briefly with singleflight locking
+/// so concurrent `/v1/messages/peers` requests share one `ps` subprocess.
 pub fn parent_pid_map() -> HashMap<u32, u32> {
     #[cfg(unix)]
     {
+        if let Some(c) = ppid_cache().lock().unwrap_or_else(|e| e.into_inner()).as_ref()
+            && c.at.elapsed() < PPID_TTL
+        {
+            return c.data.clone();
+        }
+        let _probe = ppid_probe_lock().lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(c) = ppid_cache().lock().unwrap_or_else(|e| e.into_inner()).as_ref()
+            && c.at.elapsed() < PPID_TTL
+        {
+            return c.data.clone();
+        }
         let mut map = HashMap::new();
         if let Some(res) = run_cmd_timeout("ps", &["-axo", "pid=,ppid="], None, &[], Duration::from_secs(2))
             && res.ok
@@ -472,6 +523,8 @@ pub fn parent_pid_map() -> HashMap<u32, u32> {
                 }
             }
         }
+        *ppid_cache().lock().unwrap_or_else(|e| e.into_inner()) =
+            Some(ProbeCache { at: Instant::now(), data: map.clone() });
         map
     }
     #[cfg(not(unix))]

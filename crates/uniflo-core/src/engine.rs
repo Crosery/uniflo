@@ -110,6 +110,9 @@ pub struct HealthSnapshot {
 struct Entry {
     key_arc: Arc<str>,
     session: Arc<Session>,
+    /// Per-session monotonic revision bumped on every transcript/meta/usage/family change,
+    /// allowing per-session gateway caches to stay hot across unrelated `state_gen` churn.
+    rev: u64,
     tracker: StatusTracker,
     tracker_since: i64,
     turn_ended: bool,
@@ -123,10 +126,11 @@ struct Entry {
 }
 
 impl Entry {
-    fn new(key: String, harness: &str, id: &str, adapter: usize, src: &Path) -> Self {
+    fn new(key: String, harness: &str, id: &str, adapter: usize, src: &Path, rev: u64) -> Self {
         let key_arc: Arc<str> = Arc::from(key.as_str());
         Entry {
             key_arc,
+            rev,
             session: Arc::new(Session {
                 key,
                 harness: harness.to_owned(),
@@ -340,6 +344,7 @@ impl State {
                 && e.session.family != f
             {
                 Arc::make_mut(&mut e.session).family = f;
+                e.rev = e.rev.wrapping_add(1);
                 changed.push(k.clone());
             }
         }
@@ -410,12 +415,20 @@ pub struct Engine {
     state: RwLock<State>,
     /// Monotonic generation bumped inside every `state.write()` that mutates sessions/sources.
     state_gen: AtomicU64,
+    /// Monotonic generation bumped only when session membership changes (added, removed, archived),
+    /// so key-set-only queries such as unfiltered `/v1/models` survive active streaming churn.
+    membership_gen: AtomicU64,
+    /// Lock-free mirrors of total and working session counts for `/v1/health`.
+    session_count: AtomicUsize,
+    working_count: AtomicUsize,
     /// Immutable published session snapshot for lock-free concurrent gateway reads.
     snapshot: RwLock<Arc<SessionSnapshot>>,
     /// Coalesces concurrent readers rebuilding `snapshot` after a state bump.
     snapshot_build: Mutex<()>,
     /// Cached adapter root paths (`is_dir()` results) so `/v1/harnesses` avoids per-request FS stats.
     roots_cache: RwLock<(Option<Instant>, Vec<Vec<String>>)>,
+    /// Coalesces concurrent callers refreshing `roots_cache` when `ROOTS_TTL` expires.
+    roots_refresh: Mutex<()>,
     /// Latest crates.io update check (duplicated from `stats` for lock-free `/v1/health`).
     update_info: RwLock<Option<crate::update::UpdateInfo>>,
     seq: AtomicU64,
@@ -462,9 +475,13 @@ impl Engine {
             tag,
             state: RwLock::new(State::default()),
             state_gen: AtomicU64::new(1),
+            membership_gen: AtomicU64::new(1),
+            session_count: AtomicUsize::new(0),
+            working_count: AtomicUsize::new(0),
             snapshot: RwLock::new(empty_snap),
             snapshot_build: Mutex::new(()),
             roots_cache: RwLock::new((None, Vec::new())),
+            roots_refresh: Mutex::new(()),
             update_info: RwLock::new(None),
             seq: AtomicU64::new(0),
             tx,
@@ -490,9 +507,25 @@ impl Engine {
         self.state_gen.fetch_add(1, Ordering::Release);
     }
 
+    pub(super) fn bump_membership(&self) {
+        self.membership_gen.fetch_add(1, Ordering::Release);
+    }
+
+    fn sync_counts(&self, st: &State) {
+        let total = st.sessions.len();
+        let working = st.sessions.values().filter(|e| e.session.status == Status::Work).count();
+        self.session_count.store(total, Ordering::Release);
+        self.working_count.store(working, Ordering::Release);
+    }
+
     /// Monotonic version of the session/source table (bumped on every state mutation).
     pub fn state_gen(&self) -> u64 {
         self.state_gen.load(Ordering::Acquire)
+    }
+
+    /// Monotonic version of the set of session keys (bumped on add/remove/archive swaps).
+    pub fn membership_gen(&self) -> u64 {
+        self.membership_gen.load(Ordering::Acquire)
     }
 
     /// Monotonic version of the usage ledgers (bumped on every usage mutation).
@@ -576,21 +609,63 @@ impl Engine {
     }
 
     pub fn session_arc(&self, key: &str) -> Option<Arc<Session>> {
-        self.sessions_snapshot().by_key.get(key).cloned()
+        let want = self.state_gen.load(Ordering::Acquire);
+        {
+            let cur = self.snapshot.read().unwrap();
+            if cur.generation >= want {
+                return cur.by_key.get(key).cloned();
+            }
+        }
+        // Snapshot is stale: look up one key in O(1) instead of rebuilding & sorting all sessions.
+        self.state.read().unwrap().sessions.get(key).map(|e| e.session.clone())
     }
 
     pub fn session(&self, key: &str) -> Option<Session> {
         self.session_arc(key).map(|s| (*s).clone())
     }
 
-    /// Fast health view: reads the published snapshot and atomic `seq` without locking `state`,
-    /// `stats`, or `usage`.
+    /// Per-session cache version `(entry_rev, usage_ready, pricing_gen)` for `/v1/sessions/{key}/usage`.
+    /// Stays stable for idle sessions even while unrelated sessions advance global `state_gen`.
+    pub fn session_usage_tag(&self, key: &str) -> Option<(u64, u64, u64)> {
+        let (rev, src) = {
+            let st = self.state.read().unwrap();
+            let e = st.sessions.get(key)?;
+            (e.rev, e.src.clone())
+        };
+        let ready = {
+            let u = self.usage.read().unwrap();
+            u.source(&src).is_some_and(|s| s.phase == crate::usage::Phase::Ready)
+        };
+        Some((rev, u64::from(ready), self.pricing.generation()))
+    }
+
+    /// Per-session cache version `(entry_rev, kids_rev_sum, pricing_gen)` for `/v1/sessions/{key}/trajectory`.
+    /// Strictly monotonic across parent updates, direct child updates, child add/remove (which
+    /// bump parent `entry_rev` via `recompute_families`), and pricing reloads.
+    pub fn trajectory_cache_tag(&self, key: &str) -> Option<(u64, u64, u64)> {
+        let (rev, kids_rev_sum) = {
+            let st = self.state.read().unwrap();
+            let e = st.sessions.get(key)?;
+            let mut sum = 0u64;
+            if e.session.family.is_some() {
+                for c in st.sessions.values() {
+                    if c.session.parent.as_deref() == Some(key) {
+                        sum = sum.wrapping_add(c.rev);
+                    }
+                }
+            }
+            (e.rev, sum)
+        };
+        Some((rev, kids_rev_sum, self.pricing.generation()))
+    }
+
+    /// Fast health view: reads lock-free atomic counters without rebuilding the full session snapshot
+    /// or locking `state`, `stats`, or `usage`.
     pub fn health_snapshot(&self) -> HealthSnapshot {
-        let snap = self.sessions_snapshot();
         HealthSnapshot {
             seq: self.seq.load(Ordering::SeqCst),
-            sessions: snap.sorted.len(),
-            working: snap.working,
+            sessions: self.session_count.load(Ordering::Acquire),
+            working: self.working_count.load(Ordering::Acquire),
             uptime_ms: now_ms() - self.started,
             update: self.update_info.read().unwrap().clone(),
         }
@@ -688,6 +763,13 @@ impl Engine {
     }
 
     fn cached_roots(&self) -> Vec<Vec<String>> {
+        {
+            let g = self.roots_cache.read().unwrap();
+            if g.0.is_some_and(|t| t.elapsed() < ROOTS_TTL) && g.1.len() == self.adapters.len() {
+                return g.1.clone();
+            }
+        }
+        let _guard = self.roots_refresh.lock().unwrap();
         {
             let g = self.roots_cache.read().unwrap();
             if g.0.is_some_and(|t| t.elapsed() < ROOTS_TTL) && g.1.len() == self.adapters.len() {
@@ -810,6 +892,8 @@ impl Engine {
         }
         source.cursor = out.cursor.clone();
         let mut before: HashMap<String, Option<Arc<Session>>> = HashMap::new();
+        let mut membership_changed = false;
+        let base_rev = self.state_gen.load(Ordering::Relaxed);
         for (id, rec) in out.batch.items {
             let key = session_key(harness, &id);
             let source = st.sources.get_mut(src).unwrap();
@@ -819,9 +903,12 @@ impl Engine {
             if let Some(old) = st.sessions.get(&key).filter(|e| e.archive.is_some()) {
                 self.unarchive(old);
                 st.sessions.remove(&key);
+                membership_changed = true;
             }
-            let entry =
-                st.sessions.entry(key.clone()).or_insert_with(|| Entry::new(key.clone(), harness, &id, adapter, src));
+            let entry = st.sessions.entry(key.clone()).or_insert_with(|| {
+                membership_changed = true;
+                Entry::new(key.clone(), harness, &id, adapter, src, base_rev)
+            });
             before.entry(key).or_insert_with(|| {
                 (entry.session.updated_at > 0 || entry.tracker.since > 0).then(|| entry.session.clone())
             });
@@ -840,6 +927,7 @@ impl Engine {
         let mut sent: HashSet<String> = HashSet::new();
         for (key, prev) in before {
             let Some(entry) = st.sessions.get_mut(&key) else { continue };
+            entry.rev = entry.rev.wrapping_add(1);
             if entry.session.updated_at == 0 {
                 Arc::make_mut(&mut entry.session).updated_at = out.cursor.mtime_ms;
             }
@@ -864,6 +952,10 @@ impl Engine {
             }
         }
         self.dirty.store(true, Ordering::Relaxed);
+        self.sync_counts(st);
+        if membership_changed {
+            self.bump_membership();
+        }
         self.bump_state();
         // Session snapshots first so clients learn a session before its events.
         pending.sort_by_key(|p| !matches!(p, Pending::Session(_)));
@@ -878,6 +970,7 @@ impl Engine {
         let gone: Vec<String> =
             s.keys.into_iter().filter(|k| st.sessions.get(k).is_some_and(|e| e.src == src)).collect();
         let above = st.ancestors_of(gone.iter().map(String::as_str));
+        let removed_any = !gone.is_empty();
         for k in gone {
             st.sessions.remove(&k);
             out.push(Pending::Removed(k));
@@ -885,6 +978,10 @@ impl Engine {
         // The families above the removed sessions shrink.
         for k in st.recompute_families(&above) {
             out.extend(st.sessions.get(&k).map(|e| Pending::Session((*e.session).clone())));
+        }
+        self.sync_counts(st);
+        if removed_any {
+            self.bump_membership();
         }
         self.bump_state();
         out
@@ -922,10 +1019,12 @@ impl Engine {
             e.live_pid = pid;
             e.live_status = status;
             if e.refresh(now, stale) {
+                e.rev = e.rev.wrapping_add(1);
                 pending.push(Pending::Session((*e.session).clone()));
             }
         }
         if mutated {
+            self.sync_counts(&st);
             self.bump_state();
         }
         pending
@@ -967,11 +1066,13 @@ impl Engine {
             if e.would_change(now, stale) {
                 mutated = true;
                 if e.refresh(now, stale) {
+                    e.rev = e.rev.wrapping_add(1);
                     pending.push(Pending::Session((*e.session).clone()));
                 }
             }
         }
         if mutated {
+            self.sync_counts(&st);
             self.bump_state();
         }
         let mut hot: Vec<PathBuf> = st
@@ -1063,6 +1164,8 @@ impl Engine {
             let mut st = self.state.write().unwrap();
             self.load_archived(&mut st);
             st.recompute_all_families();
+            self.sync_counts(&st);
+            self.bump_membership();
             self.bump_state();
         }
         for i in 0..self.adapters.len() {
@@ -1094,6 +1197,7 @@ impl Engine {
 
     fn restore(&self, st: &mut State, adapter: usize, c: CachedSource) {
         let mut keys = Vec::new();
+        let base_rev = self.state_gen.load(Ordering::Relaxed);
         for cs in c.sessions {
             let key = cs.session.key.clone();
             let key_arc: Arc<str> = Arc::from(key.as_str());
@@ -1102,6 +1206,7 @@ impl Engine {
                 key,
                 Entry {
                     key_arc,
+                    rev: base_rev,
                     session: Arc::new(cs.session),
                     tracker_since: cs.tracker.since,
                     turn_ended: false,
@@ -1506,7 +1611,7 @@ mod tests {
 
     #[test]
     fn refresh_preserves_status_since_during_same_effective_status() {
-        let mut entry = Entry::new("toy:s1".into(), "toy", "s1", 0, Path::new("/tmp/s1.jsonl"));
+        let mut entry = Entry::new("toy:s1".into(), "toy", "s1", 0, Path::new("/tmp/s1.jsonl"), 1);
         let w = Windows { stale_ms: 600_000, settle_ms: 90_000 };
 
         // Tracker is Idle, but live process/status override indicates Work at t=1000.
@@ -1575,7 +1680,7 @@ mod tests {
         for (live_status, partial, expected_since) in
             [(None, false, 3000), (Some(Status::Work), false, 1000), (None, true, 1000)]
         {
-            let mut entry = Entry::new("toy:s1".into(), "toy", "s1", 0, Path::new("/tmp/s1.jsonl"));
+            let mut entry = Entry::new("toy:s1".into(), "toy", "s1", 0, Path::new("/tmp/s1.jsonl"), 1);
             entry.observe(&event(1000, Body::UserMessage { text: "first".into(), synthetic: false }));
             entry.refresh(1000, w);
             entry.live_status = live_status;
@@ -1595,7 +1700,7 @@ mod tests {
 
     #[test]
     fn refresh_restarts_work_after_published_staleness() {
-        let mut entry = Entry::new("toy:s1".into(), "toy", "s1", 0, Path::new("/tmp/s1.jsonl"));
+        let mut entry = Entry::new("toy:s1".into(), "toy", "s1", 0, Path::new("/tmp/s1.jsonl"), 1);
         let w = Windows { stale_ms: 1000, settle_ms: 1000 };
         entry.observe(&event(1000, Body::TurnStart {}));
         entry.refresh(1000, w);
@@ -1613,7 +1718,7 @@ mod tests {
 
     #[test]
     fn refresh_preserves_live_work_slot_after_transcript_replay() {
-        let mut entry = Entry::new("toy:s1".into(), "toy", "s1", 0, Path::new("/tmp/s1.jsonl"));
+        let mut entry = Entry::new("toy:s1".into(), "toy", "s1", 0, Path::new("/tmp/s1.jsonl"), 1);
         let w = Windows { stale_ms: 600_000, settle_ms: 90_000 };
         entry.live_status = Some(Status::Work);
         entry.refresh(1000, w);
@@ -1635,5 +1740,54 @@ mod tests {
         }
         assert!(!entry.refresh(3500, w));
         assert_eq!((entry.session.status, entry.session.status_since), (Status::Work, 1000));
+    }
+
+    #[test]
+    fn health_snapshot_and_session_arc_work_without_rebuilding_snapshot() {
+        let eng = Engine::new(
+            Vec::new(),
+            EngineOptions { cache_path: None, usage: false, data_dir: None, ..Default::default() },
+        );
+        assert_eq!(eng.health_snapshot().sessions, 0);
+        assert_eq!(eng.health_snapshot().working, 0);
+
+        // Mutate `state` + `sync_counts` + `bump_state` without calling `sessions_snapshot()`.
+        {
+            let mut st = eng.state.write().unwrap();
+            let mut parent = Entry::new("toy:p".into(), "toy", "p", 0, Path::new("/tmp/p.jsonl"), 1);
+            parent.observe(&event(1000, Body::TurnStart {}));
+            parent.refresh(1000, eng.windows());
+            st.sessions.insert("toy:p".into(), parent);
+
+            let mut child = Entry::new("toy:c".into(), "toy", "c", 0, Path::new("/tmp/c.jsonl"), 1);
+            child.apply_meta(MetaPatch { parent: Some("p".into()), ..Default::default() }, "toy");
+            child.refresh(1000, eng.windows());
+            st.sessions.insert("toy:c".into(), child);
+            st.recompute_all_families();
+            eng.sync_counts(&st);
+            eng.bump_membership();
+            eng.bump_state();
+        }
+
+        // Snapshot is still at generation 0 (< state_gen 2), yet health and session_arc reflect state.
+        let health = eng.health_snapshot();
+        assert_eq!(health.sessions, 2);
+        assert_eq!(health.working, 1);
+        assert_eq!(eng.session_arc("toy:p").unwrap().status, Status::Work);
+        assert_eq!(
+            eng.snapshot.read().unwrap().generation,
+            0,
+            "neither health nor session_arc forced a snapshot build"
+        );
+
+        // Trajectory cache tag strictly increases when the child's revision bumps.
+        let t1 = eng.trajectory_cache_tag("toy:p").unwrap();
+        {
+            let mut st = eng.state.write().unwrap();
+            let c = st.sessions.get_mut("toy:c").unwrap();
+            c.rev += 1;
+        }
+        let t2 = eng.trajectory_cache_tag("toy:p").unwrap();
+        assert!(t2 > t1, "child revision change must advance parent trajectory tag ({t1:?} -> {t2:?})");
     }
 }

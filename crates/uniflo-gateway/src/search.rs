@@ -86,9 +86,11 @@ pub(crate) async fn around(
 ) -> Response {
     let flight_key = format!("around:{key}:{id}:{limit}:{max_text}:{ndjson}");
     let engine = s.engine.clone();
+    let permits = s.io_permits.clone();
     let res = s
         .flights
         .run(flight_key, move || async move {
+            let _permit = permits.acquire_owned().await.ok();
             let (k, i) = (key.clone(), id.clone());
             let page = tokio::task::spawn_blocking(move || {
                 let Some(w) = engine.around(&k, &i, limit)? else { return anyhow::Ok(None) };

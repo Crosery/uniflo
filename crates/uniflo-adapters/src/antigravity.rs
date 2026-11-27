@@ -16,8 +16,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
-use std::time::Duration;
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration, Instant};
 use uniflo_core::procs::{Proc, ProcCache};
 use uniflo_core::util::{file_mtime_ms, home, json_arg, str_of, string_of, text_of, ts, ts_str};
 use uniflo_core::{Cx, HarnessInfo, LineDecoder, LiveSession, MetaPatch, Record, SourceId};
@@ -29,8 +29,11 @@ pub struct Antigravity {
     summaries: RwLock<HashMap<PathBuf, (FileSig, Arc<SummaryIndex>)>>,
     /// Conversation database → cached workspace and per-step usage/model metadata, keyed by
     /// `file_sig(&[cdb, wal_of(&cdb)])` so live polling and line decoding open each DB at most
-    /// once per signature change.
+    /// once per signature change. Bounded to [`CONV_DB_CAP`] entries to keep daemon RSS flat.
     conv_dbs: RwLock<HashMap<PathBuf, (FileSig, Arc<ConvDb>)>>,
+    /// Memoized `live()` probe output so FSEvents storms under `brain/` cannot re-crawl thousands
+    /// of conversation directories dozens of times per second.
+    live_cache: Mutex<Option<(Instant, Vec<LiveSession>)>>,
 }
 
 #[derive(Default)]
@@ -63,10 +66,18 @@ struct DbUsage {
 }
 
 const PROC_TTL: Duration = Duration::from_secs(3);
+const LIVE_TTL: Duration = Duration::from_secs(2);
+const CONV_DB_CAP: usize = 256;
 
 impl Antigravity {
     pub fn new(roots: Vec<PathBuf>, procs: Option<ProcCache>) -> Self {
-        Antigravity { roots, procs, summaries: RwLock::new(HashMap::new()), conv_dbs: RwLock::new(HashMap::new()) }
+        Antigravity {
+            roots,
+            procs,
+            summaries: RwLock::new(HashMap::new()),
+            conv_dbs: RwLock::new(HashMap::new()),
+            live_cache: Mutex::new(None),
+        }
     }
 
     fn other_bases<'a>(&'a self, base: &'a Path) -> impl Iterator<Item = &'a Path> {
@@ -162,14 +173,16 @@ impl Antigravity {
     }
 
     fn cwd_of(&self, base: &Path, id: &str) -> Option<String> {
-        let cdb = base.join("conversations").join(format!("{id}.db"));
-        if let Some(cwd) = self.conv_db(&cdb).cwd.clone() {
-            return Some(cwd);
-        }
+        // Check cached summary indexes first (O(1) memory lookup) before opening per-session
+        // SQLite DBs, avoiding protobuf step decoding of actively streaming conversations.
         if let Some(cwd) = self.summary_index(base).cwds.get(id).cloned() {
             return Some(cwd);
         }
-        self.other_bases(base).find_map(|b| self.summary_index(b).cwds.get(id).cloned())
+        if let Some(cwd) = self.other_bases(base).find_map(|b| self.summary_index(b).cwds.get(id).cloned()) {
+            return Some(cwd);
+        }
+        let cdb = base.join("conversations").join(format!("{id}.db"));
+        self.conv_db(&cdb).cwd.clone()
     }
 
     fn parent_of(&self, base: &Path, id: &str) -> Option<String> {
@@ -188,7 +201,11 @@ impl Antigravity {
             return db.clone();
         }
         let db = Arc::new(load_conv_db(cdb));
-        self.conv_dbs.write().unwrap().insert(cdb.to_path_buf(), (sig, db.clone()));
+        let mut cache = self.conv_dbs.write().unwrap();
+        if cache.len() >= CONV_DB_CAP && !cache.contains_key(cdb) {
+            cache.clear();
+        }
+        cache.insert(cdb.to_path_buf(), (sig, db.clone()));
         db
     }
 
@@ -242,10 +259,12 @@ impl Antigravity {
                 claim(&mut out, id, p.pid);
             }
         }
-        unresolved.sort_by_key(|p| std::cmp::Reverse(p.start_ms));
-        for p in unresolved {
-            let Some(cwd) = p.cwd.as_ref().and_then(|c| c.to_str()) else { continue };
-            let mut candidates: Vec<(String, i64)> = Vec::new();
+        if !unresolved.is_empty() {
+            unresolved.sort_by_key(|p| std::cmp::Reverse(p.start_ms));
+            // Scan `brain/` roots ONCE across all unresolved processes instead of repeating
+            // thousands of `read_dir` / `stat` calls per process.
+            let min_start = unresolved.iter().map(|p| p.start_ms).min().unwrap_or(i64::MAX).saturating_sub(5_000);
+            let mut recent: Vec<(PathBuf, String, i64)> = Vec::new();
             for root in &self.roots {
                 let Some(base) = root.parent() else { continue };
                 let Ok(rd) = std::fs::read_dir(root) else { continue };
@@ -254,14 +273,28 @@ impl Antigravity {
                     let t = entry.path().join(".system_generated/logs/transcript.jsonl");
                     let Ok(md) = std::fs::metadata(&t) else { continue };
                     let mtime = file_mtime_ms(&md);
-                    if mtime >= p.start_ms - 5_000 && self.cwd_of(base, &id).as_deref() == Some(cwd) {
-                        candidates.push((id, mtime));
+                    if mtime >= min_start {
+                        recent.push((base.to_path_buf(), id, mtime));
                     }
                 }
             }
-            candidates.sort_by_key(|(_, m)| std::cmp::Reverse(*m));
-            if let Some((id, _)) = candidates.into_iter().find(|(id, _)| !out.iter().any(|l| l.id == *id)) {
-                claim(&mut out, id, p.pid);
+            recent.sort_by_key(|(_, _, m)| std::cmp::Reverse(*m));
+            // Resolve each recent candidate's cwd at most once.
+            let recent_with_cwd: Vec<(String, i64, Option<String>)> = recent
+                .into_iter()
+                .map(|(base, id, mtime)| {
+                    let cwd = self.cwd_of(&base, &id);
+                    (id, mtime, cwd)
+                })
+                .collect();
+            for p in unresolved {
+                let Some(cwd) = p.cwd.as_ref().and_then(|c| c.to_str()) else { continue };
+                if let Some((id, _, _)) = recent_with_cwd.iter().find(|(id, mtime, cand_cwd)| {
+                    *mtime >= p.start_ms - 5_000 && cand_cwd.as_deref() == Some(cwd) && !claimed.contains(id)
+                }) && claimed.insert(id.clone())
+                {
+                    out.push(LiveSession { id: id.clone(), pid: p.pid, status: None });
+                }
             }
         }
         out
@@ -476,7 +509,16 @@ impl LineDecoder for Antigravity {
     }
 
     fn live(&self) -> Option<Vec<LiveSession>> {
-        self.procs.as_ref().map(|p| self.assign(p.get()))
+        let p = self.procs.as_ref()?;
+        let mut guard = self.live_cache.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((at, cached)) = guard.as_ref()
+            && at.elapsed() < LIVE_TTL
+        {
+            return Some(cached.clone());
+        }
+        let fresh = self.assign(p.get());
+        *guard = Some((Instant::now(), fresh.clone()));
+        Some(fresh)
     }
 
     fn live_roots(&self) -> Vec<PathBuf> {
@@ -616,17 +658,30 @@ impl Sidecar for Antigravity {
         let mut sig = file_sig(&self.sidecars(src));
         // Hash only this session's slice of the shared `conversation_summaries.db` and
         // `last_conversations.json` so updating one conversation does not re-read all ~700 others.
-        let summary_cwd = self
-            .summary_index(base)
-            .cwds
+        // Snapshot each base's summary index once to avoid repeating `stat` calls 3x per check.
+        let base_idx = self.summary_index(base);
+        let other_idxs: Vec<Arc<SummaryIndex>> = self.other_bases(base).map(|b| self.summary_index(b)).collect();
+        let mut best_title = base_idx.titles.get(id).cloned();
+        if best_title.as_ref().is_none_or(|(r, _)| *r < 2) {
+            for idx in &other_idxs {
+                if let Some((r, t)) = idx.titles.get(id)
+                    && best_title.as_ref().is_none_or(|(br, _)| *r > *br)
+                {
+                    best_title = Some((*r, t.clone()));
+                    if *r >= 2 {
+                        break;
+                    }
+                }
+            }
+        }
+        let summary_cwd =
+            base_idx.cwds.get(id).or_else(|| other_idxs.iter().find_map(|idx| idx.cwds.get(id))).map(String::as_str);
+        let parent = base_idx
+            .parents
             .get(id)
-            .cloned()
-            .or_else(|| self.other_bases(base).find_map(|b| self.summary_index(b).cwds.get(id).cloned()));
-        let h = fnv_summary(
-            self.summary_title(base, id).as_ref(),
-            summary_cwd.as_deref(),
-            self.parent_of(base, id).as_deref(),
-        );
+            .or_else(|| other_idxs.iter().find_map(|idx| idx.parents.get(id)))
+            .map(String::as_str);
+        let h = fnv_summary(best_title.as_ref(), summary_cwd, parent);
         sig.push((0, h));
         sig
     }
@@ -1771,5 +1826,34 @@ mod tests {
                 (14, "c-pres".into()),
             ]
         );
+    }
+
+    #[test]
+    fn cwd_of_prefers_summary_index_and_bounds_conv_db_cache() {
+        let fx = Fixture::new();
+        let a = adapter(&fx);
+        let dec = &a.inner.decoder;
+        fx.write("cache/last_conversations.json", r#"{"/from/summary":"s-fast"}"#);
+        let cdb = fx.root().join("conversations/s-fast.db");
+        std::fs::create_dir_all(cdb.parent().unwrap()).unwrap();
+        let conn = rusqlite::Connection::open(&cdb).unwrap();
+        conn.execute_batch("CREATE TABLE trajectory_metadata_blob (data BLOB);").unwrap();
+        let uri = b"file:///from/db";
+        let mut blob = vec![uri.len() as u8];
+        blob.extend_from_slice(uri);
+        conn.execute("INSERT INTO trajectory_metadata_blob (data) VALUES (?1)", [blob]).unwrap();
+
+        assert_eq!(dec.cwd_of(fx.root(), "s-fast").as_deref(), Some("/from/summary"));
+        assert!(
+            !dec.conv_dbs.read().unwrap().contains_key(&cdb),
+            "summary_index hit must avoid opening conversation SQLite DB"
+        );
+
+        // Exceeding CONV_DB_CAP evicts instead of growing unboundedly.
+        for i in 0..(CONV_DB_CAP + 8) {
+            let p = fx.root().join(format!("conversations/missing-{i}.db"));
+            let _ = dec.conv_db(&p);
+        }
+        assert!(dec.conv_dbs.read().unwrap().len() <= CONV_DB_CAP);
     }
 }

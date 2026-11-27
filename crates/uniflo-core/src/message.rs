@@ -86,6 +86,7 @@ struct Store {
     messages: BTreeMap<u64, AgentMessage>,
     by_id: HashMap<String, u64>,
     by_target: HashMap<String, Vec<u64>>,
+    by_sender: HashMap<String, Vec<u64>>,
     journal_lines: usize,
 }
 
@@ -94,6 +95,7 @@ impl Store {
         self.next_seq = self.next_seq.max(seq + 1);
         self.by_id.insert(msg.id.clone(), seq);
         self.by_target.entry(msg.to.clone()).or_default().push(seq);
+        self.by_sender.entry(msg.from.clone()).or_default().push(seq);
         self.messages.insert(seq, msg);
         while self.messages.len() > MAX_RETAINED {
             let Some((&old_seq, _)) = self.messages.first_key_value() else { break };
@@ -103,6 +105,12 @@ impl Store {
                     list.retain(|&s| s != old_seq);
                     if list.is_empty() {
                         self.by_target.remove(&old.to);
+                    }
+                }
+                if let Some(list) = self.by_sender.get_mut(&old.from) {
+                    list.retain(|&s| s != old_seq);
+                    if list.is_empty() {
+                        self.by_sender.remove(&old.from);
                     }
                 }
             }
@@ -331,8 +339,17 @@ impl MessageBus {
         };
 
         if let Some(peer_key) = &resolved_peer {
-            for m in st.messages.values() {
-                if m.to == *peer_key || m.from == *peer_key {
+            let mut seqs: Vec<u64> = Vec::new();
+            if let Some(in_seqs) = st.by_target.get(peer_key) {
+                seqs.extend_from_slice(in_seqs);
+            }
+            if let Some(out_seqs) = st.by_sender.get(peer_key) {
+                seqs.extend_from_slice(out_seqs);
+            }
+            seqs.sort_unstable();
+            seqs.dedup();
+            for seq in seqs {
+                if let Some(m) = st.messages.get(&seq) {
                     visit(m);
                 }
             }
@@ -436,6 +453,9 @@ pub fn resolve_target_excluding(
     if raw.is_empty() {
         return Err(MessageError::BadRequest("missing target `to`".into()));
     }
+    if let Some(sess) = engine.session_arc(raw) {
+        return Ok(sess);
+    }
     let snap = engine.sessions_snapshot();
     if let Some(sess) = snap.by_key.get(raw) {
         return Ok(sess.clone());
@@ -483,6 +503,9 @@ pub fn resolve_target_excluding(
 /// from the live index, otherwise resolves prefix or `cwd:` via live sessions.
 fn resolve_inbox_target(engine: &Engine, raw: &str) -> Result<String, MessageError> {
     if raw.contains(':') && !raw.starts_with("cwd:") {
+        if engine.session_arc(raw).is_some() {
+            return Ok(raw.to_owned());
+        }
         let snap = engine.sessions_snapshot();
         if snap.by_key.contains_key(raw) {
             return Ok(raw.to_owned());

@@ -3,7 +3,8 @@
 //! CLI and REST answer from the same code.
 
 use super::cache::{
-    CacheKey, CachedBody, NS_MODELS, NS_SESSION_USAGE, NS_USAGE, is_relative_time, query_has_relative_time,
+    CacheKey, CachedBody, NS_MODELS, NS_MODELS_ALL, NS_SESSION_USAGE, NS_TRAJECTORY, NS_USAGE, is_relative_time,
+    query_has_relative_time,
 };
 use super::{ApiError, AppState, with_seq};
 use axum::Json;
@@ -114,10 +115,9 @@ pub(super) async fn usage(State(s): State<AppState>, Query(p): Query<UsageParams
 }
 
 pub(super) async fn session_usage(State(s): State<AppState>, Path(key): Path<String>) -> Response {
-    if s.engine.session_arc(&key).is_none() {
+    let Some(gen_tag) = s.engine.session_usage_tag(&key) else {
         return ApiError(StatusCode::NOT_FOUND, format!("unknown session {key}")).into_response();
-    }
-    let gen_tag = (s.engine.state_gen(), s.engine.usage_gen(), s.engine.pricing().generation());
+    };
     let cache_key = CacheKey { ns: NS_SESSION_USAGE, gen_tag, key: key.clone() };
     if let Some(hit) = s.cache.get(&cache_key) {
         return with_seq(&s.engine, hit.into_response());
@@ -125,9 +125,11 @@ pub(super) async fn session_usage(State(s): State<AppState>, Path(key): Path<Str
     let flight_key = format!("susage:{}:{}:{}:{key}", gen_tag.0, gen_tag.1, gen_tag.2);
     let engine = s.engine.clone();
     let cache = s.cache.clone();
+    let permits = s.io_permits.clone();
     let res = s
         .flights
         .run(flight_key, move || async move {
+            let _permit = permits.acquire_owned().await.ok();
             let out = match tokio::task::spawn_blocking(move || engine.session_usage(&key)).await {
                 Ok(Ok(d)) => CachedBody::json(&d),
                 Ok(Err(err)) => Err((StatusCode::INTERNAL_SERVER_ERROR, format!("{err:#}"))),
@@ -146,19 +148,30 @@ pub(super) async fn session_usage(State(s): State<AppState>, Path(key): Path<Str
 }
 
 pub(super) async fn session_trajectory(State(s): State<AppState>, Path(key): Path<String>) -> Response {
-    if s.engine.session_arc(&key).is_none() {
+    let Some(gen_tag) = s.engine.trajectory_cache_tag(&key) else {
         return ApiError(StatusCode::NOT_FOUND, format!("unknown session {key}")).into_response();
+    };
+    let cache_key = CacheKey { ns: NS_TRAJECTORY, gen_tag, key: key.clone() };
+    if let Some(hit) = s.cache.get(&cache_key) {
+        return with_seq(&s.engine, hit.into_response());
     }
-    let flight_key = format!("traj:{key}");
+    let flight_key = format!("traj:{}:{}:{}:{key}", gen_tag.0, gen_tag.1, gen_tag.2);
     let engine = s.engine.clone();
+    let cache = s.cache.clone();
+    let permits = s.io_permits.clone();
     let res = s
         .flights
         .run(flight_key, move || async move {
-            match tokio::task::spawn_blocking(move || engine.session_trajectory(&key)).await {
+            let _permit = permits.acquire_owned().await.ok();
+            let out = match tokio::task::spawn_blocking(move || engine.session_trajectory(&key)).await {
                 Ok(Ok(t)) => CachedBody::json(&t),
                 Ok(Err(err)) => Err((StatusCode::INTERNAL_SERVER_ERROR, format!("{err:#}"))),
                 Err(err) => Err((StatusCode::INTERNAL_SERVER_ERROR, err.to_string())),
+            };
+            if let Ok(ref body) = out {
+                cache.insert(cache_key, body.clone());
             }
+            out
         })
         .await;
     match res {
@@ -174,13 +187,19 @@ pub(super) struct ModelParams {
 
 pub(super) async fn models(State(s): State<AppState>, Query(p): Query<ModelParams>) -> Response {
     let q_raw = p.q.as_deref().unwrap_or("");
-    let gen_tag = (s.engine.state_gen(), s.engine.usage_gen(), s.engine.pricing().generation());
+    // Unfiltered `/v1/models` depends only on session membership + usage + pricing, so active
+    // streaming ticks on `state_gen` do not unnecessarily bust the response cache. Separate
+    // namespaces guarantee monotonic generations within each namespace.
+    let unfiltered = q_raw.trim().is_empty();
+    let (ns, scope_gen) =
+        if unfiltered { (NS_MODELS_ALL, s.engine.membership_gen()) } else { (NS_MODELS, s.engine.state_gen()) };
+    let gen_tag = (scope_gen, s.engine.usage_gen(), s.engine.pricing().generation());
     let cacheable = !query_has_relative_time(q_raw);
-    let cache_key = CacheKey { ns: NS_MODELS, gen_tag, key: q_raw.to_owned() };
+    let cache_key = CacheKey { ns, gen_tag, key: q_raw.to_owned() };
     if cacheable && let Some(hit) = s.cache.get(&cache_key) {
         return hit.into_response();
     }
-    let flight_key = format!("models:{}:{}:{}:{q_raw}", gen_tag.0, gen_tag.1, gen_tag.2);
+    let flight_key = format!("models:{ns}:{}:{}:{}:{q_raw}", gen_tag.0, gen_tag.1, gen_tag.2);
     let engine = s.engine.clone();
     let cache = s.cache.clone();
     let permits = s.cpu_permits.clone();

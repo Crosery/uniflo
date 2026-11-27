@@ -2,6 +2,7 @@
 //! `GET /v1/messages`, `POST /v1/messages`, `POST /v1/messages/ack`,
 //! `GET /v1/messages/stream`, `GET /v1/messages/peers`.
 
+use crate::cache::CachedBody;
 use crate::{ApiError, AppState, with_seq};
 use axum::Json;
 use axum::extract::{Query, State};
@@ -51,7 +52,17 @@ pub(crate) async fn list(State(s): State<AppState>, Query(p): Query<InboxParams>
         undelivered: p.undelivered.unwrap_or(false),
         limit: p.limit.unwrap_or(50),
     };
-    match bus.inbox(&s.engine, &q) {
+    let res = if q.cwd.is_some() {
+        let engine = s.engine.clone();
+        let bus = bus.clone();
+        match tokio::task::spawn_blocking(move || bus.inbox(&engine, &q)).await {
+            Ok(r) => r,
+            Err(e) => Err(MessageError::Internal(e.to_string())),
+        }
+    } else {
+        bus.inbox(&s.engine, &q)
+    };
+    match res {
         Ok(resp) => with_seq(&s.engine, Json(resp).into_response()),
         Err(e) => map_err(e).into_response(),
     }
@@ -64,9 +75,12 @@ pub(crate) async fn send(State(s): State<AppState>, Json(req): Json<SendMessageR
     let mode = DeliveryMode::parse(req.deliver.as_deref());
     let wait_secs = req.wait_secs;
     let hop = req.hop.unwrap_or(0);
-    let mut resp = match bus.send(&s.engine, req) {
-        Ok(r) => r,
-        Err(e) => return map_err(e).into_response(),
+    let engine = s.engine.clone();
+    let bus_send = bus.clone();
+    let mut resp = match tokio::task::spawn_blocking(move || bus_send.send(&engine, req)).await {
+        Ok(Ok(r)) => r,
+        Ok(Err(e)) => return map_err(e).into_response(),
+        Err(e) => return ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     };
     if mode != DeliveryMode::Inbox
         && let Some(target_sess) = s.engine.session_arc(&resp.target.key)
@@ -85,9 +99,12 @@ pub(crate) async fn ack(State(s): State<AppState>, Json(req): Json<AckMessagesRe
     let Some(bus) = &s.messages else {
         return ApiError(StatusCode::SERVICE_UNAVAILABLE, UNAVAILABLE.into()).into_response();
     };
-    match bus.ack(&s.engine, req) {
-        Ok(resp) => with_seq(&s.engine, Json(resp).into_response()),
-        Err(e) => map_err(e).into_response(),
+    let engine = s.engine.clone();
+    let bus_ack = bus.clone();
+    match tokio::task::spawn_blocking(move || bus_ack.ack(&engine, req)).await {
+        Ok(Ok(resp)) => with_seq(&s.engine, Json(resp).into_response()),
+        Ok(Err(e)) => map_err(e).into_response(),
+        Err(e) => ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
 
@@ -105,15 +122,37 @@ pub(crate) async fn peers(State(s): State<AppState>, Query(p): Query<PeersParams
     let Some(bus) = &s.messages else {
         return ApiError(StatusCode::SERVICE_UNAVAILABLE, UNAVAILABLE.into()).into_response();
     };
+    let limit = p.limit.unwrap_or(25);
+    let flight_key = format!("peers:{:?}\0{:?}\0{:?}\0{:?}\0{limit}", p.pid, p.self_key, p.cwd, p.prefer_cwd);
     let engine = s.engine.clone();
     let bus = bus.clone();
-    let limit = p.limit.unwrap_or(25);
-    let resp = tokio::task::spawn_blocking(move || {
-        list_peers(&engine, &bus, p.pid, p.self_key.as_deref(), p.cwd.as_deref(), p.prefer_cwd.as_deref(), limit)
-    })
-    .await
-    .unwrap_or(uniflo_schema::PeersResponse { self_key: None, peers: Vec::new() });
-    with_seq(&s.engine, Json(resp).into_response())
+    let permits = s.cpu_permits.clone();
+    let res = s
+        .flights
+        .run(flight_key, move || async move {
+            let _permit = permits.acquire_owned().await.ok();
+            match tokio::task::spawn_blocking(move || {
+                list_peers(
+                    &engine,
+                    &bus,
+                    p.pid,
+                    p.self_key.as_deref(),
+                    p.cwd.as_deref(),
+                    p.prefer_cwd.as_deref(),
+                    limit,
+                )
+            })
+            .await
+            {
+                Ok(resp) => CachedBody::json(&resp),
+                Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+            }
+        })
+        .await;
+    match res {
+        Ok(body) => with_seq(&s.engine, body.into_response()),
+        Err((code, msg)) => ApiError(code, msg).into_response(),
+    }
 }
 
 #[derive(Deserialize)]

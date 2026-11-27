@@ -75,6 +75,9 @@ struct AppState {
     /// Caps concurrent CPU-heavy `spawn_blocking` tasks so bursts of cache-miss fuzzy/usage/FTS
     /// queries never starve Tokio worker threads serving `/v1/health`, cached lists, and streams.
     cpu_permits: Arc<tokio::sync::Semaphore>,
+    /// Caps concurrent per-session disk reads (`events`, `around`, `session_usage`, `trajectory`)
+    /// so bursts across many distinct keys cannot flood the blocking thread pool.
+    io_permits: Arc<tokio::sync::Semaphore>,
 }
 
 /// Optional services behind the router; a missing one answers 503.
@@ -96,6 +99,7 @@ pub fn router_with_fts(engine: Arc<Engine>, guard: GuardOptions, fts: Option<Arc
 
 pub fn router_with(engine: Arc<Engine>, guard: GuardOptions, services: Services) -> Router {
     let cpu_budget = std::thread::available_parallelism().map_or(4, |n| n.get().saturating_sub(2).clamp(4, 8));
+    let io_budget = (cpu_budget * 2).clamp(8, 16);
     let state = AppState {
         engine,
         fts: services.fts,
@@ -105,6 +109,7 @@ pub fn router_with(engine: Arc<Engine>, guard: GuardOptions, services: Services)
         cache: Arc::new(ResponseCache::default()),
         flights: Arc::new(Singleflight::default()),
         cpu_permits: Arc::new(tokio::sync::Semaphore::new(cpu_budget)),
+        io_permits: Arc::new(tokio::sync::Semaphore::new(io_budget)),
     };
     let guard = Arc::new(guard);
     Router::new()
@@ -250,7 +255,7 @@ async fn sessions(State(s): State<AppState>, Query(p): Query<ListParams>) -> Res
                 let list: Vec<_> = hits.iter().map(|h| h.session).collect();
                 if ndjson { Ok(CachedBody::ndjson(list)) } else { CachedBody::json(&list) }
             };
-            let out = if has_text {
+            let out = if has_text || limit > 500 {
                 let _permit = permits.acquire_owned().await.ok();
                 match tokio::task::spawn_blocking(compute).await {
                     Ok(r) => r,
@@ -305,9 +310,11 @@ async fn events(State(s): State<AppState>, Path(key): Path<String>, Query(p): Qu
     let q = HistoryQuery { before: p.before, limit };
     let flight_key = format!("ev:{key}:{limit}:{:?}:{oldest}:{max}:{ndjson}", p.before);
     let engine = s.engine.clone();
+    let permits = s.io_permits.clone();
     let res = s
         .flights
         .run(flight_key, move || async move {
+            let _permit = permits.acquire_owned().await.ok();
             let k = key.clone();
             let page = tokio::task::spawn_blocking(move || {
                 let (mut evs, next_before) =

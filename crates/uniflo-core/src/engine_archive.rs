@@ -74,6 +74,7 @@ impl Engine {
         let key_arc: Arc<str> = Arc::from(session.key.as_str());
         let mut e = Entry {
             key_arc,
+            rev: self.state_gen.load(Ordering::Relaxed),
             session: Arc::new(session),
             tracker_since: tracker.since,
             turn_ended: false,
@@ -237,6 +238,8 @@ impl Engine {
             }
             u.dirty = true;
             self.note_usage_change(&u);
+            self.sync_counts(&st);
+            self.bump_membership();
             self.bump_state();
         }
         self.dirty.store(true, Ordering::Relaxed);
@@ -268,6 +271,8 @@ impl Engine {
             }
             u.dirty = true;
             self.note_usage_change(&u);
+            self.sync_counts(&st);
+            self.bump_membership();
             self.bump_state();
         }
         self.dirty.store(true, Ordering::Relaxed);
@@ -305,6 +310,8 @@ impl Engine {
             if !out.is_empty() {
                 u.dirty = true;
                 self.note_usage_change(&u);
+                self.sync_counts(&st);
+                self.bump_membership();
                 self.bump_state();
             }
         }
